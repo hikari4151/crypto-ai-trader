@@ -101,7 +101,18 @@ class AIClient:
         # 长生命周期 HTTP 连接（按事件循环缓存）：连接复用避免每次请求 TCP+TLS 握手。
         # 后台线程（AI 任务）与主循环共用同一 AIClient，httpx client 绑定创建时的
         # 事件循环，故按 loop 分开缓存；close() 在进程退出时统一关闭。
-        self._http_clients: dict[int, httpx.AsyncClient] = {}
+        # 键用 loop 对象本身（弱引用语义由 id 派生）：曾用 id(loop)，旧 loop 被 GC 后
+        # 新 loop 可复用同一 id → 取到绑定已关闭循环的 client → 随机 Event loop is closed
+        self._http_clients: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]] = {}
+
+    async def close(self) -> None:
+        """关闭全部 HTTP 连接（进程退出时调用）。"""
+        for _loop, c in self._http_clients.values():
+            try:
+                await c.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+        self._http_clients.clear()
 
     def invalidate_cache(self) -> None:
         """配置变更后清空缓存。"""
@@ -112,20 +123,13 @@ class AIClient:
         """获取当前事件循环的 HTTP 客户端（惰性创建，连接复用）。"""
         loop = asyncio.get_running_loop()
         key = id(loop)
-        c = self._http_clients.get(key)
-        if c is None:
+        entry = self._http_clients.get(key)
+        # 校验 loop 身份：旧 loop 被 GC 后新 loop 可能复用同一 id
+        if entry is None or entry[0] is not loop or entry[1].is_closed:
             c = httpx.AsyncClient(timeout=httpx.Timeout(90.0))
-            self._http_clients[key] = c
-        return c
-
-    async def close(self) -> None:
-        """关闭全部 HTTP 连接（进程退出时调用）。"""
-        for c in self._http_clients.values():
-            try:
-                await c.aclose()
-            except Exception:  # noqa: BLE001
-                pass
-        self._http_clients.clear()
+            self._http_clients[key] = (loop, c)
+            return c
+        return entry[1]
 
     async def _load_config(self) -> dict:
         """读取 AI 配置：优先数据库 KV，其次 .env 默认。"""

@@ -157,6 +157,7 @@ class TradingEngine:
             log.warning("[engine] 恢复每日盈亏失败: %s", e)
 
         self.hub = MarketDataHub(self.exchange_id, [self.symbol], [self.timeframe], self.bus)
+        self._strategy_lock = asyncio.Lock()   # 策略切换/参数热更新 vs K 线处理互斥
         self.running = True
         self._tasks = [
             asyncio.create_task(self.hub.run(), name="hub"),
@@ -224,15 +225,20 @@ class TradingEngine:
             self.risk._add_price_sample(price)
 
     async def _live_balance_cached(self) -> dict:
-        """实盘余额缓存（30 秒刷新），避免每根K线都打 REST。"""
+        """实盘余额缓存（30 秒刷新），避免每根K线都打 REST。
+
+        失败时保留上次成功的缓存：曾清空为 {}，导致 position=0 → 风控
+        "平仓豁免"判定失效，止损卖单在冷却规则下再次被拦截（行情剧烈、
+        交易所限流概率最高的场景）。缓存陈旧的风险远小于丢持仓口径。
+        """
         now = time.time()
         if now - self._live_balance_ts > 30:
             try:
                 self._live_balance = await self.exchange.fetch_balance() if self.exchange else {}
                 self._live_balance_ts = now
             except Exception as e:  # noqa: BLE001
-                log.warning("[engine] 获取实盘余额失败: %s", e)
-                self._live_balance = {}
+                # 保留上次成功缓存，不清空
+                log.warning("[engine] 获取实盘余额失败(保留旧缓存): %s", e)
         return self._live_balance
 
     async def _on_candle(self, event: Event) -> None:
@@ -241,6 +247,13 @@ class TradingEngine:
             await self._on_candle_locked(event)
 
     async def _on_candle_locked(self, event: Event) -> None:
+        # 策略锁：select_strategy/update_strategy_params 与 K 线处理整段互斥。
+        # 曾无锁——切换策略可在 on_candle 与 on_fill 之间发生：旧策略信号配新策略
+        # on_fill（_entry 成本基被污染），参数热更新读到混合参数
+        async with self._strategy_lock:
+            await self._on_candle_locked_inner(event)
+
+    async def _on_candle_locked_inner(self, event: Event) -> None:
         snap = event.payload.get("snapshot", {})
         if not snap or not self.running:
             return
@@ -295,12 +308,20 @@ class TradingEngine:
             self._trade_times.append(time.time())
             self.strategy.on_fill(symbol, signal.side, fill["price"])
             if signal.side == "sell":
+                # 纸面模式用账户加权平均成本（分批建仓/部分减仓 pnl 准确）；
+                # 曾用策略单点 entry_price（最后一次买入价被覆盖后 pnl 虚高，
+                # 污染每日盈亏/连续亏损冷却/AI 复盘），与回测 FIFO 口径不一致
+                cost_price = None
+                if self.paper and self.paper_account:
+                    cost_price = self.paper_account.positions.get(symbol, {}).get("avg_price")
+                if cost_price is None:
+                    cost_price = entry_price
                 # 无入场价跟踪的策略（如 grid 不维护 _entry）无法算真实盈亏：
                 # 置 0 而非记 -fee，否则每日盈亏被手续费污染、连续亏损冷却误触发
-                if entry_price is None:
+                if cost_price is None:
                     pnl = 0.0
                 else:
-                    pnl = (fill["price"] - entry_price) * fill["qty"] - fill["fee"]
+                    pnl = (fill["price"] - cost_price) * fill["qty"] - fill["fee"]
                 self._daily_pnl += pnl
                 # 记录平仓盈亏给风控（连续亏损冷却判断 + 每日盈亏持久化）
                 await self.risk.record_trade(pnl, signal.reason)
@@ -536,13 +557,15 @@ class TradingEngine:
                 "total_pnl": round(sum(pnls), 4), "recent_pnl": round(sum(pnls[-10:]), 4)}
 
     # ---------------- 策略管理 ----------------
-    def select_strategy(self, name: str) -> dict:
-        self.strategy = get_strategy(name)
-        log.info("切换策略: %s", name)
-        return {"name": name, "params": self.strategy.params}
+    async def select_strategy(self, name: str) -> dict:
+        async with self._strategy_lock:
+            self.strategy = get_strategy(name)
+            log.info("切换策略: %s", name)
+            return {"name": name, "params": self.strategy.params}
 
-    def update_strategy_params(self, params: dict) -> dict:
-        return {"params": self.strategy.update_params(params)}
+    async def update_strategy_params(self, params: dict) -> dict:
+        async with self._strategy_lock:
+            return {"params": self.strategy.update_params(params)}
 
     def list_strategies(self) -> list[dict]:
         return list_strategies()

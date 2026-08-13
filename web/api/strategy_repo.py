@@ -125,11 +125,11 @@ async def repo_apply(body: ApplyIn, engine=Depends(get_engine)):
         from strategies import get_strategy
         try:
             get_strategy(t["name"])  # 验证存在
-            engine.select_strategy(t["name"])
+            await engine.select_strategy(t["name"])
         except ValueError:
             from strategies.repository import register_repository_strategies
             register_repository_strategies()
-            engine.select_strategy(t["name"])
+            await engine.select_strategy(t["name"])
         return {"ok": True, "strategy": t["name"], "params": t["default_params"]}
     except Exception as e:  # noqa: BLE001
         log.exception("[strategy-repo] 应用策略失败")
@@ -163,7 +163,7 @@ async def repo_rename(body: RenameIn, db=Depends(get_db), engine=Depends(get_eng
                 await s.commit()
         # 若当前正用该策略，引擎热切换
         if engine.strategy.name == old:
-            engine.select_strategy(new)
+            await engine.select_strategy(new)
         return {"ok": True, "old": old, "new": new}
     except Exception as e:  # noqa: BLE001
         log.exception("[strategy-repo] 改名失败")

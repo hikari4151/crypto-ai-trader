@@ -12,7 +12,11 @@ KEY_FILE = DATA_DIR / "master.key"
 
 
 def _master_key() -> bytes:
-    master = os.environ.get("MASTER_KEY", "")
+    # 优先级：.env 配置的 MASTER_KEY（经 settings 加载）→ 环境变量 → 本地密钥文件 → 自动生成。
+    # 曾只读 os.environ：pydantic-settings 不会把 .env 写进 os.environ，
+    # 用户按文档配置 MASTER_KEY 后实际仍用自动生成的 master.key，换机/丢文件后全部密文不可解。
+    from config.settings import settings
+    master = settings.master_key.strip() or os.environ.get("MASTER_KEY", "")
     if not master:
         # 优先读本地主密钥文件
         if KEY_FILE.exists():

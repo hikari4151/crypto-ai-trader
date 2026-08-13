@@ -433,7 +433,7 @@ async def use_model(name: str, engine=Depends(get_engine)):
             "risk_tips": ["训练分布外可能失效"],
             "created_by": "drl_train", "version": "v1.0",
         })
-        engine.select_strategy(strategy_name)
+        await engine.select_strategy(strategy_name)
         return {"ok": True, "strategy": strategy_name, "model": name}
     except Exception as e:  # noqa: BLE001
         log.exception("[drl] 应用模型失败")

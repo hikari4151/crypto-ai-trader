@@ -39,12 +39,14 @@ RiskManager ──> OrderManager ──> ccxt REST / PaperAccount ──> SQLite
 
 ### 1. 安装
 
+要求 **Python 3.11+**（3.13 已验证）。
+
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-要完全复现开发环境，可用锁定版本清单：
+要完全复现开发环境，可用锁定版本清单（含 CUDA/Windows 专用包，跨平台请按需裁剪）：
 
 ```bash
 pip install -r requirements-lock.txt
@@ -54,11 +56,12 @@ pip install -r requirements-lock.txt
 
 ```bash
 cp .env.example .env      # 编辑：MASTER_KEY / DATABASE_URL / 模式等
-# config/config.yaml 里可调默认交易对、周期、AI 任务频率、默认风控
+# config/config.yaml 可调默认交易对、周期、AI 任务频率等启动级默认值
+# （键名与 config/settings.py 字段同名；风控与回测参数请直接在 Web 界面配置）
 ```
 
 - **纸面模式（默认）**：`PAPER_TRADING=true`，无需任何交易所密钥即可体验全流程。
-- **实盘模式**：`PAPER_TRADING=false`，并在 Web 界面「AI 设置」页填写交易所密钥（加密存储），或在 `.env` 中注入。
+- **实盘模式**：`PAPER_TRADING=false`，并在 Web 界面「AI 设置」页填写交易所密钥（Fernet 加密存储）。
 
 ### 3. 启动
 
@@ -115,8 +118,11 @@ class MyStrategy(Strategy):
 单元/集成测试位于 `tests/`，运行：
 
 ```bash
+pip install pytest
 pytest
 ```
+
+核心回归覆盖：双回测引擎逐笔一致性（`test_backtest_engine_consistency.py`）、风控防线（NaN/Infinity 拒绝、平仓豁免冷却、止损放行，`test_risk_guards.py`）。
 
 ## 安全说明
 
@@ -146,3 +152,5 @@ pytest
 | `data/` | 运行时数据（日志、数据库、模型，已被 gitignore） |
 
 > 免责声明：本项目仅供学习与研究，加密货币交易风险极高，使用前请充分测试并自担风险。
+>
+> **License: MIT**（见 [LICENSE](LICENSE)）

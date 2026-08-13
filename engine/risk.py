@@ -289,8 +289,8 @@ class RiskManager:
             log.warning("[risk] 连续 %d 笔亏损，触发 %s 分钟冷却", losses, rules.get("cooldown_minutes", 15))
             return False, f"连续 {losses} 笔亏损，触发冷却 {rules.get('cooldown_minutes', 15)} 分钟"
 
-        # 3) 最小订单金额
-        if order_value < rules["min_order_value_usd"]:
+        # 3) 最小订单金额（仅限新开仓：小仓位止损单必须能离场）
+        if order_value < rules["min_order_value_usd"] and not closing:
             return False, f"订单金额 ${order_value:.2f} 低于最小限额 ${rules['min_order_value_usd']:.2f}"
 
         # 4) 每日最大亏损（仅限新开仓，保证持仓可随时离场）

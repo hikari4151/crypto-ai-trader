@@ -52,7 +52,12 @@ async def lifespan(app: FastAPI):
     app.state.bus = EventBus()
     app.state.engine = TradingEngine(db, app.state.bus)
     if settings.trading_auto_start:
-        await app.state.engine.start()
+        # 自动启动失败（实盘密钥错误/网络不可达等）仅告警降级：
+        # 曾直接抛异常使整个 Web UI 起不来，连修复配置的页面都不可用
+        try:
+            await app.state.engine.start()
+        except Exception as e:  # noqa: BLE001
+            log.exception("[main] 交易引擎自动启动失败，降级为停止状态（可在界面修复配置后手动启动）: %s", e)
     if settings.api_token:
         log.info("API 令牌来自 .env API_TOKEN（前 N 位 %s****）", API_TOKEN[:6])
     else:

@@ -1,4 +1,5 @@
 """订单执行：纸面模式本地撮合 / 实盘模式走交易所，均记录成交到数据库。"""
+import asyncio
 import logging
 import time
 from typing import Any, Optional
@@ -106,12 +107,18 @@ class OrderManager:
                 signal.symbol, signal.order_type, signal.side,
                 qty, signal.limit_price,
             )
-            # 简化：市价单直接视为成交；限价单轮询一次状态
+            # 简化：市价单直接视为成交；限价单轮询状态（重试 3 次，间隔 1s——
+            # 曾单次 fetch_order，网络抖动时订单已成交却返回 None，
+            # 系统无 Trade 记录/on_fill 不触发，下次同向信号重复下单）
             status = order.get("status", "closed")
             if status != "closed":
                 oid = order.get("id")
                 if oid:
-                    order = await self.exchange.fetch_order(oid, signal.symbol)
+                    for _ in range(3):
+                        order = await self.exchange.fetch_order(oid, signal.symbol)
+                        if order.get("status") == "closed" or float(order.get("filled") or 0.0) > 0:
+                            break
+                        await asyncio.sleep(1.0)
             filled = float(order.get("filled") or order.get("amount") or 0.0)
             price = float(order.get("average") or order.get("price") or 0.0)
             fee_info = order.get("fee") or {}

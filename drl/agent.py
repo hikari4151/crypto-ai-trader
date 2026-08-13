@@ -313,12 +313,16 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         try:
             fx = FactorExecutor(factor_expr)
             vals = fx.eval(df).astype(float).to_numpy(float)
-            vals = np.nan_to_num(vals, nan=0.0)
-            # 标准化（训练段拟合均值/方差，防统计泄漏）
-            mu = np.nanmean(vals[:n_train]) if n_train > 0 else 0.0
-            sd = np.nanstd(vals[:n_train]) + 1e-8
-            factor_mu, factor_sd = float(mu), float(sd)
+            # 标准化统计量只在训练段【有效值】上拟合：
+            # 曾先 nan_to_num(0) 再拟合，训练段大量 NaN 时 mu 被 0 污染；
+            # 缺失值标准化后按 0（均值）填充，避免 NaN 进入状态向量
+            train_vals = vals[:n_train]
+            valid = train_vals[~np.isnan(train_vals)]
+            mu = float(valid.mean()) if len(valid) else 0.0
+            sd = float(valid.std()) + 1e-8
+            factor_mu, factor_sd = mu, sd
             vals = (vals - mu) / sd
+            vals = np.nan_to_num(vals, nan=0.0)
             extra_factors_all = vals.reshape(-1, 1)
             extra_factors_val = vals[n_train:n_train + n_val].reshape(-1, 1) if len(val_df) == n_val else None
             extra_factors_oos = vals[n_train + n_val:].reshape(-1, 1) if len(oos_df) > 0 else None

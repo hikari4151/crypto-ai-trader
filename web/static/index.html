@@ -1817,7 +1817,7 @@
               </div>
               <div>
                 <label class="mac-label mb-0 text-[10px]">K线数量</label>
-                <input type="number" v-model.number="drlOos.limit" class="mac-input" style="width:90px" min="50">
+                <input type="number" v-model.number="drlOos.limit" class="mac-input" style="width:90px" min="100">
               </div>
               <div v-if="drlOos.data_source==='csv'">
                 <label class="mac-label mb-0 text-[10px]">CSV路径</label>
@@ -2652,9 +2652,18 @@ createApp({
               if (p.error) { toast('回测失败：'+p.error,'error'); btRunning.value=false; btLive.value.running=false; return; }
               if (p.done) {
                 btLive.value.running=false; btLive.value.pct=100; btLive.value.done=true;
-                // 完成后一次性拉最终结果
-                const r = await api('/backtest/results/'+d.task_id);
-                if (r.metrics.error) { toast('回测失败：'+r.metrics.error,'error'); btRunning.value=false; return; }
+                // worker 先置 done 后落库：立即拉 results 可能拿到 running 占位行，
+                // 有界重试直到落库完成（曾只拉一次 → 结果页空白/历史永远 running）
+                let r = null;
+                for (let k = 0; k < 6; k++) {
+                  r = await api('/backtest/results/'+d.task_id);
+                  if (r.metrics && !r.metrics.error && r.metrics.status!=='running' && r.metrics.backtest_engine) break;
+                  await new Promise(r2=>setTimeout(r2,400));
+                }
+                if (!r || (r.metrics && r.metrics.error)) {
+                  toast('回测失败：'+(r && r.metrics && r.metrics.error || '结果未落库'),'error');
+                  btRunning.value=false; return;
+                }
                 btResult.value=r; renderEquity(btChart, r.equity_curve.map((v,i)=>[i, v]), 'bt'); loadBtHistory();
                 // 完成后自动切到「回测结果」步骤并滚动
                 btStep.value = 'result';

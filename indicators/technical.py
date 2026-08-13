@@ -179,7 +179,7 @@ def compute_latest(ohlcv: list) -> dict[str, Any]:
         "bb_upper": _nan(up[last]),
         "bb_mid": _nan(mid[last]),
         "bb_lower": _nan(low[last]),
-        "volume": float(vols[-5:].sum()),
+        "volume": float(vols[-1]),
         "vol_ratio": vol_ratio,
         "high": float(highs[-1]),
         "low": float(lows[-1]),

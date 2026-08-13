@@ -46,7 +46,7 @@ async def strategies(engine=Depends(get_engine)):
 @router.post("/strategies/select")
 async def select_strategy(body: StrategyIn, engine=Depends(get_engine)):
     try:
-        result = engine.select_strategy(body.name)
+        result = await engine.select_strategy(body.name)
         return {"ok": True, **result}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -54,4 +54,4 @@ async def select_strategy(body: StrategyIn, engine=Depends(get_engine)):
 
 @router.put("/strategies/params")
 async def update_params(body: ParamsIn, engine=Depends(get_engine)):
-    return {"ok": True, **engine.update_strategy_params(body.params)}
+    return {"ok": True, **await engine.update_strategy_params(body.params)}

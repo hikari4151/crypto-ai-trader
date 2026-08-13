@@ -1,10 +1,16 @@
-"""统一配置：从 .env + config/config.yaml 加载，非敏感默认值可被 Web 界面覆盖。"""
+"""统一配置：从 .env + config/config.yaml 加载（yaml 键名与字段同名，扁平结构）。
+
+非敏感默认值可被 Web 界面覆盖。优先级：环境变量 > .env > config.yaml > 代码默认。
+"""
 import logging
 import socket
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.sources import YamlConfigSettingsSource
 
 log = logging.getLogger(__name__)
 
@@ -41,26 +47,31 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                   dotenv_settings, file_secret_settings):
+        """注册 config/config.yaml 为配置源（曾仅声明 yaml_file 无 source，文件被静默忽略）。"""
+        return (init_settings, env_settings, dotenv_settings,
+                YamlConfigSettingsSource(settings_cls), file_secret_settings)
+
     # 安全
-    master_key: str = ""
+    master_key: str = ""       # 可选：固定主密钥（.env 配置），留空则自动生成 data/master.key
     # Web API 访问令牌：留空则启动时自动生成并打印到日志（前端通过 Cookie 自动携带）
     api_token: str = ""
-    # 数据库
-    database_url: str = "sqlite+aiosqlite:///./data/trader.db"
+    # 数据库（默认绝对路径，避免从其他目录启动时数据分裂到 CWD）
+    database_url: str = f"sqlite+aiosqlite:///{ROOT / 'data' / 'trader.db'}"
     # AI
     ai_provider: str = "openai"
     ai_base_url: str = "https://api.openai.com/v1"
     ai_api_key: str = ""
     ai_model: str = "gpt-4o-mini"
-    ai_temperature: float = 0.7
-    ai_max_tokens: int = 2048
     ai_max_retries: int = 3
     ai_rate_limit_rpm: int = 30
     ai_rate_limit_min_interval: float = 2.0
     # 交易
     paper_trading: bool = True
     log_level: str = "INFO"
-    log_dir: str = "./data/logs"
+    log_dir: str = str(ROOT / "data" / "logs")
     # Web
     web_host: str = "127.0.0.1"  # 默认仅本机访问；需要局域网访问时用 --host 0.0.0.0 或改 .env
     web_port: int = 8000
@@ -76,18 +87,7 @@ class Settings(BaseSettings):
     ai_market_analysis_interval: int = 600
     ai_optimize_interval: int = 86400
     ai_review_interval: int = 604800
-    ai_analysis_max_candles: int = 60
     default_strategy: str = "dual_ma"
-    # 风控默认值
-    risk_max_loss_per_trade_usd: float = 50.0
-    risk_max_daily_loss_usd: float = 200.0
-    risk_min_order_value_usd: float = 10.0
-    risk_max_trades_per_hour: int = 20
-    risk_max_position_pct: float = 0.9
-    # 回测默认值
-    bt_default_fee_rate: float = 0.001
-    bt_default_slippage: float = 0.0005
-    bt_default_start_cash: float = 10000.0
 
     @property
     def data_dir(self) -> Path:
@@ -96,19 +96,21 @@ class Settings(BaseSettings):
     @property
     def resolved_proxy(self) -> str:
         """实际生效的代理地址：
-        - 若 .env 显式配置且端口可连，直接使用；
-        - 否则自动探测本机常见代理端口。
+        - 显式配置：按 URL 的 host 探测（曾写死 127.0.0.1，远程代理被静默丢弃）；
+          可达性检查失败仅告警并回退自动探测，但显式配置仍优先返回。
+        - 留空：自动探测本机常见代理端口。
         """
         if self.proxy_url and self.proxy_url.strip():
             url = self.proxy_url.strip()
-            port = url.rsplit(":", 1)[-1]
-            if port.isdigit():
-                try:
-                    with socket.create_connection(("127.0.0.1", int(port)), timeout=0.4):
-                        return url
-                except OSError:
-                    log.warning("显式代理 %s 不可达，尝试自动探测", url)
-                    return probe_local_proxy()
+            try:
+                parts = urlsplit(url if "://" in url else "http://" + url)
+                host = parts.hostname or "127.0.0.1"
+                port = parts.port or 80
+                with socket.create_connection((host, int(port)), timeout=0.4):
+                    return url
+            except (OSError, ValueError):
+                log.warning("显式代理 %s 不可达（按 host 探测），回退自动探测", url)
+                return probe_local_proxy()
             return url
         return probe_local_proxy()
 

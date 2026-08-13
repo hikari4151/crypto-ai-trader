@@ -1,30 +1,24 @@
 # 非敏感运行参数（敏感信息一律走 .env 或 Web 界面加密存储）
-defaults:
-  exchange: binance
-  symbol: BTC/USDT
-  timeframe: 1h
-  start_cash_usdt: 10000.0
+# 键名与 config/settings.py 的 Settings 字段同名（扁平结构，大小写不敏感）。
+# 优先级：环境变量 > .env > 本文件 > 代码默认值。
+# 注：风控规则与回测默认参数请直接在 Web 界面配置（数据库持久化），
+# 本文件仅提供启动级默认值。
 
-trading:
-  auto_start: false            # 启动 Web 时是否自动开始交易循环
+# 默认交易参数
+default_exchange: binance
+default_symbol: BTC/USDT
+default_timeframe: 1h
+default_start_cash: 10000.0
+default_strategy: dual_ma
 
-ai_tasks:                      # AI 定时任务（秒）
-  market_analysis_interval: 600    # 每 10 分钟市场状态理解
-  optimize_interval: 86400         # 每天策略参数优化
-  review_interval: 604800          # 每周反思复盘
-  analysis_max_candles: 60         # 打包给 AI 的最近K线根数
+# 启动 Web 时是否自动开始交易循环
+trading_auto_start: false
 
-strategy:
-  default: dual_ma
+# AI 定时任务（秒）
+ai_market_analysis_interval: 600      # 每 10 分钟市场状态理解
+ai_optimize_interval: 86400           # 每天策略参数优化
+ai_review_interval: 604800            # 每周反思复盘
 
-risk:                          # 默认风控规则（可在界面动态修改）
-  max_loss_per_trade_usd: 50.0
-  max_daily_loss_usd: 200.0
-  min_order_value_usd: 10.0
-  max_trades_per_hour: 20
-  max_position_pct: 0.9
-
-backtest:
-  default_fee_rate: 0.001      # 0.1% 手续费
-  default_slippage: 0.0005     # 0.05% 滑点
-  default_start_cash: 10000.0
+# 网络代理（用于访问 OKX / Bitget / Bybit 等受限交易所）
+# 留空自动探测本机 Clash/V2Ray 端口；也可显式指定如 http://127.0.0.1:7890
+proxy_url: ""

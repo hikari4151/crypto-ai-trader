@@ -17,9 +17,33 @@ from engine.trading_engine import TradingEngine
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
+TOKEN_FILE = Path(settings.data_dir) / "api_token.txt"
 
-# API 访问令牌：.env 配置 API_TOKEN，未配置则启动时自动生成（同源前端经 Cookie 自动携带）
-API_TOKEN = settings.api_token or secrets.token_hex(16)
+
+def _load_or_create_token() -> str:
+    """API 令牌：.env 配置优先；否则持久化到 data/api_token.txt（重启复用）。
+
+    曾每次启动重新生成 → 重启后浏览器旧页面 Cookie 里的旧令牌全部 401，
+    用户表现为"运行报错"（所有接口未授权）。
+    """
+    if settings.api_token:
+        return settings.api_token
+    try:
+        TOKEN_FILE.parent.mkdir(exist_ok=True)
+        if TOKEN_FILE.exists():
+            tok = TOKEN_FILE.read_text(encoding="utf-8").strip()
+            if len(tok) >= 16:
+                return tok
+        tok = secrets.token_hex(16)
+        TOKEN_FILE.write_text(tok, encoding="utf-8")
+        return tok
+    except Exception as e:  # noqa: BLE001
+        log.warning("[main] 令牌持久化失败，使用临时令牌: %s", e)
+        return secrets.token_hex(16)
+
+
+# API 访问令牌：.env 配置 API_TOKEN，未配置则自动生成并持久化（同源前端经 Cookie 自动携带）
+API_TOKEN = _load_or_create_token()
 TOKEN_COOKIE = "zx_api_token"
 
 
@@ -61,7 +85,7 @@ async def lifespan(app: FastAPI):
     if settings.api_token:
         log.info("API 令牌来自 .env API_TOKEN（前 N 位 %s****）", API_TOKEN[:6])
     else:
-        log.warning("未配置 API_TOKEN，已自动生成（前 N 位 %s****）；建议在 .env 中固定配置", API_TOKEN[:6])
+        log.info("API 令牌已自动生成并持久化（data/api_token.txt，前 N 位 %s****）；重启保持不变，建议在 .env 固定配置", API_TOKEN[:6])
     log.info("Web 服务已启动: http://%s:%s", settings.web_host, settings.web_port)
     yield
     await app.state.engine.stop()

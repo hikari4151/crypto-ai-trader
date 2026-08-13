@@ -24,12 +24,20 @@ REM --- Default port ---
 set PORT=8000
 if not "%1"=="" set PORT=%1
 
-REM --- Check if port is in use (exact match) ---
-".venv\Scripts\python.exe" -c "import socket,sys; s=socket.socket(); s.settimeout(0.4); r=s.connect_ex(('127.0.0.1',int(sys.argv[1]))); s.close(); sys.exit(0 if r==0 else 1)" !PORT!
-if !errorlevel!==0 (
-    echo [INFO] Port !PORT! is in use, switching to 8001...
-    set PORT=8001
+REM --- Find first free port in 8000-8010 (port in use → try next) ---
+for /L %%P in (!PORT!,1,8010) do (
+    "%.venv\Scripts\python.exe" -c "import socket,sys; s=socket.socket(); s.settimeout(0.4); r=s.connect_ex(('127.0.0.1',int(sys.argv[1]))); s.close(); sys.exit(0 if r==0 else 1)" %%P
+    if !errorlevel!==1 (
+        set PORT=%%P
+        goto :port_found
+    )
 )
+echo [ERROR] Ports !PORT!-8010 all in use. Close other instances and retry.
+pause
+exit /b 1
+
+:port_found
+if not "!PORT!"=="8000" echo [INFO] Port 8000 in use, using port !PORT! instead.
 
 echo [1/2] Starting web server on port !PORT! ...
 echo       URL: http://localhost:!PORT!

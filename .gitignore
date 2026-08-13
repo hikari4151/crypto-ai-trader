@@ -10,6 +10,7 @@ venv/
 .env
 data/master.key
 data/*.key
+data/api_token.txt
 
 # 数据库
 data/*.db

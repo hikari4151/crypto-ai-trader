@@ -67,13 +67,16 @@ class PriceActionStrategy(Strategy):
                 return Signal(symbol, "sell", 1.0, strategy=self.name, reason=f"止盈 {chg:.2%}")
             if p.get("use_sr_stop") and sr.get("resistance") and price >= sr["resistance"]:
                 return Signal(symbol, "sell", 1.0, strategy=self.name, reason="触及阻力位获利了结")
+            # 持仓期间也推进前收盘基线：曾在此提前 return 不更新 _prev_close，
+            # 平仓后首根 K 线用数根前的旧收盘做"刚突破"判定，条件几乎恒成立 → 无新鲜突破确认就重新入场
+            self._prev_close = price
             return None
 
         # ---- 空仓入场 ----
-        if position > 0:
-            return None
         prev_close = self._prev_close
         self._prev_close = price
+        if position > 0:
+            return None
         mode = p.get("mode", "breakout")
         if mode == "breakout":
             # 突破语义修正：判断"价格刚上穿近期阻力位"。

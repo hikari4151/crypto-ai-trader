@@ -11,6 +11,7 @@
 通过 strategy_params["model_path"] 指定训练产物模型文件。
 被回测引擎（fast_engine / engine）与实盘引擎（TradingEngine）共用。
 """
+import json
 import logging
 import os
 from typing import Any, Optional
@@ -53,6 +54,9 @@ class RLAdaptiveStrategy(Strategy):
         self._lows: list[float] = []
         self._entry = None
         self._agent = None
+        self._factor_mu: Optional[float] = None   # 模型文件内的因子标准化统计量
+        self._factor_sd: Optional[float] = None
+        self._factor_expr_from_model: str = ""    # 模型文件内记录的训练表达式
         self._state_dim = 15  # 13 特征 + 持仓比例 + 浮动盈亏（+因子列时动态调整）
         self._n_actions = len(ACTION_BUCKETS) if _DRL_AVAILABLE else 5
 
@@ -71,14 +75,32 @@ class RLAdaptiveStrategy(Strategy):
             self._agent = ACAgent.load(path)
             self._state_dim = self._agent.state_dim
             self._n_actions = self._agent.n_actions
+            # 读取模型文件内的因子标准化统计量（训练段拟合）——
+            # 部署端必须用同一 mu/sd 标准化因子值，与训练状态分布一致
+            self._factor_mu = None
+            self._factor_sd = None
+            self._factor_expr_from_model = ""
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    md = json.load(f)
+                if "factor_mu" in md and "factor_sd" in md:
+                    self._factor_mu = float(md["factor_mu"])
+                    self._factor_sd = float(md["factor_sd"])
+                self._factor_expr_from_model = str(md.get("factor_expression", "") or "")
+            except Exception as e:  # noqa: BLE001
+                log.warning("[rl] 模型元数据读取失败: %s", e)
             return True
         except Exception as e:  # noqa: BLE001
             log.warning("[rl] 模型加载失败: %s", e)
             return False
 
     def _factor_value(self) -> Optional[float]:
-        """在滚动缓冲上计算因子表达式（与训练注入的因子列同口径），返回最新值。"""
-        expr = str(self.params.get("factor_expression", "") or "").strip()
+        """在滚动缓冲上计算因子表达式，返回标准化后的最新值。
+
+        标准化统计量取模型文件（训练段拟合的 mu/sd）；旧模型无统计量时
+        返回原始值（保持旧行为）。表达式优先取模型内记录的（部署一致性）。
+        """
+        expr = str(self.params.get("factor_expression", "") or "").strip() or self._factor_expr_from_model
         if not expr:
             return None
         if len(self._closes) < 5:
@@ -91,7 +113,13 @@ class RLAdaptiveStrategy(Strategy):
         try:
             s = FactorExecutor(expr).eval(df).astype(float)
             v = s.iloc[-1]
-            return None if v is None or v != v else float(v)  # NaN 视为无效
+            if v is None or v != v:  # NaN 视为无效
+                return None
+            v = float(v)
+            # 模型带训练统计量 → 同一口径标准化（旧模型无统计量 → 原始值）
+            if self._factor_mu is not None and self._factor_sd:
+                v = (v - self._factor_mu) / self._factor_sd
+            return v
         except Exception:  # noqa: BLE001
             return None
 
@@ -176,15 +204,22 @@ class RLAdaptiveStrategy(Strategy):
         zone = float(self.params.get("buy_zone", 0.02))
         diff = target - pos_ratio
 
-        if diff > zone and equity > 0:
-            # 加仓到目标（entry 只在成交回调 on_fill 中更新，避免信号被风控拦截时状态脱节）
-            size = min(1.0, diff / max(zone, 1e-6) * 0.5)  # 分批补，避免一次性过猛
-            return Signal(symbol, "buy", size_pct=max(size, 0.05),
+        if diff > zone and equity > 0 and cash > 0:
+            # 目标仓位差 diff（占总权益比例）→ 按现金折算下单比例。
+            # 曾误用 diff/zone（同量纲相除）：zone=0.02 时差 0.02 就下 50% 现金、
+            # 差 0.04 就满仓，目标仓位档位形同虚设（0%~100% 反复打满）。
+            # 现为"补足一半仓位差"：差 20% 仓位 → 补 10% 现金。
+            buy_value = min(diff * equity, cash)
+            size = max(min(1.0, buy_value / max(cash, 1e-9)), 0.05)
+            # 显式传 qty：回测引擎卖出忽略 size_pct（恒全平），实盘/纸面按比例——
+            # 传 qty 保证回测与实盘部分加/减仓口径一致
+            return Signal(symbol, "buy", qty=buy_value / price, size_pct=size,
                           strategy=self.name,
                           reason=f"RL加仓至{int(target*100)}%")
         if diff < -zone and position > 0:
-            size = min(1.0, abs(diff) / max(zone, 1e-6) * 0.5)
-            return Signal(symbol, "sell", size_pct=max(size, 0.05),
+            sell_value = min(abs(diff) * equity, position * price)
+            qty = sell_value / price
+            return Signal(symbol, "sell", qty=max(qty, 0.0), size_pct=1.0,
                           strategy=self.name,
                           reason=f"RL减仓至{int(target*100)}%")
         return None

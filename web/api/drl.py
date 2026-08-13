@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.database import Database
 from web.deps import get_db, get_engine, resolve_data_path
@@ -25,6 +25,12 @@ router = APIRouter(prefix="/api/drl", tags=["drl"])
 MODEL_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "models"
 PROGRESS_LOCK = threading.Lock()
 _TRAINING: dict[int, dict] = {}
+
+
+def _now() -> str:
+    """UTC ISO 时间戳（曾引用 factors._now 造成 NameError，独立定义）。"""
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def _model_path(name: str) -> Path:
@@ -43,7 +49,7 @@ class TrainIn(BaseModel):
     exchange: str = "binance"
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
-    limit: int = 1500
+    limit: int = Field(default=1500, ge=100, le=5000)   # 封顶防任意大值阻塞
     episodes: int = 80
     hidden: list[int] = [64, 64]
     lr_actor: float = 0.004
@@ -276,6 +282,11 @@ async def start_training(body: TrainIn, db=Depends(get_db)):
                     "best_val_ret": result.get("best_val_ret"),
                     "oos_report": result.get("oos_report"),
                 }
+                # 因子列标准化统计量（训练段拟合）——部署端 rl_adaptive 用同一
+                # mu/sd 标准化，否则喂原始因子值给模型，状态分布与训练完全不同
+                _md["factor_expression"] = result.get("factor_expression", "")
+                _md["factor_mu"] = float(result.get("factor_mu", 0.0))
+                _md["factor_sd"] = float(result.get("factor_sd", 1.0))
                 with open(model_path, "w", encoding="utf-8") as f:
                     json.dump(_md, f, ensure_ascii=False)
             except Exception as e:  # noqa: BLE001
@@ -437,9 +448,9 @@ async def evaluate_model(name: str):
         raise HTTPException(status_code=404, detail=f"模型 {name} 不存在")
     from drl import ACAgent, evaluate_agent
     from backtest.data_loader import generate_demo
-    agent = ACAgent.load(str(path))
-    df = generate_demo(timeframe="1h")
-    ev = evaluate_agent(agent, df)
+    # 模型加载 + 完整 episode 评估放后台线程，避免冻结事件循环
+    ev = await asyncio.to_thread(
+        lambda: evaluate_agent(ACAgent.load(str(path)), generate_demo(timeframe="1h")))
     return {"ok": True, **ev}
 
 
@@ -449,7 +460,7 @@ class OosEvalIn(BaseModel):
     exchange: str = "binance"
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
-    limit: int = 500                   # 评估用K线数量（时间段长度）
+    limit: int = Field(default=500, ge=100, le=5000)   # 评估用K线数量（时间段长度）
     csv_path: str = ""
     since: str = ""                    # 可选起始时间 ISO 字符串，空则取最近 limit 根
 
@@ -477,7 +488,7 @@ async def evaluate_oos(name: str, body: OosEvalIn):
 
     from drl import ACAgent, evaluate_agent
     from drl.env import run_episode, TradingEnv
-    from backtest.data_loader import generate_demo, load_csv
+    from backtest.data_loader import generate_demo, load_csv, load_from_exchange
 
     agent = ACAgent.load(str(path))
 
@@ -489,15 +500,15 @@ async def evaluate_oos(name: str, body: OosEvalIn):
     except Exception:  # noqa: BLE001
         pass
 
-    # 1) 加载评估行情
+    # 1) 加载评估行情（demo/csv 的 pandas 解析放后台线程；exchange 源 await）
     try:
         if body.data_source == "demo":
-            df = generate_demo(n=body.limit, timeframe=body.timeframe)
+            df = await asyncio.to_thread(generate_demo, n=body.limit, timeframe=body.timeframe)
         elif body.data_source == "csv":
             if not body.csv_path:
                 raise HTTPException(status_code=400, detail="CSV 数据源需要 csv_path")
             csv_resolved = resolve_data_path(body.csv_path)
-            df = load_csv(str(csv_resolved))
+            df = await asyncio.to_thread(load_csv, str(csv_resolved))
         else:
             from datetime import datetime, timezone
             since = None
@@ -514,11 +525,11 @@ async def evaluate_oos(name: str, body: OosEvalIn):
         raise HTTPException(status_code=400,
                             detail=f"评估行情数据过少（仅{len(df)}根），请换更长时间段或更大 limit")
 
-    # 2) 确定性评估（贪心策略，无探索噪声）
+    # 2) 确定性评估（贪心策略，无探索噪声；完整 episode 放后台线程）
     cfg = {"start_cash": 10000.0, "fee_rate": 0.001}
     env = TradingEnv(df, start_cash=10000.0, fee_rate=0.001,
                      vol_penalty=0.0, cost_scale=1.0)
-    traj = run_episode(env, lambda s: agent.greedy_action(s))
+    traj = await asyncio.to_thread(run_episode, env, lambda s: agent.greedy_action(s))
     eqs = [info.get("equity") for info in traj.get("infos", []) if info.get("equity") is not None]
     stats = _equity_stats(eqs)
 

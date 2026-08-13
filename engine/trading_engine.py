@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import math
 import time
 from typing import Any, Optional
 
@@ -89,15 +90,22 @@ class TradingEngine:
             # - live/simulated（模拟实盘=用实盘参数做模拟验证）：用实盘配置的资金
             # - paper：用模拟配置的资金（曾 simulated 只读模拟配置，
             #   用户在"实盘配置"窗口设置的资金不生效）
+            # 防御：DB 中可能残留历史 NaN 值（校验被绕过写入），非有限值回退默认
             if mode in ("live", "simulated") and cfg.get("start_cash"):
-                self.start_cash = float(cfg["start_cash"])
+                v = float(cfg["start_cash"])
+                if math.isfinite(v) and v > 0:
+                    self.start_cash = v
             # 模拟模式配置：手续费率（纸面/模拟实盘共用可自定义费率）；
             # 纸面模式的资金也来自本配置
             paper_cfg = await self.db.kv_json_get("paper_trading_config")
             if paper_cfg:
                 if mode == "paper":
-                    self.start_cash = float(paper_cfg.get("start_cash") or self.start_cash)
-                self.paper_fee_rate = float(paper_cfg.get("fee_rate") or self.paper_fee_rate)
+                    v = float(paper_cfg.get("start_cash") or self.start_cash)
+                    if math.isfinite(v) and v > 0:
+                        self.start_cash = v
+                f = float(paper_cfg.get("fee_rate") or self.paper_fee_rate)
+                if math.isfinite(f) and 0 <= f <= 0.1:
+                    self.paper_fee_rate = f
         except Exception as e:  # noqa: BLE001
             log.warning("[engine] 读取配置失败: %s", e)
 
@@ -512,46 +520,6 @@ class TradingEngine:
         return await self.designer.design(snap, trades, backtests, guard_candles=guard_candles,
                                           strategy_type=strategy_type,
                                           custom_requirement=custom_requirement)
-
-    async def auto_optimize(self, focus: str = "价格行为与关键位") -> dict:
-        """AI 全自动优化当前策略（关键位+价格行为重点，参考历史回测）。"""
-        snap = await self._current_snapshot()
-        if not snap:
-            raise RuntimeError("无法获取行情快照，请先启动引擎或稍后重试")
-        perf = await self._recent_performance()
-        backtests = await self._recent_backtests(3)
-        result = await self.optimizer.optimize_price_action(self.strategy, perf, snap, focus, backtests)
-        if result is None:
-            raise RuntimeError("AI 优化失败（未配置 AI 或调用出错）")
-        result["market_features"] = {
-            "sr": snap.get("indicators", {}).get("sr"),
-            "pa": snap.get("indicators", {}).get("pa"),
-        }
-        return result
-
-    async def iterate_strategy(self, strategy_name: str = "") -> dict:
-        """AI 重新思考迭代策略：可指定目标策略（默认当前），批判反思并给出改进版。"""
-        target = self.strategy
-        if strategy_name:
-            target = get_strategy(strategy_name)  # 用指定策略（不切换当前策略）
-        snap = await self._current_snapshot()
-        if not snap:
-            raise RuntimeError("无法获取行情快照，请先启动引擎或稍后重试")
-        guard_candles = await self._fetch_vision_ohlcv(limit=800) or snap.get("candles", [])
-        snap = {**snap, "candles": guard_candles}
-        perf = await self._recent_performance()
-        backtests = await self._recent_backtests(3)
-        # 注入前代迭代记录（critique/改进点/版本），形成可验证的正循环：
-        # AI 能看到上一代说了什么、改了什么，避免重复同样错误
-        previous = await self._previous_iterations(target.name)
-        result = await self.iteration.iterate(target, perf, snap, backtests, previous)
-        if result is None:
-            raise RuntimeError("AI 迭代失败（未配置 AI 或调用出错）")
-        result["market_features"] = {
-            "sr": snap.get("indicators", {}).get("sr"),
-            "pa": snap.get("indicators", {}).get("pa"),
-        }
-        return result
 
     async def _recent_trades(self, limit: int = 100) -> list[dict]:
         from core.database import Trade

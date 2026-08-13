@@ -41,6 +41,8 @@ data/dom_*.txt
 
 # 本地调试脚本（一次性探测/截图，不对外发布）
 scripts/dev/
+tests/check_*.py
+tests/e2e_*.py
 
 # 备份文件
 *.bak

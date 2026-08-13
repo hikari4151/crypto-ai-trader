@@ -75,14 +75,26 @@ _TIME_MAP = {
 SUPPORTED = list(_BASES.keys())
 
 
+_client: Optional[httpx.AsyncClient] = None
+_client_lock = threading.Lock()
+
+
+def _get_client() -> httpx.AsyncClient:
+    """进程内复用 AsyncClient（TCP+TLS 握手复用）；代理配置变化时惰性重建。"""
+    global _client
+    with _client_lock:
+        if _client is None or _client.is_closed:
+            proxy = settings.resolved_proxy or None
+            _client = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=8.0), proxy=proxy)
+        return _client
+
+
 async def _fetch_json(url: str, params: Optional[dict] = None) -> Any:
-    proxy = settings.resolved_proxy or None
-    timeout = httpx.Timeout(15.0, connect=8.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
-            r = await client.get(url, params=params)
-            r.raise_for_status()
-            return r.json()
+        client = _get_client()
+        r = await client.get(url, params=params)
+        r.raise_for_status()
+        return r.json()
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"数据源 {e.response.status_code}: {e.response.text[:200]}")
     except httpx.HTTPError as e:

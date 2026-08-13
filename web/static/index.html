@@ -2346,21 +2346,24 @@ createApp({
       catch(e){ toast('设计失败：'+(e.message||e),'error'); }
       finally{ designLoading.value=false; }
     }
-    // 轮询 AI 后台任务进度（优化/反思）
+    // 轮询 AI 后台任务进度（优化/反思）——单一轮询源：曾与 autoOptimize/iterateStrategy
+    // 内联 Promise 各开一个 setInterval 轮询同一 task_id（双倍请求），现统一返回 Promise
     function pollAiTask(taskId) {
       clearInterval(aiTaskPollTimer);
-      aiTaskPollTimer = setInterval(async ()=>{
-        try {
-          const p = await api('/ai/task/'+taskId);
-          if (p.found) {
-            aiTaskLabel.value = p.stage_label||'AI 工作中';
-            aiTaskPct.value = p.pct||0;
-            aiTaskMessage.value = p.message||'';
-            if (p.error) { toast('AI 任务失败：'+p.error,'error'); stopAiTask(); }
-            if (p.done) { stopAiTask(); return p.result; }
-          }
-        } catch(e) {}
-      }, 800);
+      return new Promise((resolve)=>{
+        aiTaskPollTimer = setInterval(async ()=>{
+          try {
+            const p = await api('/ai/task/'+taskId);
+            if (p.found) {
+              aiTaskLabel.value = p.stage_label||'AI 工作中';
+              aiTaskPct.value = p.pct||0;
+              aiTaskMessage.value = p.message||'';
+              if (p.error) { toast('AI 任务失败：'+p.error,'error'); stopAiTask(); resolve(null); return; }
+              if (p.done) { stopAiTask(); resolve(p.result); return; }
+            }
+          } catch(e) {}
+        }, 800);
+      });
     }
     function stopAiTask() {
       if (aiTaskPollTimer) { clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; }
@@ -2370,19 +2373,8 @@ createApp({
       optLoading.value=true; optResult.value=null; aiTaskPct.value=0; aiTaskMessage.value='';
       try {
         const d = await api('/ai/auto-optimize', {method:'POST', body:JSON.stringify({focus:'价格行为与关键位'})});
-        pollAiTask(d.task_id);
-        // 轮询结束后取结果
-        const result = await new Promise(resolve=>{
-          const timer = setInterval(async ()=>{
-            try {
-              const p = await api('/ai/task/'+d.task_id);
-              if (p.found && p.done) { clearInterval(timer); clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; optLoading.value=false; resolve(p.result); }
-              if (p.found && p.error) { clearInterval(timer); clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; optLoading.value=false; resolve(null); }
-            } catch(e) {}
-          }, 800);
-        });
+        const result = await pollAiTask(d.task_id);
         if (result) { optResult.value=result; toast('AI 全自动优化完成（已热更新）','ok'); }
-        else if (aiTaskPollTimer===null) { /* 已失败提示 */ }
       } catch(e){ toast('优化失败：'+(e.message||e),'error'); }
       finally{ clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; optLoading.value=false; }
     }
@@ -2397,16 +2389,7 @@ createApp({
       iterLoading.value=true; iterResult.value=null; aiTaskPct.value=0; aiTaskMessage.value='';
       try {
         const d = await api('/ai/iterate-strategy', {method:'POST', body:JSON.stringify({strategy_name: iterStrategyName.value})});
-        pollAiTask(d.task_id);
-        const result = await new Promise(resolve=>{
-          const timer = setInterval(async ()=>{
-            try {
-              const p = await api('/ai/task/'+d.task_id);
-              if (p.found && p.done) { clearInterval(timer); clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; iterLoading.value=false; resolve(p.result); }
-              if (p.found && p.error) { clearInterval(timer); clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; iterLoading.value=false; resolve(null); }
-            } catch(e) {}
-          }, 800);
-        });
+        const result = await pollAiTask(d.task_id);
         if (result) { iterResult.value=result; toast('AI 深度反思迭代完成','ok'); loadAiStrategies(); loadStrategy(); loadAllStrategies(); }
       } catch(e){ toast('迭代失败：'+(e.message||e),'error'); }
       finally{ clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; iterLoading.value=false; }
@@ -2652,7 +2635,8 @@ createApp({
         await new Promise(r=>setTimeout(r,300));
         let tries=0;
         while(tries++<240){
-          // 实时进度（K线 + 成交盈亏）
+          // 实时进度（K线 + 成交盈亏）——曾 200ms 同时轮 progress+results 双端点
+          // （全量 JSON 反序列化），现 500ms 只轮 progress，done 后一次性取结果
           try {
             const p = await api('/backtest/progress/'+d.task_id);
             if (p.found) {
@@ -2666,22 +2650,21 @@ createApp({
                 btLive.value.last_trade = p.last_trade;
               }
               if (p.error) { toast('回测失败：'+p.error,'error'); btRunning.value=false; btLive.value.running=false; return; }
-              if (p.done) { btLive.value.running=false; btLive.value.pct=100; btLive.value.done=true; }
+              if (p.done) {
+                btLive.value.running=false; btLive.value.pct=100; btLive.value.done=true;
+                // 完成后一次性拉最终结果
+                const r = await api('/backtest/results/'+d.task_id);
+                if (r.metrics.error) { toast('回测失败：'+r.metrics.error,'error'); btRunning.value=false; return; }
+                btResult.value=r; renderEquity(btChart, r.equity_curve.map((v,i)=>[i, v]), 'bt'); loadBtHistory();
+                // 完成后自动切到「回测结果」步骤并滚动
+                btStep.value = 'result';
+                nextTick(()=>btGoto('result'));
+                break;
+              }
             }
           } catch(e) {}
-          // 最终结果
-          const r = await api('/backtest/results/'+d.task_id);
-          if (r.metrics.error) { toast('回测失败：'+r.metrics.error,'error'); btRunning.value=false; btLive.value.running=false; return; }
-          if (r.metrics.status!=='running' && r.metrics.backtest_engine) {
-            btResult.value=r; btLive.value.running=false; btLive.value.pct=100; btLive.value.done=true;
-            renderEquity(btChart, r.equity_curve.map((v,i)=>[i, v]), 'bt'); loadBtHistory();
-            // 完成后自动切到「回测结果」步骤并滚动
-            btStep.value = 'result';
-            nextTick(()=>btGoto('result'));
-            break;
-          }
           if (tries>=240) break;
-          await new Promise(r2=>setTimeout(r2,200));
+          await new Promise(r2=>setTimeout(r2,500));
         }
       } catch(e){ toast('回测出错：'+(e.message||e),'error'); }
       btRunning.value=false;

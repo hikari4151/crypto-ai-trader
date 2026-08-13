@@ -8,6 +8,7 @@
 - 每日盈亏持久化：跨重启保留日盈亏状态
 """
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
@@ -62,6 +63,9 @@ class RiskManager:
     _daily_pnl: float = 0.0
     _daily_pnl_date: str = ""
     _daily_pnl_loaded: bool = False
+    # 规则缓存（check() 在每根 K 线热路径，避免每次信号检查都打 DB）
+    _rules_cache: Optional[dict] = None
+    _rules_cache_ts: float = 0.0
 
     def __post_init__(self) -> None:
         if self._recent_pnls is None:
@@ -125,6 +129,11 @@ class RiskManager:
         return count
 
     async def get_rules(self) -> dict:
+        # 5s TTL 缓存：check() 在每根 K 线热路径上（实盘/纸面/模拟），
+        # 每次都 kv_json_get 会引入一次 DB 往返；update_rules 时主动失效
+        now = time.time()
+        if self._rules_cache is not None and now - self._rules_cache_ts < 5.0:
+            return self._rules_cache
         rules = await self.db.kv_json_get("risk_rules")
         if not rules:
             rules = dict(DEFAULT_RULES)
@@ -137,6 +146,8 @@ class RiskManager:
                 changed = True
         if changed:
             await self.db.kv_json_set("risk_rules", rules)
+        self._rules_cache = rules
+        self._rules_cache_ts = now
         return rules
 
     async def update_rules(self, rules: dict) -> dict:
@@ -154,11 +165,19 @@ class RiskManager:
             except (TypeError, ValueError):
                 log.warning("[risk] 忽略非法规则值 %s=%r", k, rules[k])
                 continue
+            # JSON NaN/Infinity 字面量可绕过 max/min 钳制（比较恒 False → 钳到上界），
+            # 直接把每日亏损/单笔亏损/闪崩保护全部失效；非有限值一律拒绝
+            if not math.isfinite(v):
+                log.warning("[risk] 忽略非有限规则值 %s=%r", k, rules[k])
+                continue
             lo, hi = _RULE_BOUNDS.get(k, (None, None))
             if lo is not None:
                 v = max(lo, min(hi, v))
             merged[k] = v
         await self.db.kv_json_set("risk_rules", merged)
+        # 更新后立即失效缓存，check() 下根 K 线即用新规则
+        self._rules_cache = merged
+        self._rules_cache_ts = time.time()
         return merged
 
     def cooldown_status(self) -> dict:
@@ -229,15 +248,20 @@ class RiskManager:
         """
         rules = await self.get_rules()
 
+        # 平仓（卖出持仓）豁免所有"防新开仓"的冷却类规则：
+        # 连续亏损冷却/每日亏损上限/闪崩冷却/成交量异常/频率限制/24h 跌幅，
+        # 否则止损单会被冷却规则拦截，亏损继续扩大（违背止损本意）。
+        closing = signal.side == "sell" and position_value > 0
+
         # 0) 更新价格历史（用于闪崩检测）
         self._add_price_sample(price)
 
         # 0.1) 闪崩/暴涨保护
-        if self._flash_cooldown_until > time.time():
+        if self._flash_cooldown_until > time.time() and not closing:
             remaining = int(self._flash_cooldown_until - time.time())
             return False, f"闪崩冷却中，剩余 {remaining}s"
         flash_reason = self._check_flash_crash(rules)
-        if flash_reason:
+        if flash_reason and not closing:
             cooldown_min = int(rules.get("flash_cooldown_minutes", 30))
             self._flash_cooldown_until = time.time() + cooldown_min * 60
             log.warning("[risk] %s，触发 %d 分钟冷却", flash_reason, cooldown_min)
@@ -245,7 +269,7 @@ class RiskManager:
 
         # 0.2) 成交量异常保护
         vol_reason = self._check_vol_spike(vol_ratio, rules)
-        if vol_reason:
+        if vol_reason and not closing:
             log.warning("[risk] %s", vol_reason)
             return False, vol_reason
 
@@ -255,12 +279,12 @@ class RiskManager:
         else:
             order_value = cash * float(signal.size_pct or 0.5)
 
-        # 2) 连续亏损冷却保护
-        if self._cooldown_until > time.time():
+        # 2) 连续亏损冷却保护（仅限新开仓）
+        if self._cooldown_until > time.time() and not closing:
             remaining = int(self._cooldown_until - time.time())
             return False, f"连续亏损冷却中，剩余 {remaining}s（暂停新开仓）"
         losses = self._consecutive_losses()
-        if losses >= int(rules.get("max_consecutive_losses", 3)):
+        if losses >= int(rules.get("max_consecutive_losses", 3)) and not closing:
             self._cooldown_until = time.time() + int(rules.get("cooldown_minutes", 15)) * 60
             log.warning("[risk] 连续 %d 笔亏损，触发 %s 分钟冷却", losses, rules.get("cooldown_minutes", 15))
             return False, f"连续 {losses} 笔亏损，触发冷却 {rules.get('cooldown_minutes', 15)} 分钟"
@@ -269,31 +293,35 @@ class RiskManager:
         if order_value < rules["min_order_value_usd"]:
             return False, f"订单金额 ${order_value:.2f} 低于最小限额 ${rules['min_order_value_usd']:.2f}"
 
-        # 4) 每日最大亏损
-        if daily_pnl <= -rules["max_daily_loss_usd"]:
+        # 4) 每日最大亏损（仅限新开仓，保证持仓可随时离场）
+        if daily_pnl <= -rules["max_daily_loss_usd"] and not closing:
             return False, f"今日已亏损 ${-daily_pnl:.2f}，触发每日最大亏损限制"
 
-        # 5) 交易频率限制（每小时）
+        # 5) 交易频率限制（每小时；仅限新开仓）
         cutoff = time.time() - 3600
         recent = [t for t in trade_times if t >= cutoff]
-        if len(recent) >= int(rules["max_trades_per_hour"]):
+        if len(recent) >= int(rules["max_trades_per_hour"]) and not closing:
             return False, f"1小时内交易次数已达上限 {rules['max_trades_per_hour']}"
 
         # 6) 单笔最大亏损（卖出止盈/止损场景）
+        # 注意：绝不拦截止损单——拒绝执行止损只会让亏损继续扩大。
+        # 超过上限时记录告警日志（供复盘），放行成交。
         if signal.side == "sell" and entry_price and "止损" in signal.reason:
-            est_loss = (entry_price - price) * (signal.qty or 0.0)
+            qty = signal.qty or (position_value / price if price > 0 else 0.0)
+            est_loss = (entry_price - price) * qty
             if est_loss > rules["max_loss_per_trade_usd"]:
-                return False, f"预估单笔亏损 ${est_loss:.2f} 超过限制 ${rules['max_loss_per_trade_usd']:.2f}"
+                log.warning("[risk] 止损预估亏损 $%.2f 超过单笔上限 $%.2f（止损放行）",
+                            est_loss, rules["max_loss_per_trade_usd"])
 
         # 7) 仓位上限
         if signal.side == "buy" and position_value + order_value > (cash + position_value) * rules["max_position_pct"]:
             return False, "超过最大仓位比例"
 
-        # 8) 24小时跌幅检测
+        # 7) 24小时跌幅检测（仅限新开仓）
         now = time.time()
         cutoff_24h = now - 86400
         prices_24h = [p for t, p in self._price_history if t >= cutoff_24h]
-        if len(prices_24h) >= 10:
+        if len(prices_24h) >= 10 and not closing:
             drop_24h = (prices_24h[0] - prices_24h[-1]) / prices_24h[0]
             threshold_24h = rules.get("flash_crash_24h_drop_pct", 0.25)
             if drop_24h >= threshold_24h:

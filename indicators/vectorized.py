@@ -84,6 +84,10 @@ def _rsi_vec(v, period: int = 14):
         avg_l[i] = (avg_l[i - 1] * (period - 1) + losses[i - 1]) / period
     rs = avg_g / (avg_l + 1e-12)
     out[period:] = 100.0 - 100.0 / (1 + rs[period:])
+    # 价格完全走平（无涨无跌）：avg_g=avg_l=0 时 rs=0 → RSI=0 误判极超卖；
+    # 对齐 technical.py / IncrIndicators 口径（无下跌 → RSI=100）
+    flat = (avg_l < 1e-12) & (avg_g < 1e-12)
+    out[flat] = 100.0
     return out
 
 
@@ -258,7 +262,10 @@ class IncrIndicators:
         if self._ema_fast_val is None:
             self._ema_fast_val = close
             self._ema_slow_val = close
-            self._ema_signal_val = close
+            # DEA 播种与回测/向量化一致（dif[0]=0）：曾用 close 播种，
+            # 启动后 30-50 根 K 线内 MACD 信号与回测系统性偏离
+            self._ema_signal_val = 0.0
+            self._macd_hist = 0.0
         else:
             self._ema_fast_val = ema_incremental(self._ema_fast_val, close, self.ema_fast)
             self._ema_slow_val = ema_incremental(self._ema_slow_val, close, self.ema_slow)

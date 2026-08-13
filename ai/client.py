@@ -222,8 +222,8 @@ class AIClient:
                 detail = resp.text[:400] or resp.reason_phrase
                 if resp.status_code in (429, 500, 502, 503, 504):
                     last_err = RuntimeError(f"HTTP {resp.status_code}: {detail}")
-                    # 指数退避 + 抖动：多任务并发触发临时错误时避免同步波峰
-                    wait = 2 ** attempt + random.uniform(0, 0.5)
+                    # 指数退避 + 抖动（封顶 30s：attempt 过大时 2**attempt 溢出）
+                    wait = min(2 ** attempt, 30.0) + random.uniform(0, 0.5)
                     if resp.status_code == 429:
                         # 429 优先遵循服务端 Retry-After
                         ra = resp.headers.get("Retry-After")
@@ -241,7 +241,7 @@ class AIClient:
                 raise AICallError(f"AI 调用 {retries + 1} 次后仍无正文输出（可能是推理模型 max_tokens 限制）")
             except httpx.TransportError as e:
                 last_err = e
-                wait = 2 ** attempt + random.uniform(0, 0.5)
+                wait = min(2 ** attempt, 30.0) + random.uniform(0, 0.5)
                 log.warning("[ai] 网络错误(第%d/%d次) %s，%.1fs 后重试", attempt + 1, retries, e, wait)
                 await asyncio.sleep(wait)
         raise AICallError(f"AI 调用重试 {retries} 次后仍失败: {last_err}")
@@ -312,7 +312,10 @@ class AIClient:
                 log.warning("[ai] %s 校验失败(第%d次)，反馈修正: %.100s",
                             feature, attempt + 1, fb.replace("\n", " "))
                 msgs = [dict(m) for m in messages]
-                msgs.append({"role": "assistant", "content": data})
+                # 修正消息必须把 AI 输出序列化为字符串（assistant content 只接受 str，
+                # 传 dict 会被 OpenAI 兼容接口 400 拒绝 → 修复重试机制整体失效）
+                msgs.append({"role": "assistant",
+                             "content": json.dumps(data, ensure_ascii=False)})
                 msgs.append({"role": "user", "content": fb + "\n请严格按修正要求重新输出完整 JSON。"})
                 attempt += 1
         raise AICallError(f"[{feature}] 校验重试超限")

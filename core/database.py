@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, Float, Integer, String, Text, func, select
+from sqlalchemy import DateTime, Float, Integer, String, Text, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -94,11 +94,20 @@ class OptimizationLog(Base):
 
 class Database:
     def __init__(self, url: str) -> None:
-        self.engine = create_async_engine(url, echo=False, future=True)
+        # WAL + busy_timeout：写密集路径（快照/成交/每日盈亏）与轮询读并发时，
+        # 默认 journal 模式下易现 "database is locked"（成交已 apply 但记录失败，
+        # 日亏损/冷却计数被低估）；aiosqlite 的 busy_timeout 由 PRAGMA 控制
+        self.engine = create_async_engine(
+            url, echo=False, future=True,
+            connect_args={"timeout": 30},
+        )
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def init(self) -> None:
+        # PRAGMA：WAL 允许读写并发；synchronous=NORMAL 降低 fsync 开销
         async with self.engine.begin() as conn:
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL"))
             await conn.run_sync(Base.metadata.create_all)
         log.info("数据库初始化完成: %s", self.engine.url.render_as_string(hide_password=True))
 

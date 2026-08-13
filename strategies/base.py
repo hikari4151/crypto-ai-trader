@@ -24,6 +24,9 @@ class Strategy(ABC):
 
     def __init__(self) -> None:
         self.params: dict[str, Any] = dict(self.default_params)
+        # 立即初始化内部状态：曾仅依赖引擎/回测流程显式调用 reset()，
+        # 工厂创建（make_rl_strategy/register_dynamic）后直接 on_candle 会 AttributeError
+        self.reset()
 
     def update_params(self, params: dict[str, Any]) -> dict[str, Any]:
         """热更新参数（含 AI 优化结果），按 schema 校验类型与范围，返回实际生效参数。"""

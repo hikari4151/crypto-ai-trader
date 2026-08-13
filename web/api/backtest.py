@@ -10,7 +10,7 @@ import threading
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.database import Database
 from web.deps import get_db, resolve_data_path
@@ -45,7 +45,7 @@ class BacktestRequest(BaseModel):
     fee_rate: float = 0.001
     slippage: float = 0.0005
     since: str = ""
-    limit: int = 1000
+    limit: int = Field(default=1000, ge=100, le=5000)   # 封顶防任意大值阻塞
     use_gpu: bool = False             # 是否启用 GPU 加速（需 cupy）
     stream: bool = True               # 是否推送实时进度
 
@@ -62,7 +62,7 @@ class GridScanIn(BaseModel):
     start_cash: float = 10000.0
     fee_rate: float = 0.001
     slippage: float = 0.0005
-    limit: int = 1000
+    limit: int = Field(default=1000, ge=100, le=5000)
     top_n: int = 10                   # 返回绩效最好的前 N 组
 
 
@@ -331,11 +331,11 @@ async def grid_scan(body: GridScanIn):
     from backtest.engine import BacktestConfig
     from backtest.fast_engine import run_backtest_fast
 
-    # 加载数据
+    # 加载数据（demo/csv 的 pandas 解析放后台线程）
     if body.data_source == "demo":
-        df = generate_demo(timeframe=body.timeframe)
+        df = await asyncio.to_thread(generate_demo, timeframe=body.timeframe)
     elif body.data_source == "csv":
-        df = _load_csv_guarded(body.csv_path)
+        df = await asyncio.to_thread(_load_csv_guarded, body.csv_path)
     elif body.data_source == "exchange":
         df = await load_from_exchange(body.exchange, body.symbol, body.timeframe,
                                       limit=body.limit)
@@ -372,8 +372,10 @@ async def grid_scan(body: GridScanIn):
             return None
 
     results = []
+    # 注意：ThreadPoolExecutor.map 是同步迭代器，阻塞事件循环直到全部完成；
+    # 整体包进 to_thread（map 内部 await 无法让出事件循环）
     with ThreadPoolExecutor(max_workers=min(8, len(combos))) as ex:
-        for r in ex.map(_run, combos):
+        for r in await asyncio.to_thread(lambda: list(ex.map(_run, combos))):
             if r is not None:
                 results.append(r)
 
@@ -398,9 +400,9 @@ async def compare_strategies(body: BacktestRequest):
     from strategies import list_strategies
 
     if body.data_source == "demo":
-        df = generate_demo(timeframe=body.timeframe)
+        df = await asyncio.to_thread(generate_demo, timeframe=body.timeframe)
     elif body.data_source == "csv":
-        df = _load_csv_guarded(body.csv_path)
+        df = await asyncio.to_thread(_load_csv_guarded, body.csv_path)
     elif body.data_source == "exchange":
         df = await load_from_exchange(body.exchange, body.symbol, body.timeframe,
                                       limit=body.limit)
@@ -430,7 +432,7 @@ async def compare_strategies(body: BacktestRequest):
     results = []
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=len(builtin)) as ex:
-        for r in ex.map(_run, builtin):
+        for r in await asyncio.to_thread(lambda: list(ex.map(_run, builtin))):
             if r is not None:
                 results.append(r)
     results.sort(key=lambda x: -(x["total_return"] * 10 + x["sharpe"] * 2 - x["max_drawdown"] * 5))

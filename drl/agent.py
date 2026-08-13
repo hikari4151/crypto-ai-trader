@@ -304,6 +304,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     extra_factors_val: Optional[np.ndarray] = None
     extra_factors_oos: Optional[np.ndarray] = None
     factor_expr = str(cfg.get("factor_expression", "") or "").strip()
+    # 标准化统计量（训练段拟合）写入模型文件，部署端用同一口径标准化——
+    # 曾只存表达式不存 mu/sd，部署喂原始值，状态分布与训练完全不同
+    factor_mu: float = 0.0
+    factor_sd: float = 1.0
     if factor_expr:
         from factors.mining import FactorExecutor
         try:
@@ -313,11 +317,12 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
             # 标准化（训练段拟合均值/方差，防统计泄漏）
             mu = np.nanmean(vals[:n_train]) if n_train > 0 else 0.0
             sd = np.nanstd(vals[:n_train]) + 1e-8
+            factor_mu, factor_sd = float(mu), float(sd)
             vals = (vals - mu) / sd
             extra_factors_all = vals.reshape(-1, 1)
             extra_factors_val = vals[n_train:n_train + n_val].reshape(-1, 1) if len(val_df) == n_val else None
             extra_factors_oos = vals[n_train + n_val:].reshape(-1, 1) if len(oos_df) > 0 else None
-            log.info("[drl] 已注入因子信号列: %s（标准化后加入状态）", factor_expr[:60])
+            log.info("[drl] 已注入因子信号列: %s（标准化后加入状态, mu=%.4f sd=%.4f）", factor_expr[:60], factor_mu, factor_sd)
         except Exception as e:  # noqa: BLE001
             log.warning("[drl] 因子表达式计算失败，忽略因子列: %s", e)
 
@@ -523,6 +528,9 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         "ppo_cfg": {"n_episodes": n_episodes, "ppo_epochs": ppo_epochs,
                     "mini_batch_size": mini_batch_size, "clip_eps": 0.2,
                     "factor_expression": factor_expr},
+        "factor_expression": factor_expr,
+        "factor_mu": factor_mu,
+        "factor_sd": factor_sd,
         "elapsed_sec": round(time.time() - t0, 2),
         "backend": backend,
         "oos_report": oos_report,

@@ -22,6 +22,15 @@ def prune_task_cache(cache: dict[int, dict], lock: Lock,
         ]
         for k in expired:
             cache.pop(k, None)
+        # TTL 窗口内（12h 内完成的）也可能超过 max_items：按完成时间保留最近 N 个，
+        # 其余清理——曾只清过期条目，短时间大量任务时缓存可无限超限
+        if len(cache) > max_items:
+            done_keys = sorted(
+                (k for k, v in cache.items() if not v.get("running")),
+                key=lambda k: cache[k].get("_done_ts", 0),
+            )
+            for k in done_keys[: len(cache) - max_items]:
+                cache.pop(k, None)
 
 
 def mark_done(entry: dict[str, Any]) -> dict[str, Any]:

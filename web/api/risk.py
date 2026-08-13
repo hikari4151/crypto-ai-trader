@@ -1,16 +1,19 @@
 """风控规则动态调整 + 冷却状态查询。"""
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+import math
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from web.deps import get_engine
 
 
 class RiskIn(BaseModel):
-    max_loss_per_trade_usd: float | None = None
-    max_daily_loss_usd: float | None = None
-    min_order_value_usd: float | None = None
+    # allow_inf_nan=False + 显式 isfinite 双保险：JSON NaN/Infinity 可绕过风控钳制
+    max_loss_per_trade_usd: float | None = Field(default=None, allow_inf_nan=False)
+    max_daily_loss_usd: float | None = Field(default=None, allow_inf_nan=False)
+    min_order_value_usd: float | None = Field(default=None, allow_inf_nan=False)
     max_trades_per_hour: int | None = None
-    max_position_pct: float | None = None
+    max_position_pct: float | None = Field(default=None, allow_inf_nan=False)
     max_consecutive_losses: int | None = None
     cooldown_minutes: int | None = None
 
@@ -25,7 +28,11 @@ async def get_rules(engine=Depends(get_engine)):
 
 @router.put("/rules")
 async def update_rules(body: RiskIn, engine=Depends(get_engine)):
-    rules = await engine.risk.update_rules(body.model_dump(exclude_none=True))
+    payload = body.model_dump(exclude_none=True)
+    for k, v in payload.items():
+        if isinstance(v, float) and not math.isfinite(v):
+            raise HTTPException(status_code=400, detail=f"规则 {k} 必须为有限数值")
+    rules = await engine.risk.update_rules(payload)
     return {"ok": True, "rules": rules}
 
 

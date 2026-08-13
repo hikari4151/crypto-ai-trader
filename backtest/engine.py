@@ -105,10 +105,13 @@ def run_backtest(df: pd.DataFrame, cfg: BacktestConfig) -> dict:
             if filled:
                 strategy.on_fill(cfg.symbol, sig.side, fill_price)
 
-        # 2) 用截至当前的收盘价序列计算指标（不含未来数据）
-        ohlcv = [[int(data.index[j].timestamp() * 1000), float(data.iloc[j]["open"]),
-                  float(data.iloc[j]["high"]), float(data.iloc[j]["low"]),
-                  float(data.iloc[j]["close"]), float(data.iloc[j]["volume"])] for j in range(i + 1)]
+        # 2) 用截至当前的收盘价序列计算指标（不含未来数据）。
+        # 只取最近 120 根窗口：与 fast_engine 的 S/R 滑动窗口口径一致，
+        # 曾用全量历史使旧枢轴簇干扰 near_sup/near_res/broken_resistance，两引擎交易分叉
+        hist = data.iloc[max(0, i - 119): i + 1]
+        ohlcv = [[int(hist.index[j].timestamp() * 1000), float(hist.iloc[j]["open"]),
+                  float(hist.iloc[j]["high"]), float(hist.iloc[j]["low"]),
+                  float(hist.iloc[j]["close"]), float(hist.iloc[j]["volume"])] for j in range(len(hist))]
         ind = compute_latest(ohlcv)
         ctx = {
             "symbol": cfg.symbol, "price": price_close, "position": position,
@@ -120,6 +123,25 @@ def run_backtest(df: pd.DataFrame, cfg: BacktestConfig) -> dict:
 
         equity = cash + position * price_close
         equity_curve.append(round(equity, 4))
+
+    # 末尾强制平仓（与 fast_engine 一致，FIFO 成本摊销）：
+    # 曾缺失此段导致期末持仓按市值计但无平仓交易，两引擎 trades/胜率/盈亏比不一致
+    last_close = float(data.iloc[-1]["close"])
+    if position > 0 and lots:
+        fill_price = last_close * (1 - cfg.slippage)
+        qty = position
+        proceeds = qty * fill_price
+        fee = proceeds * cfg.fee_rate
+        cost_basis = sum(lq * lp for lq, lp in lots)
+        pnl = qty * fill_price - cost_basis - fee
+        cash += proceeds - fee
+        trades.append({
+            "ts": data.index[-1].isoformat(), "symbol": cfg.symbol, "side": "sell",
+            "price": round(fill_price, 6), "qty": round(qty, 8),
+            "fee": round(fee, 6), "pnl": round(pnl, 6), "reason": "期末强制平仓",
+        })
+        if equity_curve:
+            equity_curve[-1] = round(cash, 4)
 
     from .metrics import compute_metrics
     metrics = compute_metrics(equity_curve, trades, cfg.timeframe, cfg.start_cash)

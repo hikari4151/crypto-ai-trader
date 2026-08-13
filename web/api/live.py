@@ -1,8 +1,9 @@
 """实盘启动设置：交易模式切换（纸面/实盘）、实盘参数配置、启动状态。"""
 import logging
+import math
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.database import Database
 from web.deps import get_db, get_engine
@@ -15,12 +16,12 @@ class LiveConfigIn(BaseModel):
     exchange: str = "binance"
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
-    start_cash: float = 10000.0
+    start_cash: float = Field(default=10000.0, ge=1, allow_inf_nan=False)
 
 
 class PaperConfigIn(BaseModel):
-    start_cash: float = 10000.0
-    fee_rate: float = 0.001
+    start_cash: float = Field(default=10000.0, ge=1, allow_inf_nan=False)
+    fee_rate: float = Field(default=0.001, ge=0, le=0.1, allow_inf_nan=False)
 
 
 class ModeIn(BaseModel):
@@ -44,6 +45,8 @@ async def get_live_config(db: Database = Depends(get_db)):
 @router.put("/config")
 async def save_live_config(body: LiveConfigIn, db: Database = Depends(get_db)):
     """保存实盘启动参数（下次启动生效）。"""
+    if not math.isfinite(body.start_cash) or body.start_cash < 1:
+        raise HTTPException(status_code=400, detail="初始资金必须为有限且大于 0 的数值")
     await db.kv_json_set("live_trading_config", body.model_dump())
     return {"ok": True, "message": "实盘配置已保存"}
 
@@ -63,9 +66,10 @@ async def set_paper_config(body: PaperConfigIn, db: Database = Depends(get_db), 
     """保存模拟模式配置（下次启动引擎生效）。"""
     if engine.running:
         raise HTTPException(status_code=400, detail="请先停止交易引擎再修改模拟配置")
-    if body.start_cash <= 0:
+    # 显式 isfinite 防御：NaN 下 <=0 / <0 比较恒 False，可绕过校验（NaN 资金会污染模拟账户）
+    if not math.isfinite(body.start_cash) or body.start_cash <= 0:
         raise HTTPException(status_code=400, detail="初始资金必须大于 0")
-    if body.fee_rate < 0 or body.fee_rate > 0.1:
+    if not math.isfinite(body.fee_rate) or body.fee_rate < 0 or body.fee_rate > 0.1:
         raise HTTPException(status_code=400, detail="手续费率需在 0 ~ 0.1 之间")
     await db.kv_json_set("paper_trading_config", body.model_dump())
     # 同步到引擎，下次启动生效

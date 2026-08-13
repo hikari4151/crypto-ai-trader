@@ -9,13 +9,16 @@ import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.database import Database
 from web.deps import get_db, get_engine
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/factors", tags=["factors"])
+
+# limit 封顶：防止任意大值触发超长 CPU 计算，冻结事件循环（已认证 DoS）
+_LIMIT_CAP = 5000
 
 
 class FactorComputeIn(BaseModel):
@@ -24,7 +27,7 @@ class FactorComputeIn(BaseModel):
     exchange: str = "binance"
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
-    limit: int = 1000
+    limit: int = Field(default=1000, ge=100, le=_LIMIT_CAP)
     horizon: int = 1          # 未来几期收益做 IC
     use_gpu: bool = False
 
@@ -35,7 +38,7 @@ class FactorMineIn(BaseModel):
     exchange: str = "binance"
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
-    limit: int = 1000
+    limit: int = Field(default=1000, ge=100, le=_LIMIT_CAP)
     horizon: int = 1
     use_gpu: bool = False
     auto_register: bool = True   # 自动把有效因子注册进因子库
@@ -47,7 +50,7 @@ class FactorSynthIn(BaseModel):
     exchange: str = "binance"
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
-    limit: int = 1000
+    limit: int = Field(default=1000, ge=100, le=_LIMIT_CAP)
     horizon: int = 1
     weights: dict = {}           # {factor_key: weight}，空则 IC 加权自动合成
     top_n: int = 8
@@ -57,15 +60,15 @@ class FactorSynthIn(BaseModel):
 
 
 async def _load_df(body):
-    """按数据源加载 OHLCV DataFrame（async：exchange 源直接 await，避免在事件循环中嵌套 asyncio.run）。"""
+    """按数据源加载 OHLCV DataFrame（async：exchange 源直接 await；demo/csv 的 pandas 解析放后台线程）。"""
     from backtest.data_loader import generate_demo, load_csv, load_from_exchange
     if body.data_source == "demo":
-        return generate_demo(timeframe=body.timeframe)
+        return await asyncio.to_thread(generate_demo, timeframe=body.timeframe)
     if body.data_source == "csv":
         if not body.csv_path:
             raise HTTPException(status_code=400, detail="CSV 数据源需要 csv_path")
         from web.deps import resolve_data_path
-        return load_csv(str(resolve_data_path(body.csv_path)))
+        return await asyncio.to_thread(load_csv, str(resolve_data_path(body.csv_path)))
     if body.data_source == "exchange":
         return await load_from_exchange(body.exchange, body.symbol,
                                         body.timeframe, limit=body.limit)
@@ -94,15 +97,11 @@ async def compute_factors(body: FactorComputeIn):
     from factors.engine import compute_factor_matrix
     df = await _load_df(body)
     try:
-        mat = compute_factor_matrix(df)
+        # CPU 密集的因子矩阵/IC/分组/相关性全部放后台线程，避免冻结事件循环
+        mat, ic_table, groups, corr, redundant = await asyncio.to_thread(
+            _compute_pipeline, df, body.horizon)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    close = df["close"]
-    ic_table = factor_ic_table(mat, close, h=body.horizon, method="rank")
-    groups = factor_group_returns(mat, close, h=body.horizon)
-    corr = factor_correlation(mat)
-    redundant = find_redundant(mat, threshold=0.85)
 
     return {
         "ok": True,
@@ -132,7 +131,7 @@ async def factor_usage(body: FactorComputeIn):
     from factors.library import get_factor
     df = await _load_df(body)
     try:
-        mat = compute_factor_matrix(df)
+        mat = await asyncio.to_thread(compute_factor_matrix, df)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -141,33 +140,35 @@ async def factor_usage(body: FactorComputeIn):
     latest = df.iloc[-1]
 
     # 每个因子的当前信号：z-score 方法
-    signals = []
-    for row in ic_table[:15]:
-        key = row["key"]
-        f = get_factor(key)
-        if f is None:
-            continue
-        s = f.series(df)
-        if s.notna().sum() < 20:
-            continue
-        last_val = float(s.iloc[-1])
-        mu, sd = float(s.mean()), float(s.std())
-        z = (last_val - mu) / (sd + 1e-12)
-        # 信号判断：z 过高=超买(反向信号)/过低=超卖；结合 IC 方向
-        ic_dir = 1 if row["rank_ic"] >= 0 else -1
-        if z > 1.2:
-            sig, label = "卖出", "超买"
-        elif z < -1.2:
-            sig, label = "买入", "超卖"
-        else:
-            sig, label = "中性", "区间"
-        # 趋势类因子正向用（动量），反转类反向用（均值回归）——简化：IC 正方向
-        signals.append({
-            "key": key, "name": f.name, "category": f.category,
-            "value": round(last_val, 6), "zscore": round(z, 3),
-            "signal": sig, "label": label,
-            "rank_ic": row["rank_ic"], "ic_dir": ic_dir,
-        })
+    def _signals():
+        out = []
+        for row in ic_table[:15]:
+            key = row["key"]
+            f = get_factor(key)
+            if f is None:
+                continue
+            s = f.series(df)
+            if s.notna().sum() < 20:
+                continue
+            last_val = float(s.iloc[-1])
+            mu, sd = float(s.mean()), float(s.std())
+            z = (last_val - mu) / (sd + 1e-12)
+            # 信号判断：z 过高=超买(反向信号)/过低=超卖；结合 IC 方向
+            ic_dir = 1 if row["rank_ic"] >= 0 else -1
+            if z > 1.2:
+                sig, label = "卖出", "超买"
+            elif z < -1.2:
+                sig, label = "买入", "超卖"
+            else:
+                sig, label = "中性", "区间"
+            out.append({
+                "key": key, "name": f.name, "category": f.category,
+                "value": round(last_val, 6), "zscore": round(z, 3),
+                "signal": sig, "label": label,
+                "rank_ic": row["rank_ic"], "ic_dir": ic_dir,
+            })
+        return out
+    signals = await asyncio.to_thread(_signals)
 
     # 用最佳方向因子生成因子择时策略并回测（使用场景：可直接用）
     best = next((s for s in signals if s["signal"] != "中性"), None)
@@ -196,7 +197,8 @@ async def factor_usage(body: FactorComputeIn):
                             strategy_name="factor_signal", strategy_params=params,
                             start_cash=10000.0, fee_rate=0.001)
         try:
-            r = run_backtest_fast(df, bc)
+            # 完整回测放后台线程，避免冻结事件循环
+            r = await asyncio.to_thread(run_backtest_fast, df, bc)
             m = r["metrics"]
             backtest = {
                 "strategy": "factor_signal", "params": params,
@@ -225,7 +227,7 @@ async def mine_factors(body: FactorMineIn, engine=Depends(get_engine),
 
     df = await _load_df(body)
     try:
-        mat = compute_factor_matrix(df)
+        mat = await asyncio.to_thread(compute_factor_matrix, df)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -266,15 +268,16 @@ async def mine_factors(body: FactorMineIn, engine=Depends(get_engine),
     if not candidates:
         raise HTTPException(status_code=400, detail="AI 未生成合法因子表达式，请重试")
 
-    # AI 验证
-    results = evaluate_mined_factors(candidates, df, h=body.horizon)
-    valid = [r for r in results if r.get("valid")]
-
-    # 程序进化变异：对有效因子做窗口参数扰动，挖掘 IC 提升的变体（纯计算，无额外 AI 调用）
-    evolved = evolve_factors(valid, df, h=body.horizon)
-    # evolved 包含原有效因子 + 进化变体，按 |IC| 排序
-    evolved.sort(key=lambda r: -abs(r.get("rank_ic", 0.0)))
-
+    # AI 验证 + 程序进化变异（纯计算，放后台线程避免冻结事件循环）
+    def _mine_pipeline():
+        results = evaluate_mined_factors(candidates, df, h=body.horizon)
+        valid = [r for r in results if r.get("valid")]
+        # 程序进化变异：对有效因子做窗口参数扰动，挖掘 IC 提升的变体（纯计算，无额外 AI 调用）
+        evolved = evolve_factors(valid, df, h=body.horizon)
+        # evolved 包含原有效因子 + 进化变体，按 |IC| 排序
+        evolved.sort(key=lambda r: -abs(r.get("rank_ic", 0.0)))
+        return evolved, valid
+    evolved, valid = await asyncio.to_thread(_mine_pipeline)
     # 统计进化收益
     n_evolved = sum(1 for r in evolved if r.get("evolved_from"))
 
@@ -308,37 +311,42 @@ async def synthesize(body: FactorSynthIn, db: Database = Depends(get_db)):
     from factors.engine import compute_factor_matrix
     from factors.mining import composite_factor, dynamic_composite, ic_weighted_composite
     df = await _load_df(body)
+    if body.method == "dynamic" and not 30 <= body.ic_window <= 500:
+        raise HTTPException(status_code=400, detail="ic_window 须在 30-500 之间")
     try:
-        mat = compute_factor_matrix(df)
+        mat = await asyncio.to_thread(compute_factor_matrix, df)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     close = df["close"]
-    if body.weights:
-        combo = composite_factor(mat, body.weights, method="manual")
-        weights = body.weights
-        selected = [{"key": k, "weight": v} for k, v in body.weights.items()]
-        method_used = "manual"
-    elif body.method == "dynamic":
-        # 动态权重：滚动 IC 实时调权（因子衰减自动降权），无前视
-        if not 30 <= body.ic_window <= 500:
-            raise HTTPException(status_code=400, detail="ic_window 须在 30-500 之间")
-        result = dynamic_composite(mat, close, h=body.horizon,
-                                   ic_window=body.ic_window, top_n=body.top_n)
-        combo = result["composite"]
-        weights = result["weight_history"].iloc[-1].to_dict()
-        selected = [{"key": k, "weight": round(float(v), 4), "dynamic": True}
-                    for k, v in weights.items() if abs(v) > 1e-6]
-        method_used = "dynamic"
-    else:
-        result = ic_weighted_composite(mat, close, h=body.horizon, top_n=body.top_n)
-        combo = result["composite"]
-        weights = result["weights"]
-        selected = result["selected"]
-        method_used = "ic"
 
-    exposure = factor_exposure(weights, mat)
-    combo_ic = _ic_of(combo, close, body.horizon)
+    # 合成 + 暴露度 + IC（CPU 密集，放后台线程）
+    def _synth_pipeline():
+        if body.weights:
+            combo = composite_factor(mat, body.weights, method="manual")
+            weights = body.weights
+            selected = [{"key": k, "weight": v} for k, v in body.weights.items()]
+            method_used = "manual"
+        elif body.method == "dynamic":
+            # 动态权重：滚动 IC 实时调权（因子衰减自动降权），无前视
+            result = dynamic_composite(mat, close, h=body.horizon,
+                                       ic_window=body.ic_window, top_n=body.top_n)
+            combo = result["composite"]
+            weights = result["weight_history"].iloc[-1].to_dict()
+            selected = [{"key": k, "weight": round(float(v), 4), "dynamic": True}
+                        for k, v in weights.items() if abs(v) > 1e-6]
+            method_used = "dynamic"
+        else:
+            result = ic_weighted_composite(mat, close, h=body.horizon, top_n=body.top_n)
+            combo = result["composite"]
+            weights = result["weights"]
+            selected = result["selected"]
+            method_used = "ic"
+        exposure = factor_exposure(weights, mat)
+        combo_ic = _ic_of(combo, close, body.horizon)
+        return combo, weights, selected, method_used, exposure, combo_ic
+
+    combo, weights, selected, method_used, exposure, combo_ic = await asyncio.to_thread(_synth_pipeline)
 
     return {"ok": True, "method": method_used, "weights": weights, "selected": selected,
             "exposure": exposure, "composite_ic": combo_ic,
@@ -351,7 +359,7 @@ class ModelFactorIn(BaseModel):
     exchange: str = "binance"
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
-    limit: int = 1000
+    limit: int = Field(default=1000, ge=100, le=_LIMIT_CAP)
     horizon: int = 1                 # 预测未来几期收益
     hidden: list[int] = [32, 32]     # MLP 隐藏层
     epochs: int = 200
@@ -441,3 +449,17 @@ def _factor_name(key: str) -> str:
 def _now() -> str:
     import datetime
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _compute_pipeline(df, horizon: int):
+    """因子矩阵 + IC 表 + 分组收益 + 相关性 + 冗余对（同步，供 to_thread 调用）。"""
+    from factors.analysis import (factor_correlation, factor_group_returns,
+                                  factor_ic_table, find_redundant)
+    from factors.engine import compute_factor_matrix
+    mat = compute_factor_matrix(df)
+    close = df["close"]
+    ic_table = factor_ic_table(mat, close, h=horizon, method="rank")
+    groups = factor_group_returns(mat, close, h=horizon)
+    corr = factor_correlation(mat)
+    redundant = find_redundant(mat, threshold=0.85)
+    return mat, ic_table, groups, corr, redundant

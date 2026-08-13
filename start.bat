@@ -24,9 +24,11 @@ REM --- Default port ---
 set PORT=8000
 if not "%1"=="" set PORT=%1
 
-REM --- Find first free port in 8000-8010 (port in use → try next) ---
+REM --- Find first free port in 8000-8010 (in use -> try next) ---
+REM Note: port check lives in scripts/check_port.py (exit 0=in use, 1=free);
+REM inline python -c inside a for-block breaks cmd parsing (parenthesis conflict).
 for /L %%P in (!PORT!,1,8010) do (
-    "%.venv\Scripts\python.exe" -c "import socket,sys; s=socket.socket(); s.settimeout(0.4); r=s.connect_ex(('127.0.0.1',int(sys.argv[1]))); s.close(); sys.exit(0 if r==0 else 1)" %%P
+    ".venv\Scripts\python.exe" scripts\check_port.py %%P
     if !errorlevel!==1 (
         set PORT=%%P
         goto :port_found

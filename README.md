@@ -1,4 +1,4 @@
-# 🤖 Crypto AI Trader
+# Crypto AI Trader
 
 模块化、可扩展的加密货币 AI 量化交易机器人。**所有 AI 能力都通过用户自填的 AI API（OpenAI / DeepSeek / 任意 chat/completions 兼容服务）实现，程序不内置任何 API 密钥。**
 

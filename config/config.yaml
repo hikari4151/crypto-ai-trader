@@ -1,0 +1,30 @@
+# 非敏感运行参数（敏感信息一律走 .env 或 Web 界面加密存储）
+defaults:
+  exchange: binance
+  symbol: BTC/USDT
+  timeframe: 1h
+  start_cash_usdt: 10000.0
+
+trading:
+  auto_start: false            # 启动 Web 时是否自动开始交易循环
+
+ai_tasks:                      # AI 定时任务（秒）
+  market_analysis_interval: 600    # 每 10 分钟市场状态理解
+  optimize_interval: 86400         # 每天策略参数优化
+  review_interval: 604800          # 每周反思复盘
+  analysis_max_candles: 60         # 打包给 AI 的最近K线根数
+
+strategy:
+  default: dual_ma
+
+risk:                          # 默认风控规则（可在界面动态修改）
+  max_loss_per_trade_usd: 50.0
+  max_daily_loss_usd: 200.0
+  min_order_value_usd: 10.0
+  max_trades_per_hour: 20
+  max_position_pct: 0.9
+
+backtest:
+  default_fee_rate: 0.001      # 0.1% 手续费
+  default_slippage: 0.0005     # 0.05% 滑点
+  default_start_cash: 10000.0

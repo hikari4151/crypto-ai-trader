@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# 密钥与敏感配置（绝对不要提交）
+.env
+data/master.key
+data/*.key
+
+# 数据库
+data/*.db
+data/*.db-*
+
+# 日志
+data/logs/
+data/*.log
+data/svc_*.log
+
+# 运行时产物
+data/models/
+data/*.png
+data/shots/
+data/*.csv
+data/backtest_*.json
+
+# 开发调试脚本（data/ 下的 check_/test_/shot_/diag_/e2e_ 脚本按需清理后提交）
+data/check_*.py
+data/test_*.py
+data/shot_*.py
+data/diag_*.py
+data/e2e_*.py
+data/probe*.py
+data/gpu_test.py
+data/geckodriver/
+data/geckodriver.zip
+data/dom_*.txt
+
+# 本地调试脚本（一次性探测/截图，不对外发布）
+scripts/dev/
+
+# 备份文件
+*.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp

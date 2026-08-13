@@ -1,0 +1,3141 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Crypto AI Trader</title>
+<script>
+  // API 访问令牌：读取服务端下发的 Cookie，自动附加到所有请求头（后端 /api/* 鉴权）
+  (function () {
+    function token() {
+      var m = document.cookie.match(/(?:^|; )zx_api_token=([^;]+)/);
+      return m ? decodeURIComponent(m[1]) : "";
+    }
+    var origFetch = window.fetch;
+    window.fetch = function (input, init) {
+      init = init || {};
+      var headers = new Headers(init.headers || {});
+      var t = token();
+      if (t && !headers.has("X-API-Token")) headers.set("X-API-Token", t);
+      return origFetch.call(this, input, Object.assign({}, init, { headers: headers }));
+    };
+  })();
+</script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/vue@3.4/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  *{box-sizing:border-box}
+  [v-cloak]{display:none}
+  :root{
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","PingFang SC","Helvetica Neue","Segoe UI",Arial,sans-serif;
+    --text:#f5f5f7; --muted:#98989f; --border:rgba(255,255,255,.08); --border2:rgba(255,255,255,.13);
+    --menu-bg:rgba(24,24,28,.72); --win-bg:rgba(30,30,36,.78); --bar-bg:rgba(255,255,255,.05);
+    --input-bg:rgba(0,0,0,.3); --accent:#0A84FF; --green:#30d158; --red:#ff453a; --orange:#ff9f0a;
+    --sidebar-bg:rgba(0,0,0,.2); --hover:rgba(255,255,255,.07);
+    --shadow:0 12px 44px rgba(0,0,0,.5);
+  }
+  :root[data-theme="light"]{
+    --text:#1d1d1f; --muted:#6e6e73; --border:rgba(0,0,0,.09); --border2:rgba(0,0,0,.15);
+    --menu-bg:rgba(248,248,250,.8); --win-bg:rgba(248,248,250,.88); --bar-bg:rgba(0,0,0,.03);
+    --input-bg:rgba(0,0,0,.05); --sidebar-bg:rgba(0,0,0,.04); --hover:rgba(0,0,0,.06);
+    --shadow:0 12px 40px rgba(0,0,0,.12); --accent:#007AFF;
+  }
+  html,body{height:100%}
+  body{font-family:var(--font);color:var(--text);overflow-x:hidden;
+    font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+    background:#1c1c1e;
+    background-image:
+      radial-gradient(900px 600px at 80% -8%, rgba(10,132,255,.10), transparent 60%),
+      radial-gradient(800px 560px at -5% 15%, rgba(124,77,255,.08), transparent 55%);
+    background-attachment:fixed;}
+  :root[data-theme="light"] body{background:#f0f0f4;
+    background-image:
+      radial-gradient(900px 600px at 80% -8%, rgba(10,132,255,.08), transparent 60%),
+      radial-gradient(800px 560px at -5% 15%, rgba(124,77,255,.06), transparent 55%);}
+  /* ---------- 浅色模式可读性修复 ----------
+     Tailwind slate-200/300/400 在浅色背景下过浅，统一加深保证对比度 */
+  :root[data-theme="light"] .text-slate-300{color:#6b7280 !important}
+  :root[data-theme="light"] .text-slate-400{color:#71717a !important}
+  :root[data-theme="light"] .text-slate-500{color:#52525b !important}
+  :root[data-theme="light"] .text-slate-200{color:#52525b !important}
+  :root[data-theme="light"] .text-slate-600{color:#3f3f46 !important}
+  :root[data-theme="light"] .text-slate-700{color:#27272a !important}
+  :root[data-theme="light"] .bg-black\/20{background:rgba(0,0,0,.07) !important}
+  :root[data-theme="light"] .bg-black\/30{background:rgba(0,0,0,.10) !important}
+  :root[data-theme="light"] .bg-black\/40{background:rgba(0,0,0,.14) !important}
+  :root[data-theme="light"] .font-mono.text-blue-400{color:#0a6cff !important}
+  /* 浅色模式代码块/等宽文本背景 */
+  :root[data-theme="light"] pre.bg-black\/20{background:rgba(0,0,0,.07) !important}
+  /* 浅色下 pill 标签文字加深 */
+  :root[data-theme="light"] .pill.blue{color:#0055c8 !important;background:rgba(10,132,255,.12)}
+  :root[data-theme="light"] .pill.green{color:#007a2d !important;background:rgba(48,209,88,.12)}
+  :root[data-theme="light"] .pill.orange{color:#b45f00 !important;background:rgba(255,159,10,.12)}
+  :root[data-theme="light"] .pill.purple{color:#5b21b6 !important;background:rgba(124,77,255,.12)}
+  :root[data-theme="light"] .pill.red{color:#cc2f22 !important;background:rgba(255,69,58,.10)}
+  /* 浅色下 bt-badge 加深 */
+  :root[data-theme="light"] .bt-badge{color:#0a6cff;background:rgba(10,132,255,.1)}
+  /* ---------- 排版基础 ---------- */
+  h1,h2,h3{letter-spacing:-.01em;line-height:1.3}
+  p{line-height:1.65}
+  code{font-family:var(--mono);font-size:.9em;background:var(--hover);padding:1px 5px;border-radius:4px}
+  ::selection{background:rgba(63,140,255,.3)}
+  /* macOS 系统设置大标题 */
+  .page-title{font-size:26px;font-weight:600;letter-spacing:-.02em;line-height:1.2;margin:2px 0 6px}
+
+  /* ---------- macOS 菜单栏 ---------- */
+  .menubar{height:44px;display:flex;align-items:center;gap:3px;padding:0 14px;position:fixed;top:0;left:0;right:0;z-index:50;
+    background:var(--menu-bg);backdrop-filter:blur(40px) saturate(200%);border-bottom:1px solid var(--border);}
+  .menu-item{padding:5px 13px;border-radius:7px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .18s cubic-bezier(.3,.9,.4,1);white-space:nowrap;font-weight:500}
+  .menu-item:hover{background:var(--hover);color:var(--text)}
+  .menu-item.active{background:linear-gradient(180deg,var(--accent),#0a5cdc);color:#fff;box-shadow:0 1px 4px rgba(10,132,255,.4),inset 0 1px 0 rgba(255,255,255,.18)}
+  :root[data-theme="light"] .menu-item.active{color:#fff;background:linear-gradient(180deg,#2e8bff,#0a66e0)}
+  .status-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:6px}
+  .dot-on{background:var(--green);box-shadow:0 0 8px rgba(48,209,88,.8)}
+  .dot-off{background:var(--orange);box-shadow:0 0 6px rgba(255,159,10,.6)}
+
+  /* ---------- macOS 窗口 ---------- */
+  .mac-window{background:var(--win-bg);backdrop-filter:blur(40px) saturate(180%);border:1px solid var(--border);
+    border-radius:14px;box-shadow:0 18px 50px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.06);overflow:hidden}
+  :root[data-theme="light"] .mac-window{backdrop-filter:blur(40px) saturate(150%);box-shadow:0 18px 44px rgba(0,0,0,.1),0 4px 14px rgba(0,0,0,.06),inset 0 1px 0 rgba(255,255,255,.9)}
+  .mac-titlebar{display:flex;align-items:center;gap:10px;padding:9px 16px;background:var(--bar-bg);border-bottom:1px solid var(--border);backdrop-filter:blur(20px) saturate(150%)}
+  .mac-title{font-size:12.5px;font-weight:600;color:var(--muted);letter-spacing:.2px}
+  .mac-body{padding:16px}
+  .traffic{display:flex;gap:8px;flex:none}
+  .tl{width:12px;height:12px;border-radius:50%;flex:none;position:relative;transition:filter .12s}
+  .tl.r{background:#ff5f57} .tl.y{background:#febc2e} .tl.g{background:#28c840}
+  /* macOS 红绿灯悬停显示图标 */
+  .traffic:hover .tl.r::after{content:'×';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:9px;font-weight:700;color:rgba(0,0,0,.55);line-height:1}
+  .traffic:hover .tl.y::after{content:'−';position:absolute;top:50%;left:50%;transform:translate(-50%,-52%);font-size:10px;font-weight:700;color:rgba(0,0,0,.55);line-height:1}
+  .traffic:hover .tl.g::after{content:'+';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:10px;font-weight:700;color:rgba(0,0,0,.55);line-height:1}
+
+  /* ---------- macOS 控件 ---------- */
+  .mac-btn{background:rgba(255,255,255,.09);border:1px solid var(--border2);border-radius:8px;padding:7px 16px;
+    font-size:13.5px;color:var(--text);cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:6px;font-weight:500;line-height:1.4;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
+  .mac-btn:hover{background:rgba(255,255,255,.16);transform:translateY(-1px)}
+  .mac-btn:active{transform:translateY(0);box-shadow:inset 0 1px 3px rgba(0,0,0,.2)}
+  .mac-btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+  .mac-btn.primary{background:linear-gradient(180deg,#4b93ff,#0A84FF);border:none;color:#fff;box-shadow:0 1px 4px rgba(10,132,255,.4),inset 0 1px 0 rgba(255,255,255,.2)}
+  .mac-btn.primary:hover{filter:brightness(1.1)}
+  .mac-btn.danger{background:linear-gradient(180deg,#ff6b5e,#e6483a);border:none;color:#fff;box-shadow:0 1px 4px rgba(230,72,58,.35),inset 0 1px 0 rgba(255,255,255,.2)}
+  :root[data-theme="light"] .mac-btn{background:rgba(0,0,0,.05);border-color:rgba(0,0,0,.15)}
+  :root[data-theme="light"] .mac-btn:hover{background:rgba(0,0,0,.09)}
+  /* 浅色模式蓝/红按钮：保留渐变+白字（防止通用浅色覆盖把背景变浅灰导致白字不可见） */
+  :root[data-theme="light"] .mac-btn.primary{background:linear-gradient(180deg,#2e8bff,#0a66e0);border:none;color:#fff;box-shadow:0 1px 4px rgba(10,132,255,.35),inset 0 1px 0 rgba(255,255,255,.2)}
+  :root[data-theme="light"] .mac-btn.primary:hover{background:linear-gradient(180deg,#3d97ff,#1473ef);filter:brightness(1.05)}
+  :root[data-theme="light"] .mac-btn.danger{background:linear-gradient(180deg,#ff5f52,#d93025);border:none;color:#fff;box-shadow:0 1px 4px rgba(217,48,37,.3),inset 0 1px 0 rgba(255,255,255,.2)}
+  :root[data-theme="light"] .mac-btn.danger:hover{background:linear-gradient(180deg,#ff6b5e,#e84b3d);filter:brightness(1.05)}
+  .mac-input{background:var(--input-bg);border:1px solid var(--border2);border-radius:8px;padding:8px 12px;font-size:13.5px;
+    color:var(--text);outline:none;width:100%;transition:box-shadow .15s,border-color .15s;line-height:1.4}
+  .mac-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,132,255,.25)}
+  .mac-input::placeholder{color:var(--muted)}
+  select.mac-input{cursor:pointer}
+  .mac-label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px;font-weight:600;letter-spacing:.2px}
+  .mac-toggle{width:40px;height:24px;border-radius:12px;background:rgba(255,255,255,.16);position:relative;cursor:pointer;transition:.25s;flex:none;box-shadow:inset 0 1px 2px rgba(0,0,0,.2)}
+  :root[data-theme="light"] .mac-toggle{background:rgba(0,0,0,.14)}
+  .mac-toggle.on{background:var(--green)}
+  /* 浅色模式开启状态：确保显示绿色（避免被浅色通用覆盖规则盖掉） */
+  :root[data-theme="light"] .mac-toggle.on{background:var(--green)}
+  .mac-toggle::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;
+    transition:.25s cubic-bezier(.3,1.5,.5,1);box-shadow:0 1px 3px rgba(0,0,0,.4)}
+  .mac-toggle.on::after{left:18px}
+  .mac-seg{display:flex;background:rgba(0,0,0,.26);border-radius:10px;padding:2px;gap:2px;box-shadow:inset 0 1px 2px rgba(0,0,0,.15)}
+  :root[data-theme="light"] .mac-seg{background:rgba(0,0,0,.06)}
+  .mac-seg button{flex:1;padding:6px 14px;border-radius:8px;font-size:12.5px;color:var(--muted);cursor:pointer;transition:.15s;border:none;background:transparent;font-weight:500;white-space:nowrap}
+  .mac-seg button.active{background:rgba(255,255,255,.2);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.28)}
+  :root[data-theme="light"] .mac-seg button.active{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+  /* 仓库分类标签按钮 */
+  .mac-seg-btn{padding:6px 14px;border-radius:8px;font-size:12.5px;color:var(--muted);cursor:pointer;transition:.15s;
+    border:1px solid var(--border2);background:var(--bar-bg);font-weight:500;white-space:nowrap}
+  .mac-seg-btn:hover{background:var(--hover);color:var(--text)}
+  .mac-seg-btn.active{background:var(--accent);color:#fff;border-color:transparent;box-shadow:0 1px 3px rgba(10,132,255,.3)}
+  .mac-card{background:rgba(255,255,255,.045);border:1px solid var(--border);border-radius:11px;padding:14px;backdrop-filter:blur(12px) saturate(140%)}
+  :root[data-theme="light"] .mac-card{background:rgba(0,0,0,.025)}
+  .stat-card{background:var(--win-bg);border:1px solid var(--border);border-radius:14px;padding:14px 18px;backdrop-filter:blur(28px) saturate(170%);transition:border-color .2s,transform .2s,box-shadow .25s}
+  .stat-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 14px 34px rgba(0,0,0,.28),0 3px 10px rgba(0,0,0,.16)}
+  :root[data-theme="light"] .stat-card:hover{box-shadow:0 14px 34px rgba(0,0,0,.12),0 3px 10px rgba(0,0,0,.08)}
+  .stat-card .val{font-size:23px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1.25;background:linear-gradient(180deg,var(--text) 0%,var(--text) 55%,rgba(128,128,134,.85) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;display:inline-block}
+  :root[data-theme="light"] .stat-card .val{background:linear-gradient(180deg,#1d1d1f 0%,#3a3a3c 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+
+  /* ---------- 回测步骤导航 ---------- */
+  .bt-steps{display:flex;align-items:center;gap:0;position:sticky;top:52px;z-index:40;
+    background:var(--menu-bg);backdrop-filter:blur(40px) saturate(200%);border:1px solid var(--border);
+    border-radius:12px;padding:4px;box-shadow:var(--shadow)}
+  .bt-step{display:flex;align-items:center;gap:8px;padding:8px 18px;border-radius:9px;font-size:13px;
+    color:var(--muted);cursor:pointer;transition:all .18s;font-weight:500;white-space:nowrap;flex:1;justify-content:center}
+  .bt-step:hover{background:var(--hover);color:var(--text)}
+  .bt-step.active{background:var(--accent);color:#fff;box-shadow:0 1px 3px rgba(10,132,255,.3)}
+  .bt-step .n{width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-size:11px;font-weight:600;background:rgba(255,255,255,.12);flex:none}
+  .bt-step.active .n{background:rgba(255,255,255,.25)}
+  .bt-step .sep{flex:none}
+  .bt-section{scroll-margin-top:110px}
+  .bt-badge{display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:20px;
+    font-size:11px;font-weight:600;background:rgba(10,132,255,.15);color:#6db3ff}
+  /* ---------- System Settings 布局 ---------- */
+  .settings-wrap{display:flex;min-height:540px}
+  .settings-sidebar{width:200px;background:var(--sidebar-bg);border-right:1px solid var(--border);padding:12px 8px;flex:none}
+  .settings-item{display:flex;align-items:center;gap:9px;padding:7px 11px;border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer;margin-bottom:2px;transition:.15s;font-weight:500}
+  .settings-item:hover{background:var(--hover);color:var(--text)}
+  .settings-item.active{background:var(--accent);color:#fff;box-shadow:0 1px 3px rgba(10,132,255,.3)}
+  :root[data-theme="light"] .settings-item.active{color:#fff}
+  .settings-panel{flex:1;padding:22px;overflow:auto}
+
+  table{width:100%;font-size:13px;border-collapse:collapse;line-height:1.5}
+  th{text-align:left;color:var(--muted);font-weight:600;padding:10px 12px;border-bottom:1px solid var(--border);white-space:nowrap;font-size:11.5px;letter-spacing:.4px;text-transform:uppercase}
+  td{padding:10px 12px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr{transition:background .12s}
+  tbody tr:hover td{background:var(--hover)}
+  .pos{color:var(--green)} .neg{color:var(--red)}
+  .orange-c{color:#ffb340}
+  :root[data-theme="light"] .orange-c{color:#b45f00}
+  .pill{display:inline-flex;align-items:center;gap:5px;padding:3px 12px;border-radius:20px;font-size:11.5px;border:1px solid var(--border2);font-weight:600;line-height:1.4;letter-spacing:.2px}
+  .pill.blue{background:rgba(10,132,255,.15);color:#6db3ff}
+  .pill.green{background:rgba(48,209,88,.14);color:#5fe082}
+  .pill.orange{background:rgba(255,159,10,.15);color:#ffb340}
+  .pill.purple{background:rgba(124,77,255,.18);color:#a68bff}
+  .pill.red{background:rgba(255,69,58,.14);color:#ff8a80}
+  .divider{height:1px;background:var(--border);margin:16px 0}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:6px;border:2px solid transparent;background-clip:content-box;transition:background .2s}
+  ::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.28);background-clip:content-box;border:2px solid transparent}
+  :root[data-theme="light"] ::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);border-radius:6px;border:2px solid transparent;background-clip:content-box}
+  :root[data-theme="light"] ::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.28);border-radius:6px;border:2px solid transparent;background-clip:content-box}
+
+  /* ---------- Toast ---------- */
+  #toasts{position:fixed;top:56px;right:16px;z-index:200;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+  .toast{pointer-events:auto;min-width:220px;max-width:360px;padding:10px 14px;border-radius:10px;font-size:13px;line-height:1.45;
+    background:var(--win-bg);backdrop-filter:blur(24px) saturate(180%);border:1px solid var(--border2);box-shadow:var(--shadow);
+    display:flex;align-items:flex-start;gap:9px;animation:toastIn .22s cubic-bezier(.2,.9,.3,1.2)}
+  .toast.out{animation:toastOut .25s ease forwards}
+  @keyframes toastIn{from{opacity:0;transform:translateY(-8px) scale(.96)}to{opacity:1;transform:none}}
+  @keyframes toastOut{to{opacity:0;transform:translateX(12px)}}
+  .toast .ico{flex:none;font-size:15px;line-height:1.2}
+
+  /* ---------- 动画 ---------- */
+  .fade-enter-active,.fade-leave-active{transition:opacity .16s ease}
+  .fade-enter-from,.fade-leave-to{opacity:0}
+  .page-enter-active{transition:opacity .18s ease,transform .18s ease}
+  .page-enter-from{opacity:0;transform:translateY(6px)}
+  /* 轻量线性动画 */
+  .stat-card{transition:border-color .25s ease,transform .25s ease}
+  .stat-card:hover{transform:translateY(-2px)}
+  .stat-card .val{transition:color .25s ease}
+  .fade-num{animation:numIn .3s ease}
+  @keyframes numIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .card-in{animation:cardIn .28s ease}
+  @keyframes cardIn{from{opacity:0;transform:translateY(6px) scale(.99)}to{opacity:1;transform:none}}
+  .mac-window{transition:border-color .25s ease}
+  /* 骨架屏（加载/空态占位） */
+  .skeleton{display:inline-block;min-width:3.5em;height:1.1em;border-radius:6px;
+    background:linear-gradient(90deg,rgba(255,255,255,.05) 25%,rgba(255,255,255,.11) 50%,rgba(255,255,255,.05) 75%);
+    background-size:200% 100%;animation:skeleton 1.4s ease infinite}
+  :root[data-theme="light"] .skeleton{background:linear-gradient(90deg,rgba(0,0,0,.05) 25%,rgba(0,0,0,.1) 50%,rgba(0,0,0,.05) 75%);
+    background-size:200% 100%;animation:skeleton 1.4s ease infinite}
+  @keyframes skeleton{from{background-position:200% 0}to{background-position:-200% 0}}
+  .val.loading{opacity:.35}
+
+  /* ---------- 增强 ---------- */
+  .stat-card{position:relative;overflow:hidden}
+  .stat-card::before{content:'';position:absolute;inset:0;border-radius:14px;pointer-events:none;
+    background:linear-gradient(180deg,rgba(255,255,255,.045),transparent 40%)}
+  :root[data-theme="light"] .stat-card::before{background:linear-gradient(180deg,rgba(255,255,255,.6),transparent 45%)}
+  .stat-card .ico{font-size:16px;opacity:.85}
+  .stat-card .trend{font-size:11px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums}
+  .stat-card .bg-ico{position:absolute;right:-8px;top:-10px;font-size:52px;opacity:.06;pointer-events:none;transition:opacity .3s ease,transform .3s ease}
+  .stat-card:hover .bg-ico{opacity:.09;transform:scale(1.06) rotate(-2deg)}
+  /* macOS 表格质感：行 hover 过渡 + zebra 极淡 */
+  tbody tr{transition:background .15s ease}
+  tbody tr:nth-child(even) td{background:rgba(128,128,134,.02)}
+  :root[data-theme="light"] tbody tr:nth-child(even) td{background:rgba(0,0,0,.015)}
+  tbody tr:hover td{background:var(--hover)}
+  .menu-item{position:relative}
+  .menu-item.active::after{content:'';position:absolute;left:50%;bottom:3px;width:4px;height:4px;border-radius:50%;
+    background:var(--accent);transform:translateX(-50%);box-shadow:0 0 6px rgba(63,140,255,.9)}
+  .empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
+    padding:36px 0;color:var(--muted)}
+  .empty-state .e-ico{font-size:32px;opacity:.55;filter:drop-shadow(0 2px 6px rgba(0,0,0,.15))}
+  .empty-state .e-txt{font-size:12.5px;letter-spacing:.2px}
+  /* macOS 空态：图标微动效 */
+  .empty-state:hover .e-ico{transform:scale(1.06);transition:transform .2s ease}
+  .empty-state .e-ico{transition:transform .2s ease}
+  .pill.pulse{animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+  /* ---------- 实时价格闪烁 ---------- */
+  .flash{transition:background-color .12s ease,color .12s ease}
+  .flash.up{background:rgba(48,209,88,.28);border-radius:6px;padding:0 6px;margin:0 -6px;animation:flashUp .9s ease}
+  .flash.down{background:rgba(255,69,58,.28);border-radius:6px;padding:0 6px;margin:0 -6px;animation:flashDown .9s ease}
+  @keyframes flashUp{0%{background:rgba(48,209,88,.55)}100%{background:rgba(48,209,88,.28)}}
+  @keyframes flashDown{0%{background:rgba(255,69,58,.55)}100%{background:rgba(255,69,58,.28)}}
+
+  /* ---------- 窄屏适配 ---------- */
+  @media (max-width: 900px) {
+    .menubar .logo-text{display:none}
+    .menubar .pill.blue{display:none}
+  }
+  @media (max-width: 720px) {
+    .menubar{padding:0 8px}
+    .menu-item{padding:5px 9px;font-size:12px}
+    .menubar .hide-narrow{display:none}
+    .menubar .font-mono{display:none}
+  }
+  @media (max-width: 560px) {
+    .menubar .clock-slot{display:none}
+    .menubar .strategy-tag{display:none}
+  }
+
+  /* ========== 苹果风格交互与动效增强（apple-design / ui-ux-pro-max） ========== */
+  /* 按下即时反馈：按钮按下的瞬间缩放（反馈在 pointer-down，不在释放时） */
+  .mac-btn:active{transform:translateY(0) scale(.97)}
+  .mac-btn.primary:active,.mac-btn.danger:active{filter:brightness(.9)}
+  /* 键盘导航焦点可见（可访问性） */
+  .mac-btn:focus-visible,.mac-seg-btn:focus-visible,.mac-seg button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  /* 窗口入场动效：v-if 重建时自然播放（阻尼 1.0，无 overshoot，来自当前值） */
+  @keyframes macWinIn{from{opacity:0;transform:translateY(14px) scale(.985)}to{opacity:1;transform:none}}
+  .mac-window{animation:macWinIn .32s cubic-bezier(.25,.6,.35,1) both}
+  /* 卡片 hover 轻微抬升（材质响应，阴影加深） */
+  .mac-card{transition:transform .2s ease,box-shadow .2s ease,border-color .25s ease}
+  .mac-card:hover{transform:translateY(-1px);box-shadow:0 10px 28px rgba(0,0,0,.2)}
+  :root[data-theme="light"] .mac-card:hover{box-shadow:0 10px 24px rgba(0,0,0,.08)}
+  /* 数字对齐：交易数据用 tabular-nums（价格/盈亏列对齐） */
+  body{font-variant-numeric:tabular-nums}
+  /* macOS 风格细滚动条 */
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:rgba(128,128,128,.28);border-radius:5px;border:2px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-thumb:hover{background:rgba(128,128,128,.45);border:2px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-corner{background:transparent}
+  /* 减动效偏好：关闭位移/缩放动效（保留透明度与颜色反馈） */
+  @media (prefers-reduced-motion: reduce){
+    .mac-window{animation:none}
+    .mac-card{transition:none}
+    .mac-btn,.mac-seg-btn,.mac-seg button{transition:none}
+  }
+</style>
+</head>
+<body class="pt-[44px]">
+<div id="app" v-cloak>
+  <!-- Toast 容器 -->
+  <div id="toasts">
+    <div v-for="t in toasts" :key="t.id" class="toast" :class="t.out?'out':''" @click="dismissToast(t.id)">
+      <span class="ico">{{t.icon}}</span><div style="flex:1;color:var(--text)">{{t.msg}}</div>
+    </div>
+  </div>
+
+  <!-- ================= macOS 菜单栏 ================= -->
+  <div class="menubar">
+    <div class="flex items-center gap-2 mr-2 select-none">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 3c1.9 0 3.4 1.5 3.4 3.4S13.9 11.8 12 11.8 8.6 10.3 8.6 8.4 10.1 5 12 5zm0 14.2c-2.5 0-4.7-1.3-6-3.2.1-2 4-3.1 6-3.1s5.9 1.1 6 3.1c-1.3 1.9-3.5 3.2-6 3.2z" fill="url(#g)"/><defs><linearGradient id="g" x1="2" y1="2" x2="22" y2="22"><stop stop-color="#4b93ff"/><stop offset="1" stop-color="#8a5cff"/></linearGradient></defs></svg>
+      <span class="logo-text text-[13px] font-bold tracking-wide select-none">Crypto AI Trader</span>
+    </div>
+    <div class="flex-1 flex justify-center gap-1">
+      <button v-for="v in views" :key="v.key" @click="switchView(v.key)"
+        class="menu-item" :class="view===v.key?'active':''">{{v.label}}</button>
+    </div>
+    <div class="flex items-center gap-3 text-[12px] text-slate-400">
+      <span class="pill hide-narrow" :class="engineStatus==='running'?'green':'orange'">
+        <span class="status-dot" :class="engineStatus==='running'?'dot-on':'dot-off'"></span>
+        {{engineStatus==='running'?'运行中':'已停止'}}
+      </span>
+      <span class="pill" :class="liveStatus.mode==='live'?'red':liveStatus.mode==='simulated'?'purple':'blue'">{{liveStatus.mode==='live'?'实盘':liveStatus.mode==='simulated'?'模拟实盘':'纸面模拟'}}</span>
+      <span class="strategy-tag hidden md:inline text-slate-500">策略 {{currentStrategy}}</span>
+      <button class="mac-btn" style="padding:4px 9px" @click="toggleTheme()">{{theme==='dark'?'🌙':'☀️'}}</button>
+      <span class="clock-slot font-mono text-slate-400 w-[74px] text-right select-none">{{clock}}</span>
+    </div>
+  </div>
+
+  <!-- 主流交易对候选（datalist：可打字 + 下拉选择主流币种，避免纯手输） -->
+  <datalist id="popularSymbolList">
+    <option v-for="s in popularSymbols" :key="s" :value="s"></option>
+    <option value="LTC/USDT"></option><option value="LINK/USDT"></option><option value="DOT/USDT"></option>
+    <option value="MATIC/USDT"></option><option value="ATOM/USDT"></option><option value="UNI/USDT"></option>
+    <option value="ETH/BTC"></option><option value="BTC/ETH"></option>
+  </datalist>
+
+  <!-- 主流 AI 模型候选（按提供商过滤，仍可自由输入任意模型） -->
+  <datalist id="aiModelList">
+    <template v-if="ai.provider==='openai'">
+      <option value="gpt-4o-mini"></option><option value="gpt-4o"></option>
+      <option value="gpt-4.1-mini"></option><option value="gpt-4.1"></option>
+      <option value="o3-mini"></option><option value="gpt-4-turbo"></option>
+    </template>
+    <template v-else-if="ai.provider==='deepseek'">
+      <option value="deepseek-chat"></option><option value="deepseek-reasoner"></option>
+    </template>
+    <template v-else>
+      <option value="claude-sonnet-4-5"></option><option value="qwen-max"></option>
+      <option value="glm-4-plus"></option><option value="moonshot-v1-32k"></option>
+    </template>
+  </datalist>
+
+  <!-- ================= 主内容 ================= -->
+  <main class="p-5 space-y-5 max-w-[1400px] mx-auto">
+
+    <!-- ========== 仪表盘 ========== -->
+    <section v-if="view==='dashboard'" class="space-y-5">
+      <div class="flex items-center justify-between">
+        <div>
+          <h1 class="page-title">仪表盘</h1>
+        </div>
+        <div class="flex gap-2">
+          <button class="mac-btn primary" @click="startEngine()" v-if="engineStatus!=='running'">▶ 启动引擎</button>
+          <button class="mac-btn danger" @click="stopEngine()" v-else>■ 停止引擎</button>
+        </div>
+      </div>
+
+      <!-- 实时市场快照条 -->
+      <div class="mac-window">
+        <div class="mac-body py-3 px-4">
+          <div class="flex items-center overflow-x-auto" style="scrollbar-width:none">
+            <span class="text-[11px] text-slate-500 font-semibold flex-none mr-5">实时行情</span>
+            <div v-for="(t,i) in dashTickers.slice(0,8)" :key="t.symbol" class="flex items-center gap-2 px-4 flex-none" :style="i>0?'border-left:1px solid var(--border)':''">
+              <span class="text-[12px] font-semibold text-slate-300">{{t.symbol}}</span>
+              <span class="num text-[13px] font-semibold">{{mktPrice(t.last)}}</span>
+              <span class="num text-[11px]" :class="t.change_pct>=0?'pos':'neg'">{{t.change_pct>=0?'+':''}}{{t.change_pct.toFixed(2)}}%</span>
+            </div>
+            <div v-if="!dashTickers.length" class="text-[12px] text-slate-500">加载中…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 实盘钱包错误提示 -->
+      <div v-if="liveStatus.mode==='live' && portfolio?.error" class="mac-card" style="border-color:rgba(255,69,58,.4)">
+        <div class="flex items-center gap-2 text-[12.5px]">
+          <span class="neg">⚠️</span>
+          <span class="neg" style="font-weight:500">实盘钱包获取失败</span>
+          <span class="text-slate-400">· {{portfolio.error}}</span>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="stat-card"><span class="bg-ico">💼</span>
+          <div class="flex items-center gap-2"><span class="ico">💼</span><div class="mac-label mb-0">总资产 (USDT)</div></div>
+          <div v-if="portfolio" class="val mt-1 fade-num">{{fmt(portfolio.equity)}}</div>
+          <div v-else class="skeleton mt-2" style="width:70%"></div></div>
+        <div class="stat-card"><span class="bg-ico">💵</span>
+          <div class="flex items-center gap-2"><span class="ico">💵</span><div class="mac-label mb-0">可用现金</div></div>
+          <div v-if="portfolio" class="val mt-1 fade-num">{{fmt(portfolio.cash)}}</div>
+          <div v-else class="skeleton mt-2" style="width:60%"></div></div>
+        <div class="stat-card"><span class="bg-ico">📊</span>
+          <div class="flex items-center gap-2"><span class="ico">📊</span><div class="mac-label mb-0">持仓市值</div></div>
+          <div v-if="portfolio" class="val mt-1 fade-num">{{fmt(portfolio.positions_value)}}</div>
+          <div v-else class="skeleton mt-2" style="width:55%"></div></div>
+        <div class="stat-card"><span class="bg-ico">💰</span>
+          <div class="flex items-center gap-2"><span class="ico">💰</span><div class="mac-label mb-0">累计已实现盈亏</div></div>
+          <div v-if="perfSummary" class="val mt-1 fade-num" :class="perfSummary.total_pnl>=0?'pos':'neg'">{{fmt(perfSummary.total_pnl)}}</div>
+          <div v-else class="skeleton mt-2" style="width:65%"></div>
+          <div v-if="perfSummary?.win_rate!==undefined" class="trend" :class="perfSummary.total_pnl>=0?'pos':'neg'">
+            胜率 {{pct(perfSummary.win_rate)}} · {{perfSummary.closed_trades||0}} 笔平仓</div></div>
+      </div>
+
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">资金曲线</span>
+        </div>
+        <div class="mac-body p-3"><div id="equityChart" style="height:280px"></div></div>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-2 gap-5">
+        <div class="mac-window">
+          <div class="mac-titlebar">
+            <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+            <span class="mac-title">当前持仓</span>
+          </div>
+          <div class="mac-body">
+            <table><thead><tr><th>交易对</th><th>数量</th><th>均价</th><th>最新价</th><th>浮动盈亏</th></tr></thead>
+            <tbody>
+              <tr v-for="p in (portfolio?.positions||[])" :key="p.symbol">
+                <td class="font-medium">{{p.symbol}}</td><td>{{p.qty}}</td><td>{{fmt(p.avg_price)}}</td>
+                <td>{{fmt(p.last_price)}}</td>
+                <td :class="p.unrealized_pnl>=0?'pos':'neg'">{{fmt(p.unrealized_pnl)}}</td>
+              </tr>
+              <tr v-if="!(portfolio?.positions||[]).length"><td colspan="5"><div class="empty-state"><span class="e-ico">🧺</span><span class="e-txt">暂无持仓 · 启动引擎开始模拟交易</span></div></td></tr>
+            </tbody></table>
+          </div>
+        </div>
+
+        <div class="mac-window">
+          <div class="mac-titlebar">
+            <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+            <span class="mac-title">AI 行情解读</span>
+            <button class="mac-btn ml-auto" style="padding:4px 12px" @click="runAnalysis()" :disabled="analysisLoading">
+              {{analysisLoading?'分析中…':'✨ 立即解读'}}
+            </button>
+          </div>
+          <div class="mac-body">
+            <div v-if="analysis" class="space-y-3 text-[13px]">
+              <div class="flex gap-2 flex-wrap">
+                <span class="pill purple">市场: {{analysis.regime||'未知'}}</span>
+                <span class="pill" :class="analysis.bias==='long'?'green':analysis.bias==='short'?'red':'orange'">
+                  偏向: {{analysis.bias}}</span>
+                <span class="pill blue">置信度: {{analysis.confidence}}</span>
+              </div>
+              <!-- 程序方向复算对比 -->
+              <div v-if="analysis._program?.direction" class="text-[12px] rounded-lg px-3 py-2"
+                :style="{background:'rgba(0,0,0,.25)', border:'1px dashed '+((analysis._program.direction!=='neutral' && analysis._program.direction!==analysis.bias)?'rgba(255,159,10,.6)':'rgba(48,209,88,.4)')}">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-semibold">🔬 程序结构复算</span>
+                  <span class="pill" :class="analysis._program.direction==='long'?'green':analysis._program.direction==='short'?'red':'orange'">
+                    {{analysis._program.direction==='long'?'看多':analysis._program.direction==='short'?'看空':'中性'}}
+                    <span class="opacity-70">评分 {{analysis._program.score>=0?'+':''}}{{analysis._program.score}}</span>
+                  </span>
+                  <span v-if="analysis._program.direction!=='neutral' && analysis._program.direction!==analysis.bias"
+                    class="text-[11px] orange-c">⚠ 与 AI 判断方向不一致</span>
+                  <span v-else-if="analysis._program.direction!=='neutral'" class="text-[11px] pos">✓ 与 AI 判断方向一致</span>
+                </div>
+                <div class="text-[10.5px] text-slate-400 mt-1 leading-relaxed">{{(analysis._program.reasons||[]).join(' · ')}}</div>
+              </div>
+              <!-- 决策连续性提示 -->
+              <div v-if="analysis._continuity?.flip_conflict" class="text-[12px] rounded-lg px-3 py-2"
+                style="background:rgba(255,159,10,.08);border:1px solid rgba(255,159,10,.35)">
+                <span class="orange-c">🔄 {{analysis._continuity.note}}</span>
+              </div>
+              <div v-else-if="analysis._continuity?.flipped" class="text-[12px] text-slate-500">
+                🔄 {{analysis._continuity.note}}
+              </div>
+              <p style="line-height:1.6">{{analysis.summary}}</p>
+              <div v-if="analysis.warnings?.length">
+                <div class="mac-label" style="color:var(--red)">⚠️ 风险提示</div>
+                <ul class="list-disc pl-5 text-slate-400 space-y-1"><li v-for="w in analysis.warnings" :key="w">{{w}}</li></ul>
+              </div>
+              <div v-if="analysis.signals?.length">
+                <div class="mac-label" style="color:var(--green)">💡 建议</div>
+                <ul class="list-disc pl-5 text-slate-400 space-y-1"><li v-for="s in analysis.signals" :key="s">{{s}}</li></ul>
+              </div>
+              <!-- 交易者方程方案 -->
+              <div v-if="analysis.trade_plan" class="text-[12px] rounded-lg px-3 py-2"
+                style="background:rgba(48,209,88,.06);border:1px solid rgba(48,209,88,.35)">
+                <div class="flex items-center gap-2 mb-1">
+                  <span class="font-semibold">📐 交易方案（已过交易者方程）</span>
+                  <span class="pill" :class="analysis.trade_plan.side==='long'?'green':'red'">{{analysis.trade_plan.side==='long'?'做多':'做空'}}</span>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-slate-300">
+                  <span>入场 <b class="num">{{fmt(analysis.trade_plan.entry)}}</b></span>
+                  <span>止损 <b class="num neg">{{fmt(analysis.trade_plan.stop_loss)}}</b></span>
+                  <span>止盈 <b class="num pos">{{fmt(analysis.trade_plan.take_profit)}}</b></span>
+                  <span>预估胜率 <b>{{pct(analysis.trade_plan.win_rate)}}</b></span>
+                </div>
+              </div>
+            </div>
+            <div v-else class="text-slate-500 text-[13px] leading-relaxed">
+              点击「✨ 立即解读」，将实时指标 + 关键位(S/R) + 价格行为快照发送给你配置的 AI API。<br/>
+              <span class="text-slate-600">提示：先在「AI 与 API」页配置并测试 AI 连接。</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">近期交易</span>
+        </div>
+        <div class="mac-body">
+          <table><thead><tr><th>时间</th><th>交易对</th><th>方向</th><th>价格</th><th>数量</th><th>手续费</th><th>盈亏</th><th>原因</th></tr></thead>
+          <tbody>
+            <tr v-for="t in trades.slice(0,8)" :key="t.id">
+              <td class="text-slate-500">{{t.ts}}</td><td>{{t.symbol}}</td>
+              <td :class="t.side==='buy'?'pos':'neg'">{{t.side==='buy'?'买入':'卖出'}}</td>
+              <td>{{fmt(t.price)}}</td><td>{{t.qty}}</td><td>{{fmt(t.fee)}}</td>
+              <td :class="t.pnl>=0?'pos':'neg'">{{fmt(t.pnl)}}</td><td class="text-slate-500 text-[12px]">{{t.reason}}</td>
+            </tr>
+            <tr v-if="!trades.length"><td colspan="8"><div class="empty-state"><span class="e-ico">📭</span><span class="e-txt">暂无交易记录</span></div></td></tr>
+          </tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 行情（实时图表） ========== -->
+    <section v-if="view==='market'" class="space-y-5">
+      <div class="flex items-center justify-between">
+        <div>
+          <h1 class="page-title">实时行情</h1>
+        </div>
+        <div class="flex items-center gap-3 flex-wrap">
+          <div class="mac-seg" style="width:240px">
+            <button v-for="ex in marketExchanges" :key="ex" :class="mkt.exchange===ex?'active':''" @click="switchMarketEx(ex)">{{exLabel[ex]}}</button>
+          </div>
+          <select v-model="mkt.timeframe" class="mac-input" style="width:90px" @change="loadMarket()">
+            <option v-for="tf in marketTimeframes" :key="tf" :value="tf">{{tf}}</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-3 gap-5">
+        <!-- 主图 -->
+        <div class="xl:col-span-2 space-y-5">
+          <div class="mac-window">
+            <div class="mac-titlebar">
+              <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+              <span class="mac-title">{{mkt.symbol}} · {{mkt.timeframe}}</span>
+              <span v-if="mktLast" class="ml-2 num text-[17px] font-semibold flash" :class="[mktChange>=0?'pos':'neg', mktFlash]" style="letter-spacing:-.02em">{{mktPrice(mktLast)}}</span>
+              <span v-if="mktChange!==null" class="num text-[11.5px] font-medium px-2 py-0.5 rounded-full" :class="mktChange>=0?'pill green':'pill red'">{{mktChange>=0?'▲ +':'▼ '}}{{mktChange.toFixed(2)}}%</span>
+              <span class="ml-auto flex items-center gap-2 text-[11px]">
+                <span v-if="mktUpdated" class="text-slate-500">更新 {{mktUpdated}}</span>
+                <span class="text-slate-500" :class="mktLoading?'':'hidden'">加载中…</span>
+              </span>
+            </div>
+            <div class="mac-body p-2">
+              <div v-if="mktLast" class="flex gap-4 px-1 pb-1 text-[11px] text-slate-500 flex-wrap">
+                <span>开 <span class="num" style="color:var(--text)">{{mktPrice(mktO)}}</span></span>
+                <span>高 <span class="num pos">{{mktPrice(mktH)}}</span></span>
+                <span>低 <span class="num neg">{{mktPrice(mktL)}}</span></span>
+                <span>量 <span class="num" style="color:var(--text)">{{fmtVol(mktV)}}</span></span>
+                <span>24h 涨跌 <span class="num" :class="mktChange>=0?'pos':'neg'">{{mktChange>=0?'+':''}}{{mktChange.toFixed(2)}}%</span></span>
+              </div>
+              <div id="marketChart" style="height:392px"></div>
+            </div>
+          </div>
+          <!-- 热门币 -->
+          <div class="mac-window">
+            <div class="mac-titlebar">
+              <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+              <span class="mac-title">热门币种（24h 成交额 Top）</span>
+            </div>
+            <div class="mac-body">
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div v-for="t in mktTickers.slice(0,12)" :key="t.symbol"
+                  class="mac-card cursor-pointer transition-all duration-150 hover:-translate-y-0.5 hover:border-blue-400/40" style="padding:10px"
+                  @click="mkt.symbol=normSym(t.symbol); loadMarket()">
+                  <div class="flex items-center justify-between">
+                    <span class="text-[12px] font-semibold text-slate-300">{{t.symbol}}</span>
+                    <span class="text-[10px] text-slate-600">{{mktVol(t.quote_volume)}}</span>
+                  </div>
+                  <div class="num text-[13px] font-bold mt-0.5">{{mktPrice(t.last)}}</div>
+                  <div class="num text-[11.5px]" :class="t.change_pct>=0?'pos':'neg'">
+                    {{t.change_pct>=0?'▲ +':'▼ '}}{{t.change_pct.toFixed(2)}}%</div>
+                </div>
+              </div>
+              <div v-if="!mktTickers.length" class="empty-state"><span class="e-ico">📡</span><span class="e-txt">暂无行情数据 · 数据源不可达时请检查本地代理</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 涨跌榜 -->
+        <div class="space-y-5">
+          <div class="mac-window">
+            <div class="mac-titlebar">
+              <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+              <span class="mac-title">24h 涨跌榜</span>
+            </div>
+            <div class="mac-body">
+              <div class="flex gap-4">
+                <div style="flex:1">
+                  <div class="mac-label pos">🚀 涨幅榜</div>
+                  <table style="font-size:12px">
+                    <tbody>
+                      <tr v-for="t in (mktOverview?.top_gainers||[])" :key="'g'+t.symbol" class="cursor-pointer" @click="mkt.symbol=normSym(t.symbol); loadMarket()">
+                        <td>{{t.symbol}}</td><td class="text-right num">{{mktPrice(t.last)}}</td>
+                        <td class="text-right num pos">+{{t.change_pct.toFixed(2)}}%</td>
+                      </tr>
+                      <tr v-if="!(mktOverview?.top_gainers||[]).length"><td colspan="3" class="text-slate-500 text-center py-2">暂无</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div style="flex:1">
+                  <div class="mac-label neg">📉 跌幅榜</div>
+                  <table style="font-size:12px">
+                    <tbody>
+                      <tr v-for="t in (mktOverview?.top_losers||[])" :key="'l'+t.symbol" class="cursor-pointer" @click="mkt.symbol=normSym(t.symbol); loadMarket()">
+                        <td>{{t.symbol}}</td><td class="text-right num">{{mktPrice(t.last)}}</td>
+                        <td class="text-right num neg">{{t.change_pct.toFixed(2)}}%</td>
+                      </tr>
+                      <tr v-if="!(mktOverview?.top_losers||[]).length"><td colspan="3" class="text-slate-500 text-center py-2">暂无</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="mac-window">
+            <div class="mac-titlebar">
+              <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+              <span class="mac-title">自定义交易对</span>
+            </div>
+            <div class="mac-body">
+              <div class="flex gap-2">
+                <input v-model="mkt.symbol" class="mac-input" list="popularSymbolList" placeholder="BTC/USDT" @keyup.enter="loadMarket()"/>
+                <button class="mac-btn primary" @click="loadMarket()">查看</button>
+              </div>
+              <div class="mt-3 flex gap-2 flex-wrap">
+                <span v-for="sym in popularSymbols" :key="sym" class="pill cursor-pointer transition"
+                  :class="mkt.symbol===sym?'blue':''" @click="mkt.symbol=sym; loadMarket()">{{sym}}</span>
+              </div>
+              <div class="mt-3 text-[11.5px] text-slate-500 leading-relaxed">
+                💡 行情经后端拉取；若数据源不可达请确认本地代理已开启。
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== AI 与 API（System Settings 风格） ========== -->
+    <section v-if="view==='settings'" class="space-y-5">
+      <div>
+        <h1 class="page-title">AI 与 API</h1>
+      </div>
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">系统设置</span>
+        </div>
+        <div class="settings-wrap">
+          <!-- 侧边栏 -->
+          <div class="settings-sidebar">
+            <div class="settings-item" :class="settingsTab==='ai'?'active':''" @click="settingsTab='ai'"><span>🤖</span> AI 服务</div>
+            <div class="settings-item" :class="settingsTab==='ex'?'active':''" @click="settingsTab='ex'"><span>🔑</span> 交易所 API</div>
+            <div class="settings-item" :class="settingsTab==='logs'?'active':''" @click="settingsTab='logs'"><span>📋</span> 优化日志</div>
+            <div class="settings-item" :class="settingsTab==='about'?'active':''" @click="settingsTab='about'"><span>ℹ️</span> 关于</div>
+          </div>
+
+          <!-- AI 服务 -->
+          <div class="settings-panel" v-if="settingsTab==='ai'">
+            <h2 class="text-[15px] font-bold mb-1">AI 服务</h2>
+            <p class="text-[12px] text-slate-500 mb-5">支持任何 OpenAI chat/completions 兼容接口（OpenAI / DeepSeek / 自定义）</p>
+            <div class="grid grid-cols-2 gap-4 max-w-xl">
+              <div><label class="mac-label">API 提供商</label>
+                <select v-model="ai.provider" class="mac-input">
+                  <option value="openai">OpenAI</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="custom">自定义兼容接口</option>
+                </select></div>
+              <div><label class="mac-label">模型名称</label>
+                <input v-model="ai.model" class="mac-input" list="aiModelList" placeholder="gpt-4o-mini / deepseek-chat"/></div>
+              <div class="col-span-2"><label class="mac-label">API 地址 (Endpoint)</label>
+                <input v-model="ai.base_url" class="mac-input" placeholder="https://api.openai.com/v1"/></div>
+              <div class="col-span-2"><label class="mac-label">API Key（加密存储，仅显示掩码）</label>
+                <input v-model="ai.api_key" type="password" class="mac-input" autocomplete="new-password"
+                  :placeholder="ai.has_api_key ? '已保存：'+ai.api_key_masked+'（留空保持不变）' : 'sk-...'"/></div>
+            </div>
+            <div class="mt-4">
+              <div class="mac-label mb-2">🧠 AI 参数已按功能自动预设</div>
+              <p class="text-[12px] text-slate-500 leading-relaxed mb-2">
+                温度与 Token 不再手动配置——每个 AI 功能已内置最优参数：<b>解读/优化/复盘</b> 用低温度保证客观准确，<b>策略设计</b> 用中高温度探索新思路，<b>因子挖掘</b> 用高温度鼓励创新。
+              </p>
+              <div class="grid grid-cols-2 lg:grid-cols-3 gap-2" v-if="aiFeatureParams">
+                <div v-for="(p,name) in aiFeatureParams" :key="name" class="mac-card" style="padding:8px">
+                  <div class="text-[11px] font-semibold text-slate-300">{{featureParamLabel(name)}}</div>
+                  <div class="text-[11px] text-slate-500 mt-1">温度 {{p.temperature}} · Token {{p.max_tokens}}</div>
+                </div>
+              </div>
+            </div>
+            <div class="flex gap-3 mt-6">
+              <button class="mac-btn primary" @click="saveAiSettings()">保存</button>
+              <button class="mac-btn" @click="testAi()" :disabled="aiTesting">{{aiTesting?'测试中…':'测试连接'}}</button>
+            </div>
+            <div v-if="aiMsg" class="mt-3 text-[13px]" :class="aiMsgOk?'pos':'neg'">{{aiMsg}}</div>
+            <div class="divider"></div>
+            <div class="mac-card">
+              <div class="flex items-center justify-between">
+                <div>
+                  <div class="text-[13px] font-medium">自动行情分析</div>
+                  <div class="text-[12px] text-slate-500">开启后按 config 间隔定时让 AI 解读行情（全自动优化/复盘始终开启）</div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-[11px]" :class="autoAnalysis?'pos':'text-slate-500'">{{autoAnalysis?'已开启':'已关闭'}}</span>
+                  <div class="mac-toggle" :class="autoAnalysis?'on':''" @click="toggleAutoAnalysis()"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 交易所 API -->
+          <div class="settings-panel" v-if="settingsTab==='ex'">
+            <h2 class="text-[15px] font-bold mb-1">交易所 API</h2>
+            <p class="text-[12px] text-slate-500 mb-5">读写权限分离 · 密钥 Fernet 加密存储 · 支持 Binance / OKX / Bybit / Bitget</p>
+            <div class="space-y-4 max-w-xl">
+              <div v-for="ex in ['binance','okx','bybit','bitget']" :key="ex" class="mac-card">
+                <div class="flex items-center justify-between mb-3">
+                  <div class="flex items-center gap-2">
+                    <span class="text-[14px] font-mono uppercase">{{ex}}</span>
+                    <span class="pill" :class="exKeys[ex].has_api_key?'green':'orange'">
+                      {{exKeys[ex].has_api_key?'已配置':'未配置'}}
+                    </span>
+                  </div>
+                  <div class="flex gap-2">
+                    <button class="mac-btn" style="padding:4px 10px" @click="testEx(ex)">测试连接</button>
+                    <button class="mac-btn primary" style="padding:4px 10px" @click="saveExKeys(ex)">保存</button>
+                  </div>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div><label class="mac-label">API Key</label>
+                    <input v-model="exKeys[ex].api_key" type="password" class="mac-input"
+                      :placeholder="exKeys[ex].has_api_key?'已保存 (留空不变)':'API Key'"/></div>
+                  <div><label class="mac-label">Secret</label>
+                    <input v-model="exKeys[ex].secret" type="password" class="mac-input"
+                      :placeholder="exKeys[ex].has_secret?'已保存 (留空不变)':'Secret'"/></div>
+                  <div><label class="mac-label">Password (OKX/Bitget 等)</label>
+                    <input v-model="exKeys[ex].password" type="password" class="mac-input" placeholder="选填"/></div>
+                </div>
+              </div>
+            </div>
+            <div class="mt-4 text-[12px] text-slate-500 leading-relaxed">
+              💡 提示：<br/>
+              · 纸面模式无需任何交易所密钥即可体验全部功能<br/>
+              · 实盘请在交易所开启「现货交易」权限，并用小资金验证<br/>
+              · 网络受限时程序会自动使用本地代理（PROXY_URL 或自动探测 7890/1080 等端口）
+            </div>
+          </div>
+
+          <!-- 优化日志 -->
+          <div class="settings-panel" v-if="settingsTab==='logs'">
+            <h2 class="text-[15px] font-bold mb-4">优化日志</h2>
+            <table><thead><tr><th>时间</th><th>类型</th><th>摘要</th><th>建议/参数</th></tr></thead>
+            <tbody>
+              <tr v-for="o in optLogs" :key="o.id">
+                <td class="text-slate-500">{{o.ts}}</td>
+                <td><span class="pill" :class="o.kind==='review'?'purple':'blue'">{{o.kind==='review'?'复盘':(o.kind==='auto_optimize'?'全自动优化':'参数优化')}}</span></td>
+                <td>{{o.summary}}</td><td class="text-slate-400 text-[11.5px] max-w-[260px] truncate">{{o.suggestion}}</td>
+              </tr>
+              <tr v-if="!optLogs.length"><td colspan="4"><div class="empty-state"><span class="e-ico">🗒️</span><span class="e-txt">暂无优化记录</span></div></td></tr>
+            </tbody></table>
+            <div class="divider"></div>
+            <h3 class="text-[13px] font-bold mb-3">AI 行情解读记录</h3>
+            <div class="space-y-2 max-h-64 overflow-auto">
+              <div v-for="a in analyses" :key="a.id" class="mac-card text-[12px]">
+                <div class="text-slate-500 mb-1">{{a.ts}} · {{a.symbol}}</div>
+                <div class="text-slate-300">{{a.content.slice(0,200)}}</div>
+              </div>
+              <div v-if="!analyses.length" class="empty-state"><span class="e-ico">🤖</span><span class="e-txt">暂无解读记录</span></div>
+            </div>
+          </div>
+
+          <!-- 关于 -->
+          <div class="settings-panel" v-if="settingsTab==='about'">
+            <div class="text-center py-10">
+              <div class="text-5xl mb-3">🤖</div>
+              <h2 class="text-[18px] font-bold">Crypto AI Trader</h2>
+              <p class="text-[13px] text-slate-500 mt-1">v1.2 · macOS Edition</p>
+              <p class="text-[12px] text-slate-500 mt-4 max-w-sm mx-auto leading-relaxed">
+                模块化 AI 量化交易机器人。所有 AI 能力通过你自填的 API 实现，
+                支持关键位(S/R) + 价格行为策略设计、全自动参数优化、历史回测与战绩看板。
+                内置实时行情、多交易所（含 Bitget）与本地代理支持。
+              </p>
+              <div class="flex justify-center gap-3 mt-6">
+                <span class="pill blue">FastAPI</span>
+                <span class="pill purple">Vue 3</span>
+                <span class="pill green">ccxt</span>
+                <span class="pill orange">ECharts</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 策略与工坊 ========== -->
+    <section v-if="view==='strategy'" class="space-y-5">
+      <div>
+        <h1 class="page-title">策略与 AI 工坊</h1>
+      </div>
+
+      <!-- 全部策略管理中心：含版本号/来源/删除/改名 -->
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">🗂 全部策略（软件内生成的所有策略）</span>
+          <span class="ml-auto text-[11px] text-slate-500">{{allStrategies.length}} 个 · 支持改名/删除 · 内置策略受保护</span>
+        </div>
+        <div class="mac-body">
+          <div class="flex gap-2 mb-3 flex-wrap">
+            <button class="mac-seg-btn" :class="allStrategyFilter===''?'active':''" @click="allStrategyFilter=''">全部</button>
+            <button class="mac-seg-btn" :class="allStrategyFilter==='AI'?'active':''" @click="allStrategyFilter='AI'">AI 设计</button>
+            <button class="mac-seg-btn" :class="allStrategyFilter==='迭代'?'active':''" @click="allStrategyFilter='迭代'">AI 迭代</button>
+            <button class="mac-seg-btn" :class="allStrategyFilter==='RL'?'active':''" @click="allStrategyFilter='RL'">DRL 训练</button>
+            <button class="mac-seg-btn" :class="allStrategyFilter==='模板'?'active':''" @click="allStrategyFilter='模板'">仓库模板</button>
+            <button class="mac-seg-btn" :class="allStrategyFilter==='builtin'?'active':''" @click="allStrategyFilter='builtin'">内置</button>
+          </div>
+          <div class="overflow-auto" style="max-height:420px">
+            <table style="font-size:12px">
+              <thead><tr>
+                <th>策略名</th><th>代次</th><th>来源</th><th>说明</th>
+                <th>过拟合</th><th style="text-align:right">操作</th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="s in filteredAllStrategies" :key="s.key">
+                  <td class="font-medium">
+                    <span class="font-mono">{{s.name}}</span>
+                    <span v-if="s.based_on" class="text-[10.5px] text-slate-500"> 基于 {{s.based_on}}</span>
+                  </td>
+                  <td>
+                    <span v-if="s.iter_no" class="pill purple">{{s.name}} 第{{s.iter_no}}代</span>
+                    <span v-else class="pill">{{s.kind==='builtin'?'内置':'—'}}</span>
+                  </td>
+                  <td><span class="pill" :class="s.kind==='builtin'?'blue':s.kind==='RL'?'green':s.kind==='迭代'?'purple':s.kind==='模板'?'orange':'blue'">{{s.source}}</span></td>
+                  <td class="text-slate-400" style="max-width:220px">
+                    <div style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">{{s.title || s.description}}</div>
+                  </td>
+                  <td>
+                    <span v-if="s.overfit" class="pill" :class="s.overfit.verdict==='通过'?'green':s.overfit.verdict==='无法判定'?'orange':'red'">{{s.overfit.verdict}}</span>
+                    <span v-else class="text-slate-500 text-[11px]">—</span>
+                  </td>
+                  <td style="text-align:right">
+                    <div class="flex gap-1.5 justify-end">
+                      <button class="mac-btn" style="padding:3px 10px" @click="applyAnyStrategy(s.name)" :disabled="s.kind==='builtin'||s.blocked_by_overfit">应用</button>
+                      <button class="mac-btn" style="padding:3px 10px" @click="renameStrategy(s)" :disabled="!s.can_edit">改名</button>
+                      <button class="mac-btn danger" style="padding:3px 10px" @click="deleteStrategy(s)" :disabled="!s.can_edit">删除</button>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="!filteredAllStrategies.length">
+                  <td colspan="6"><div class="empty-state"><span class="e-ico">🗂</span><span class="e-txt">暂无策略</span></div></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-2 gap-5">
+        <div class="mac-window">
+          <div class="mac-titlebar">
+            <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+            <span class="mac-title">🧠 AI 策略工坊</span>
+          </div>
+          <div class="mac-body space-y-4">
+            <p class="text-[12px] text-slate-500">让 AI 依据支撑/阻力位与价格行为设计策略、全自动优化，或深度反思迭代（可选指定策略）。</p>
+            <!-- AI 设计策略配置：品种/周期/类型/自定义要求 -->
+            <div class="mac-card" style="padding:10px;border-color:rgba(63,140,255,.25)">
+              <div class="mac-label mb-2">🎨 AI 设计策略配置</div>
+              <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <div>
+                  <label class="mac-label" style="font-size:11px">设计品种</label>
+                  <select v-model="designSymbol" class="mac-input">
+                    <option v-for="s in popularSymbols" :key="s" :value="s">{{s}}</option>
+                    <option value="当前品种">当前品种 ({{currentStrategy}})</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="mac-label" style="font-size:11px">时间周期</label>
+                  <select v-model="designTimeframe" class="mac-input">
+                    <option value="">当前周期</option>
+                    <option v-for="tf in ['1m','5m','15m','30m','1h','4h','1d']" :key="tf" :value="tf">{{tf}}</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="mac-label" style="font-size:11px">策略类型</label>
+                  <select v-model="designType" class="mac-input">
+                    <option value="">默认（AI 自选）</option>
+                    <option value="trend">📈 趋势跟踪</option>
+                    <option value="breakout">⚡ 突破交易</option>
+                    <option value="mean_reversion">🎯 均值回归</option>
+                    <option value="grid">🔲 网格震荡</option>
+                    <option value="custom">✍️ 自定义要求</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="mac-label" style="font-size:11px">操作</label>
+                  <div class="flex gap-2">
+                    <button class="mac-btn primary" @click="designStrategy()" :disabled="designLoading">{{designLoading?'AI 设计中…':'🎨 开始设计'}}</button>
+                  </div>
+                </div>
+              </div>
+              <div v-if="designType==='custom'" class="mt-2">
+                <label class="mac-label" style="font-size:11px">✍️ 自定义设计要求（自由描述你想让 AI 做什么类型的策略）</label>
+                <textarea v-model="designCustom" class="mac-input" rows="2"
+                  placeholder="例：专门做 BTC 暴跌后的快速反弹，跌 3% 且放量时抄底，反弹 1.5% 就跑，单笔最大亏损 2%…"></textarea>
+              </div>
+            </div>
+            <div class="flex gap-3 flex-wrap items-center">
+              <button class="mac-btn" @click="autoOptimize()" :disabled="optLoading">{{optLoading?'优化中…':'⚡ AI 全自动优化'}}</button>
+              <div class="flex items-center gap-2">
+                <select v-model="iterStrategyName" class="mac-input" style="width:170px">
+                  <option value="">当前策略 ({{currentStrategy}})</option>
+                  <option v-for="s in strategyList" :key="s.name" :value="s.name">{{s.name}}</option>
+                </select>
+                <button class="mac-btn" style="border-color:rgba(191,90,242,.4)" @click="iterateStrategy()" :disabled="iterLoading">{{iterLoading?'反思中…':'🧬 AI 深度反思迭代'}}</button>
+              </div>
+            </div>
+            <!-- 优化/反思实时进度 -->
+            <div v-if="optLoading || iterLoading" class="mac-card" style="border-color:rgba(63,140,255,.4)">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="inline-block w-3.5 h-3.5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></span>
+                <span class="text-[12.5px] font-medium">{{aiTaskLabel}}</span>
+                <span class="ml-auto text-[11px] text-slate-500">{{aiTaskPct}}%</span>
+              </div>
+              <div class="w-full h-1.5 rounded bg-black/30 overflow-hidden">
+                <div class="h-full bg-blue-500 transition-all" :style="{width:aiTaskPct+'%'}"></div>
+              </div>
+              <div class="text-[11px] text-slate-400 mt-1">{{aiTaskMessage}}</div>
+            </div>
+            <div v-if="designed" class="mac-card space-y-2" style="border-color:rgba(63,140,255,.35)">
+              <div class="font-mono text-[13px]">{{designed.name}} <span class="text-slate-500 text-[12px]">· {{designed.title}}</span></div>
+              <p class="text-[13px] text-slate-300">{{designed.description}}</p>
+              <div class="text-[12px] text-slate-400 leading-relaxed">📐 逻辑：{{designed.logic}}</div>
+              <pre class="text-[11.5px] text-slate-400 overflow-x-auto bg-black/20 rounded-lg p-2">参数: {{JSON.stringify(designed.params)}}</pre>
+              <div class="text-[12px] text-slate-500" v-if="designed.risk_tips?.length">🛡 风控：{{designed.risk_tips.join('；')}}</div>
+              <button class="mac-btn primary" @click="useDesigned()">▶ 使用此策略</button>
+            </div>
+            <div v-if="optResult" class="mac-card space-y-2" style="border-color:rgba(48,209,88,.35)">
+              <div class="text-[13px] font-semibold pos">✅ 全自动优化完成（已热更新）</div>
+              <div class="text-[12px] text-slate-400">优化重点：{{optResult.focus}}</div>
+              <pre class="text-[11.5px] text-slate-300 overflow-x-auto bg-black/20 rounded-lg p-2">新参数: {{JSON.stringify(optResult.params)}}</pre>
+              <div class="text-[12px] text-slate-400">理由：{{optResult.reason}}</div>
+              <div class="text-[12px] text-slate-500" v-if="optResult.market_features">
+                关键位：支撑 {{optResult.market_features.sr?.support}} / 阻力 {{optResult.market_features.sr?.resistance}}
+                · K线 {{optResult.market_features.pa?.last_candle}} · 量能 {{optResult.market_features.pa?.volume_ratio}}x
+              </div>
+            </div>
+            <div v-if="iterResult" class="mac-card space-y-2" style="border-color:rgba(191,90,242,.45)">
+              <div class="flex items-center gap-2">
+                <span class="text-[13px] font-semibold">🧬 AI 深度反思迭代完成</span>
+                <span class="pill purple">迭代</span>
+                <span v-if="iterResult.version" class="pill">{{iterResult.version}}</span>
+                <span v-if="iterResult.based_on" class="text-[11px] text-slate-500">基于 {{iterResult.based_on}}</span>
+              </div>
+              <div class="text-[12px] text-slate-400" v-if="iterResult.critique">
+                <span class="text-slate-300 font-medium">🔍 对原策略的批判：</span>{{iterResult.critique}}
+              </div>
+              <div class="text-[12px] text-slate-400" v-if="iterResult.improvements?.length">
+                <span class="text-slate-300 font-medium">💡 改进点：</span>
+                <ul class="list-disc pl-5 text-slate-400 space-y-0.5"><li v-for="imp in iterResult.improvements" :key="imp">{{imp}}</li></ul>
+              </div>
+              <div class="font-mono text-[13px]">{{iterResult.name}} <span class="text-slate-500 text-[12px]">· {{iterResult.title}}</span></div>
+              <p class="text-[13px] text-slate-300">{{iterResult.description}}</p>
+              <div class="text-[12px] text-slate-400 leading-relaxed">📐 逻辑：{{iterResult.logic}}</div>
+              <pre class="text-[11.5px] text-slate-300 overflow-x-auto bg-black/20 rounded-lg p-2">参数: {{JSON.stringify(iterResult.params)}}</pre>
+              <div class="text-[12px] text-slate-500" v-if="iterResult.risk_tips?.length">🛡 风控：{{iterResult.risk_tips.join('；')}}</div>
+              <div class="text-[12px] text-slate-500" v-if="iterResult.summary">📝 总结：{{iterResult.summary}}</div>
+              <!-- 迭代前后绩效对比（量化验证正向提升） -->
+              <div v-if="iterResult.comparison" class="rounded-lg bg-black/20 p-3 space-y-2"
+                :style="iterResult.comparison.improved?'border:1px solid rgba(48,209,88,.35)':'border:1px solid rgba(255,69,58,.35)'">
+                <div class="flex items-center gap-2">
+                  <span class="text-[12px] font-semibold" :class="iterResult.comparison.improved?'pos':'neg'">
+                    {{iterResult.comparison.improved?'📈 迭代后绩效提升':'📉 迭代后绩效下降'}}
+                  </span>
+                  <span class="text-[10.5px] text-slate-500">同数据快速回测对比</span>
+                </div>
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                  <div class="text-[11px]"><span class="text-slate-500">总收益：</span>
+                    <span :class="iterResult.comparison.old.total_return>=0?'pos':'neg'">{{pct(iterResult.comparison.old.total_return)}}</span>
+                    <span class="text-slate-500"> → </span>
+                    <span :class="iterResult.comparison.new.total_return>=0?'pos':'neg'">{{pct(iterResult.comparison.new.total_return)}}</span></div>
+                  <div class="text-[11px]"><span class="text-slate-500">夏普：</span>{{iterResult.comparison.old.sharpe}} → {{iterResult.comparison.new.sharpe}}</div>
+                  <div class="text-[11px]"><span class="text-slate-500">回撤：</span>{{pct(iterResult.comparison.old.max_drawdown)}} → {{pct(iterResult.comparison.new.max_drawdown)}}</div>
+                  <div class="text-[11px]"><span class="text-slate-500">胜率：</span>{{pct(iterResult.comparison.old.win_rate)}} → {{pct(iterResult.comparison.new.win_rate)}}</div>
+                </div>
+                <div class="text-[10.5px] text-slate-500">{{iterResult.comparison.note}}</div>
+              </div>
+              <button class="mac-btn primary" @click="useIterated()">▶ 应用此迭代策略</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="mac-window">
+          <div class="mac-titlebar">
+            <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+            <span class="mac-title">当前策略参数</span>
+          </div>
+          <div class="mac-body space-y-4">
+            <div class="flex items-center gap-3">
+              <label class="mac-label mb-0" style="white-space:nowrap">选择策略</label>
+              <select v-model="currentStrategy" class="mac-input" @change="selectStrategy()">
+                <option v-for="s in strategyList" :key="s.name" :value="s.name">{{s.name}} — {{s.description}}</option>
+              </select>
+            </div>
+            <div v-if="paramSchema" class="grid grid-cols-2 gap-4">
+              <div v-for="(spec,name) in paramSchema" :key="name">
+                <label class="mac-label">{{spec.label||name}}</label>
+                <select v-if="spec.type==='str' && spec.choices?.length" v-model="strategyParams[name]" class="mac-input">
+                  <option v-for="c in spec.choices" :key="c" :value="c">{{c}}</option>
+                </select>
+                <input v-else-if="spec.type==='str'" v-model="strategyParams[name]" class="mac-input" :placeholder="spec.choices?'可选: '+spec.choices.join('/'):''"/>
+                <input v-else-if="spec.type==='bool'" type="checkbox" v-model="strategyParams[name]" class="mac-toggle-input"/>
+                <input v-else v-model.number="strategyParams[name]" class="mac-input" :step="spec.type==='float'?'0.001':'1'"/>
+              </div>
+            </div>
+            <button class="mac-btn primary" @click="saveParams()">热更新参数</button>
+            <div class="divider"></div>
+            <h3 class="text-[13px] font-bold">历史 AI 设计策略</h3>
+            <table><thead><tr><th>ID</th><th>代次</th><th>策略名</th><th>标题</th><th></th></tr></thead>
+            <tbody>
+              <tr v-for="s in aiStrategies" :key="s.id">
+                <td>{{s.id}}</td>
+                <td>
+                  <span v-if="s.spec.iter_no" class="pill purple">第{{s.spec.iter_no}}代</span>
+                  <span v-else class="pill">{{s.spec.created_by==='ai_iteration'?'迭代':'—'}}</span>
+                </td>
+                <td class="font-mono">{{s.name}}</td><td class="text-slate-400">{{s.spec.title}}</td>
+                <td><button class="mac-btn" style="padding:3px 10px" @click="useAiStrategy(s.name)">使用</button></td>
+              </tr>
+              <tr v-if="!aiStrategies.length"><td colspan="5"><div class="empty-state"><span class="e-ico">🧠</span><span class="e-txt">暂无 AI 设计策略</span></div></td></tr>
+            </tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">风控规则</span>
+        </div>
+        <div class="mac-body">
+          <div class="grid grid-cols-2 lg:grid-cols-5 gap-4">
+            <div><label class="mac-label">单笔最大亏损 (USDT)</label><input v-model.number="riskRules.max_loss_per_trade_usd" class="mac-input"/></div>
+            <div><label class="mac-label">每日最大亏损 (USDT)</label><input v-model.number="riskRules.max_daily_loss_usd" class="mac-input"/></div>
+            <div><label class="mac-label">最小订单金额 (USDT)</label><input v-model.number="riskRules.min_order_value_usd" class="mac-input"/></div>
+            <div><label class="mac-label">每小时最大交易次数</label><input v-model.number="riskRules.max_trades_per_hour" class="mac-input"/></div>
+            <div><label class="mac-label">最大仓位比例</label><input v-model.number="riskRules.max_position_pct" class="mac-input" step="0.05"/></div>
+          </div>
+          <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mt-4">
+            <div><label class="mac-label">连续亏损保护（笔数）</label><input v-model.number="riskRules.max_consecutive_losses" class="mac-input"/></div>
+            <div><label class="mac-label">冷却时长（分钟）</label><input v-model.number="riskRules.cooldown_minutes" class="mac-input"/></div>
+            <div class="col-span-3 flex items-end">
+              <div class="mac-card flex-1" style="padding:10px"
+                :style="riskCooldown.active?'border-color:rgba(255,69,58,.45)':'border-color:rgba(48,209,88,.35)'">
+                <div class="flex items-center justify-between text-[12px]">
+                  <span class="font-semibold" :class="riskCooldown.active?'neg':'pos'">
+                    {{riskCooldown.active?'🛡 冷却中 — 暂停新开仓':'✅ 冷却状态正常'}}
+                  </span>
+                  <span class="text-slate-500" v-if="riskCooldown.active">剩余 {{Math.ceil(riskCooldown.remaining_sec/60)}} 分钟</span>
+                </div>
+                <div class="text-[11px] text-slate-500 mt-1">连续亏损 {{riskCooldown.consecutive_losses}} 笔 · 触发 {{riskRules.max_consecutive_losses||3}} 笔后冷却 {{riskRules.cooldown_minutes||15}} 分钟</div>
+              </div>
+            </div>
+          </div>
+          <button class="mac-btn primary mt-4" @click="saveRisk()">保存风控规则</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 历史回测 ========== -->
+    <section v-if="view==='backtest'" class="space-y-5">
+      <div class="flex items-center justify-between">
+        <h1 class="page-title" style="margin:0">历史回测</h1>
+        <span v-if="btResult" class="bt-badge">引擎: {{btResult.metrics.backtest_engine||'vectorized'}} · {{btResult.metrics.elapsed_sec||'-'}}s</span>
+      </div>
+
+      <!-- 步骤导航：始终可见，点击滚动到对应区块 -->
+      <div class="bt-steps">
+        <button class="bt-step" :class="btStep==='config'?'active':''" @click="btGoto('config')">
+          <span class="n">1</span> 配置参数
+        </button>
+        <button class="bt-step" :class="btStep==='monitor'?'active':''" @click="btGoto('monitor')">
+          <span class="n">2</span> 实时监控
+        </button>
+        <button class="bt-step" :class="btStep==='result'?'active':''" @click="btGoto('result')">
+          <span class="n">3</span> 回测结果
+        </button>
+        <button class="bt-step" :class="btStep==='history'?'active':''" @click="btGoto('history')">
+          <span class="n">4</span> 历史记录
+        </button>
+      </div>
+
+      <div class="mac-window bt-section" id="bt-config">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">回测配置</span>
+          <div class="flex gap-2 ml-auto flex-wrap">
+            <button class="mac-btn" style="border-color:rgba(48,209,88,.5)" @click="runGridScan()" :disabled="gridScanLoading">
+              {{gridScanLoading?'扫描中…':'🎚 参数扫描'}}
+            </button>
+            <button class="mac-btn" style="border-color:rgba(90,200,250,.5)" @click="compareStrategies()" :disabled="compareLoading">
+              {{compareLoading?'对比中…':'🏆 策略对比'}}
+            </button>
+            <button class="mac-btn" style="border-color:rgba(255,159,10,.5)" @click="runOverfit()" :disabled="overfitLoading">
+              {{overfitLoading?'过拟合检测中…':'🛡 过拟合检测'}}
+            </button>
+            <button class="mac-btn primary" @click="runBacktest()" :disabled="btRunning">{{btRunning?'回测中…':'▶ 开始回测'}}</button>
+          </div>
+        </div>
+        <div class="mac-body">
+          <div class="flex gap-2 mb-5 max-w-md">
+            <div class="mac-seg" style="flex:1">
+              <button :class="bt.data_source==='demo'?'active':''" @click="bt.data_source='demo'">演示数据</button>
+              <button :class="bt.data_source==='exchange'?'active':''" @click="bt.data_source='exchange'">交易所</button>
+              <button :class="bt.data_source==='csv'?'active':''" @click="bt.data_source='csv'">CSV 文件</button>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div v-if="bt.data_source==='exchange'"><label class="mac-label">交易所</label>
+              <select v-model="bt.exchange" class="mac-input"><option value="binance">Binance</option><option value="okx">OKX</option><option value="bybit">Bybit</option><option value="bitget">Bitget</option></select></div>
+            <div v-if="bt.data_source==='csv'"><label class="mac-label">CSV 路径</label>
+              <input v-model="bt.csv_path" class="mac-input" placeholder="/path/to/btc_usdt_1h.csv"/></div>
+            <div><label class="mac-label">交易对</label><input v-model="bt.symbol" class="mac-input" list="popularSymbolList" placeholder="BTC/USDT 或输入任意"/></div>
+            <div><label class="mac-label">周期</label>
+              <select v-model="bt.timeframe" class="mac-input">
+                <option value="1m">1m</option><option value="5m">5m</option><option value="15m">15m</option>
+                <option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option></select></div>
+            <div><label class="mac-label">策略</label>
+              <select v-model="bt.strategy_name" class="mac-input">
+                <option v-for="s in strategyList" :key="s.name" :value="s.name">{{s.name}}</option></select></div>
+            <div><label class="mac-label">起始资金 (USDT)</label><input v-model.number="bt.start_cash" class="mac-input"/></div>
+            <div><label class="mac-label">手续费率</label><input v-model.number="bt.fee_rate" class="mac-input" step="0.0001"/></div>
+            <div><label class="mac-label">滑点</label><input v-model.number="bt.slippage" class="mac-input" step="0.0001"/></div>
+            <div v-if="bt.data_source==='exchange'"><label class="mac-label">K线数量</label><input v-model.number="bt.limit" class="mac-input"/></div>
+            <div><label class="mac-label">GPU 加速</label>
+              <div class="flex items-center gap-2 mt-1">
+                <div class="mac-toggle" :class="bt.use_gpu?'on':''" @click="bt.use_gpu=!bt.use_gpu"></div>
+                <span class="text-[12px]" :class="bt.use_gpu?'pos':'text-slate-500'">{{bt.use_gpu?'已启用':'未启用'}}</span>
+              </div>
+              <div class="text-[10.5px] text-slate-500 mt-1">向量化引擎 · 需 NVIDIA GPU</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 过拟合检测报告 -->
+      <div v-if="overfitResult" class="mac-window bt-section" id="bt-overfit"
+        :style="overfitResult.verdict==='通过'?'border-color:rgba(48,209,88,.4)':overfitResult.verdict==='无法判定'?'border-color:rgba(255,159,10,.4)':'border-color:rgba(255,69,58,.45)'">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">🛡 过拟合检测报告</span>
+          <span class="ml-auto text-[11px]" :class="overfitResult.verdict==='通过'?'pos':overfitResult.verdict==='无法判定'?'text-slate-400':'neg'">
+            {{overfitResult.verdict==='通过'?'✓ 通过':overfitResult.verdict==='无法判定'?'⚠ 无法判定':'✗ '+overfitResult.verdict}}
+          </span>
+        </div>
+        <div class="mac-body">
+          <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-4">
+            <div class="stat-card"><div class="mac-label">健康评分</div>
+              <div class="val" :class="(overfitResult.score||0)>=60?'pos':(overfitResult.score||0)>=40?'text-slate-300':'neg'" style="font-size:20px">{{overfitResult.score!=null?overfitResult.score:'-'}}<span class="text-[11px] text-slate-500">/100</span></div></div>
+            <div class="stat-card"><div class="mac-label">样本内收益</div><div class="val fade-num" style="font-size:16px">{{pct(overfitResult.is_ret)}}</div></div>
+            <div class="stat-card"><div class="mac-label">样本外收益</div><div class="val fade-num" :class="(overfitResult.oos_ret||0)>=0?'pos':'neg'" style="font-size:16px">{{pct(overfitResult.oos_ret)}}</div></div>
+            <div class="stat-card"><div class="mac-label">样本外衰减</div><div class="val fade-num" :class="(overfitResult.decay||0)>=0.6?'neg':'text-slate-300'" style="font-size:16px">{{pct(overfitResult.decay)}}</div></div>
+            <div class="stat-card"><div class="mac-label">PBO 过拟合概率</div><div class="val fade-num" :class="(overfitResult.pbo||0)>=0.5?'neg':(overfitResult.pbo||0)>=0.25?'text-slate-300':'pos'" style="font-size:16px">{{pct(overfitResult.pbo)}}</div></div>
+          </div>
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+            <div class="stat-card"><div class="mac-label">样本外夏普</div><div class="val text-slate-300" style="font-size:15px">{{overfitResult.oos_sharpe}}</div></div>
+            <div class="stat-card"><div class="mac-label">稳定性(正收益折占比)</div><div class="val text-slate-300" style="font-size:15px">{{pct(overfitResult.stability)}}</div></div>
+            <div class="stat-card"><div class="mac-label">前推验证折数</div><div class="val text-slate-300" style="font-size:15px">{{overfitResult.n_folds}} 折</div></div>
+            <div class="stat-card"><div class="mac-label">样本外夏普/稳定性</div><div class="val text-slate-300" style="font-size:15px">{{overfitResult.oos_sharpe}} / {{overfitResult.stability}}</div></div>
+          </div>
+          <div v-if="overfitResult.flags?.length" class="space-y-1.5">
+            <div v-for="(f,i) in overfitResult.flags" :key="i" class="text-[12px] leading-relaxed"
+              :class="f.level==='high'?'neg':f.level==='warn'?'text-orange-400':'text-slate-400'">
+              <span v-if="f.level==='high'">🔴</span><span v-else-if="f.level==='warn'">🟡</span><span v-else>🔵</span>
+              {{f.msg}}
+            </div>
+          </div>
+          <div class="text-[11px] text-slate-500 mt-3">原理：时间序列前推验证（训练段选参 → 样本外验证，杜绝未来函数）+ 参数邻域 PBO 过拟合概率。
+            样本外收益为负或 PBO 过高 → 该策略很可能只在历史数据上"好看"（AI 作弊识别）。</div>
+        </div>
+      </div>
+
+      <!-- 参数网格扫描结果 -->
+      <div v-if="gridScanResult" class="mac-window bt-section" id="bt-gridscan" style="border-color:rgba(48,209,88,.4)">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">🎚 参数网格扫描结果</span>
+          <span class="ml-auto text-[11px] text-slate-500">扫描 {{gridScanResult.scanned}}/{{gridScanResult.total_combos}} 组 · 已按收益+夏普-回撤综合评分排序</span>
+        </div>
+        <div class="mac-body">
+          <div v-if="gridScanResult.best" class="mac-card mb-3" style="border-color:rgba(48,209,88,.45)">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-[13px] font-semibold pos">🏆 最优参数</span>
+              <span class="pill blue">{{gridScanResult.strategy}}</span>
+              <span class="text-[11px] text-slate-500 font-mono">{{JSON.stringify(gridScanResult.best.params)}}</span>
+              <span class="ml-auto flex gap-2">
+                <button class="mac-btn primary" style="padding:3px 10px" @click="useGridBest()">▶ 应用最优参数</button>
+                <button class="mac-btn" style="padding:3px 10px" @click="runOverfitForBest()">🛡 最优过拟合检测</button>
+              </span>
+            </div>
+          </div>
+          <div class="overflow-auto" style="max-height:360px">
+            <table style="font-size:12px">
+              <thead><tr><th>参数</th><th>综合评分</th><th>总收益</th><th>夏普</th><th>回撤</th><th>胜率</th><th>交易数</th></tr></thead>
+              <tbody>
+                <tr v-for="(r,i) in gridScanResult.results" :key="i" :class="i===0?'pos font-semibold':''">
+                  <td class="font-mono" style="max-width:280px">{{JSON.stringify(r.params)}}</td>
+                  <td class="num" :class="r.score>=0?'pos':'neg'">{{r.score.toFixed(2)}}</td>
+                  <td class="num" :class="r.total_return>=0?'pos':'neg'">{{pct(r.total_return)}}</td>
+                  <td class="num">{{r.sharpe}}</td>
+                  <td class="num neg">{{pct(r.max_drawdown)}}</td>
+                  <td class="num">{{pct(r.win_rate)}}</td>
+                  <td class="num">{{r.total_trades}}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 策略对比结果 -->
+      <div v-if="compareResult" class="mac-window bt-section" id="bt-compare" style="border-color:rgba(90,200,250,.4)">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">🏆 策略对比（{{compareResult.symbol}} · {{compareResult.timeframe}}）</span>
+          <span class="ml-auto text-[11px] text-slate-500">同一数据上并列跑所有内置策略</span>
+        </div>
+        <div class="mac-body">
+          <div class="overflow-auto">
+            <table style="font-size:12px">
+              <thead><tr><th>策略</th><th>综合评分</th><th>总收益</th><th>夏普</th><th>回撤</th><th>胜率</th><th>盈亏比</th><th>交易数</th></tr></thead>
+              <tbody>
+                <tr v-for="(r,i) in compareResult.results" :key="r.name" :class="i===0?'pos font-semibold':''">
+                  <td class="font-medium">{{r.name}}<div class="text-[10.5px] text-slate-500">{{r.description}}</div></td>
+                  <td class="num">{{((r.total_return*10)+(r.sharpe*2)-(r.max_drawdown*5)).toFixed(2)}}</td>
+                  <td class="num" :class="r.total_return>=0?'pos':'neg'">{{pct(r.total_return)}}</td>
+                  <td class="num">{{r.sharpe}}</td>
+                  <td class="num neg">{{pct(r.max_drawdown)}}</td>
+                  <td class="num">{{pct(r.win_rate)}}</td>
+                  <td class="num">{{r.profit_factor}}</td>
+                  <td class="num">{{r.total_trades}}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 回测实时监控窗口 -->
+      <div v-if="btLive.running || btLive.done || btRunning" class="mac-window bt-section" id="bt-monitor" style="border-color:rgba(63,140,255,.35)">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">⏱ 回测实时监控</span>
+          <span class="ml-auto text-[11px]" :class="btLive.running?'pos':'text-slate-500'">
+            {{btLive.running?('进度 '+btLive.pct+'%'):'已完成'}}
+          </span>
+          <div class="ml-2 w-24 h-1.5 rounded bg-black/30 overflow-hidden" style="flex:none">
+            <div class="h-full bg-blue-500 transition-all" :style="{width:(btLive.pct||0)+'%'}"></div>
+          </div>
+        </div>
+        <div class="mac-body">
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+            <div class="stat-card"><div class="mac-label">当前价格</div><div class="val fade-num" style="font-size:18px">{{mktPrice(btLive.last_price)}}</div></div>
+            <div class="stat-card"><div class="mac-label">当前持仓</div><div class="val fade-num" style="font-size:18px">{{btLive.position||0}}</div></div>
+            <div class="stat-card"><div class="mac-label">现金</div><div class="val fade-num" style="font-size:18px">{{fmt(btLive.cash)}}</div></div>
+            <div class="stat-card"><div class="mac-label">最近成交盈亏</div>
+              <div class="val fade-num" style="font-size:18px" :class="(btLive.last_trade?.pnl||0)>=0?'pos':'neg'">{{fmt(btLive.last_trade?.pnl)}}</div></div>
+          </div>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div>
+              <div class="mac-label">实时 K线（滚动）</div>
+              <div class="mac-card" style="padding:8px">
+                <table style="font-size:11px">
+                  <thead><tr><th>#</th><th>收盘</th><th>MA10</th><th>MA30</th><th>RSI</th><th>MACD</th></tr></thead>
+                  <tbody>
+                    <tr v-for="(k,i) in btLive.kline_history.slice(-12)" :key="i">
+                      <td class="text-slate-500">{{k.i}}</td>
+                      <td class="num">{{mktPrice(k.close)}}</td>
+                      <td class="num text-slate-400">{{mktPrice(k.ma_fast)}}</td>
+                      <td class="num text-slate-400">{{mktPrice(k.ma_slow)}}</td>
+                      <td class="num" :class="k.rsi>70?'neg':k.rsi<30?'pos':'text-slate-400'">{{k.rsi!=null?k.rsi.toFixed(1):'-'}}</td>
+                      <td class="num text-slate-400">{{k.macd!=null?k.macd.toFixed(3):'-'}}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div>
+              <div class="mac-label">最近成交（卖出平仓）</div>
+              <div class="mac-card" style="padding:8px">
+                <table style="font-size:11px">
+                  <thead><tr><th>K线</th><th>价格</th><th>数量</th><th>盈亏</th><th>原因</th></tr></thead>
+                  <tbody>
+                    <tr v-for="(t,i) in btLive.recent_trades" :key="i">
+                      <td class="text-slate-500">{{t.i}}</td>
+                      <td class="num">{{mktPrice(t.price)}}</td>
+                      <td class="num">{{t.qty}}</td>
+                      <td class="num" :class="t.pnl>=0?'pos':'neg'">{{fmt(t.pnl)}}</td>
+                      <td class="text-slate-500" style="max-width:140px">{{t.reason}}</td>
+                    </tr>
+                    <tr v-if="!btLive.recent_trades.length"><td colspan="5" class="text-center text-slate-500 py-2">暂无平仓</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="btResult" class="space-y-5 bt-section" id="bt-result">
+        <div class="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          <div class="stat-card"><div class="mac-label">总收益率</div><div class="val fade-num" :class="btResult.metrics.total_return>=0?'pos':'neg'">{{pct(btResult.metrics.total_return)}}</div></div>
+          <div class="stat-card"><div class="mac-label">年化收益率</div><div class="val fade-num" :class="btResult.metrics.annual_return>=0?'pos':'neg'">{{pct(btResult.metrics.annual_return)}}</div></div>
+          <div class="stat-card"><div class="mac-label">最大回撤</div><div class="val neg">{{pct(btResult.metrics.max_drawdown)}}</div></div>
+          <div class="stat-card"><div class="mac-label">夏普比率</div><div class="val fade-num">{{btResult.metrics.sharpe}}</div></div>
+          <div class="stat-card"><div class="mac-label">胜率</div><div class="val fade-num">{{pct(btResult.metrics.win_rate)}}</div></div>
+        </div>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div class="stat-card"><div class="mac-label">盈亏比</div><div class="val fade-num" style="font-size:16px">{{btResult.metrics.payoff_ratio}}</div></div>
+          <div class="stat-card"><div class="mac-label">利润因子</div><div class="val fade-num" style="font-size:16px">{{btResult.metrics.profit_factor}}</div></div>
+          <div class="stat-card"><div class="mac-label">成交次数</div><div class="val fade-num" style="font-size:16px">{{btResult.metrics.total_trades}}</div></div>
+          <div class="stat-card"><div class="mac-label">期末权益</div><div class="val fade-num" style="font-size:16px">{{fmt(btResult.metrics.final_equity)}}</div></div>
+        </div>
+        <div class="mac-window">
+          <div class="mac-titlebar">
+            <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+            <span class="mac-title">权益曲线</span>
+          </div>
+          <div class="mac-body p-3"><div id="btChart" style="height:300px"></div></div>
+        </div>
+        <div class="mac-window">
+          <div class="mac-titlebar">
+            <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+            <span class="mac-title">回测交易明细（平仓）</span>
+          </div>
+          <div class="mac-body">
+            <table><thead><tr><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>手续费</th><th>盈亏</th><th>原因</th></tr></thead>
+            <tbody><tr v-for="(t,i) in btResult.trades" :key="i">
+              <td class="text-slate-500">{{t.ts}}</td><td :class="t.side==='sell'?'pos':'neg'">{{t.side}}</td>
+              <td>{{fmt(t.price)}}</td><td>{{t.qty}}</td><td>{{fmt(t.fee)}}</td>
+              <td :class="t.pnl>=0?'pos':'neg'">{{fmt(t.pnl)}}</td><td class="text-slate-500">{{t.reason}}</td>
+            </tr></tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <div class="mac-window bt-section" id="bt-history">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">历史回测记录</span>
+          <button class="mac-btn ml-auto" style="padding:3px 10px" @click="btGoto('config')">↺ 新建回测</button>
+        </div>
+        <div class="mac-body">
+          <table><thead><tr><th>ID</th><th>时间</th><th>状态</th><th>总收益</th><th>夏普</th><th>回撤</th><th>胜率</th></tr></thead>
+          <tbody>
+            <tr v-for="r in btHistory" :key="r.id" class="cursor-pointer" @click="loadBtResult(r.id)">
+              <td>{{r.id}}</td><td class="text-slate-500">{{r.created_at}}</td>
+              <td><span class="pill" :class="r.status==='running'?'orange':'green'">{{r.status}}</span></td>
+              <td>{{pct(r.total_return)}}</td><td>{{r.sharpe}}</td><td>{{pct(r.max_drawdown)}}</td><td>{{pct(r.win_rate)}}</td>
+            </tr>
+          </tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 量化研究 ========== -->
+    <section v-if="view==='quant'" class="space-y-5">
+      <div class="flex items-center justify-between">
+        <h1 class="page-title" style="margin:0">量化研究</h1>
+        <div class="flex gap-2 items-center">
+          <div class="mac-seg" style="padding:2px">
+            <button :class="qdata_source==='demo'?'active':''" @click="qdata_source='demo'">演示数据</button>
+            <button :class="qdata_source==='exchange'?'active':''" @click="qdata_source='exchange'">交易所</button>
+            <button :class="qdata_source==='csv'?'active':''" @click="qdata_source='csv'">CSV</button>
+          </div>
+          <input v-model="qsymbol" class="mac-input" list="popularSymbolList" style="width:130px" placeholder="BTC/USDT"/>
+          <select v-model="qtimeframe" class="mac-input" style="width:90px">
+            <option v-for="tf in ['1m','5m','15m','30m','1h','4h','1d']" :key="tf" :value="tf">{{tf}}</option>
+          </select>
+          <select v-model="qhorizon" class="mac-input" style="width:110px">
+            <option :value="1">1期预测</option><option :value="3">3期预测</option>
+            <option :value="5">5期预测</option><option :value="10">10期预测</option>
+          </select>
+          <button class="mac-btn primary" @click="loadFactorAnalysis()">分析</button>
+        </div>
+      </div>
+
+      <!-- 因子分析 -->
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">📊 因子库与有效性分析</span>
+          <span v-if="factorStats" class="ml-auto text-[11px] text-slate-500">{{factorStats.n_factors}} 个因子 · {{factorStats.n_candles}} 根K线</span>
+        </div>
+        <div class="mac-body">
+          <div class="flex gap-2 mb-3 flex-wrap items-center">
+            <span class="text-[11px] text-slate-500 font-semibold">内置因子：</span>
+            <span v-for="f in factorLibrary.slice(0,12)" :key="f.key" class="pill" style="cursor:pointer" :title="f.description"
+              @click="toggleFactor(f.key)">{{f.name}}</span>
+            <span v-if="factorLibrary.length>12" class="text-[11px] text-slate-500">+{{factorLibrary.length-12}} 更多</span>
+          </div>
+          <div v-if="factorLoading" class="flex items-center gap-2 text-[12.5px] text-slate-400 py-4">
+            <span class="inline-block w-3.5 h-3.5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></span>
+            正在计算因子矩阵与 IC…
+          </div>
+          <template v-else-if="factorIcs.length">
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+              <div class="stat-card"><div class="mac-label">最佳因子</div>
+                <div class="val pos" style="font-size:18px">{{factorIcs[0]?.key}}</div>
+                <div class="trend">RankIC {{factorIcs[0]?.rank_ic}}</div></div>
+              <div class="stat-card"><div class="mac-label">因子数量</div>
+                <div class="val" style="font-size:18px">{{factorIcs.length}}</div>
+                <div class="trend">按 |RankIC| 排序</div></div>
+              <div class="stat-card"><div class="mac-label">单调分组因子</div>
+                <div class="val" style="font-size:18px">{{monotonicCount}}</div>
+                <div class="trend">分组收益单调</div></div>
+              <div class="stat-card"><div class="mac-label">高相关对</div>
+                <div class="val" style="font-size:18px">{{factorRedundant.length}}</div>
+                <div class="trend">|ρ|≥0.85</div></div>
+            </div>
+            <div class="mac-label mb-2">RankIC 排序条形图（正=有效方向，负=反向有效）</div>
+            <div id="factorIcChart" style="height:280px" v-if="factorIcs.length"></div>
+            <div class="mac-label mb-2 mt-3">因子 IC 明细（未来 {{qhorizon }} 期收益）</div>
+            <div class="overflow-auto" style="max-height:340px">
+              <table style="font-size:12px">
+                <thead><tr><th>因子</th><th>类别</th><th>RankIC</th><th>IC</th><th>ICIR</th><th>IC胜率</th><th>样本</th></tr></thead>
+                <tbody>
+                  <tr v-for="r in factorIcs" :key="r.key">
+                    <td class="font-medium">{{factorName(r.key)}} <span class="text-slate-500 font-mono text-[10.5px]">{{r.key}}</span></td>
+                    <td><span class="pill" :class="factorCatColor(r.key)">{{factorCatLabel(r.key)}}</span></td>
+                    <td class="num" :class="r.rank_ic>=0?'pos':'neg'">{{r.rank_ic.toFixed(4)}}</td>
+                    <td class="num text-slate-400">{{r.ic.toFixed(4)}}</td>
+                    <td class="num text-slate-400">{{r.icir.toFixed(3)}}</td>
+                    <td class="num text-slate-400">{{pct(r.ic_win_rate)}}</td>
+                    <td class="num text-slate-500">{{r.n}}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+          <div v-else-if="!factorLoading" class="empty-state">
+            <span class="e-ico">📊</span><span class="e-txt">点击上方「分析」计算因子矩阵与 IC</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 因子使用场景：当前信号 + 因子择时策略回测 -->
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">🎯 因子使用场景（当前信号 + 可落地策略）</span>
+          <button class="mac-btn ml-auto" style="padding:3px 12px" @click="loadFactorUsage()" :disabled="usageLoading">
+            {{usageLoading?'分析中…':'⚡ 生成使用方案'}}
+          </button>
+        </div>
+        <div class="mac-body">
+          <p class="text-[12px] text-slate-500 mb-4">因子不只是分析图表——把高 IC 因子转成<b>当前多空信号</b>，并自动生成可回测的<b>因子择时策略</b>。</p>
+          <template v-if="factorUsage">
+            <div class="mac-label mb-2">📡 当前因子信号（z-score 判定，⚡=有信号）</div>
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 mb-4">
+              <div v-for="s in factorUsage.signals" :key="s.key" class="mac-card" style="padding:10px"
+                :style="s.signal!=='中性'?(s.signal==='买入'?'border-color:rgba(48,209,88,.45)':'border-color:rgba(255,69,58,.45)'):''">
+                <div class="flex items-center justify-between">
+                  <span class="text-[12px] font-semibold">{{s.name}}</span>
+                  <span class="pill" :class="s.signal==='买入'?'green':s.signal==='卖出'?'red':'blue'"
+                    :title="s.signal!=='中性'?'信号触发':''">{{s.signal}}<template v-if="s.signal!=='中性'"> ⚡</template></span>
+                </div>
+                <div class="text-[11px] text-slate-500 mt-1 font-mono">{{s.key}} · z={{s.zscore}}</div>
+                <div class="text-[11px] text-slate-400">{{s.label}} · IC{{s.ic_dir>0?'+':''}}{{s.rank_ic.toFixed(3)}}</div>
+              </div>
+            </div>
+            <div v-if="factorUsage.recommended" class="mac-card" style="border-color:rgba(63,140,255,.4)">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-[13px] font-semibold">✅ 推荐因子择时策略</span>
+                <span class="pill blue">基于 {{factorUsage.recommended.based_on}}</span>
+                <span class="text-[11px] text-slate-500 font-mono">{{JSON.stringify(factorUsage.recommended.params)}}</span>
+              </div>
+              <div v-if="factorUsage.backtest" class="grid grid-cols-2 lg:grid-cols-5 gap-3 mt-3">
+                <div class="stat-card"><div class="mac-label">总收益</div><div class="val" :class="factorUsage.backtest.total_return>=0?'pos':'neg'" style="font-size:17px">{{pct(factorUsage.backtest.total_return)}}</div></div>
+                <div class="stat-card"><div class="mac-label">夏普</div><div class="val" style="font-size:17px">{{factorUsage.backtest.sharpe}}</div></div>
+                <div class="stat-card"><div class="mac-label">回撤</div><div class="val neg" style="font-size:17px">{{pct(factorUsage.backtest.max_drawdown)}}</div></div>
+                <div class="stat-card"><div class="mac-label">胜率</div><div class="val" style="font-size:17px">{{pct(factorUsage.backtest.win_rate)}}</div></div>
+                <div class="stat-card"><div class="mac-label">交易数</div><div class="val" style="font-size:17px">{{factorUsage.backtest.total_trades}}</div></div>
+              </div>
+              <div class="flex gap-2 mt-3">
+                <button class="mac-btn primary" @click="useFactorStrategy()">▶ 应用为当前策略</button>
+                <button class="mac-btn" @click="runFactorBacktest()">▶ 完整回测</button>
+              </div>
+            </div>
+          </template>
+          <div v-else class="empty-state">
+            <span class="e-ico">🎯</span><span class="e-txt">点击「生成使用方案」把因子变成可交易的信号与策略</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI 因子挖掘与合成 -->
+      <div class="grid grid-cols-1 xl:grid-cols-2 gap-5">
+        <div class="mac-window">
+          <div class="mac-titlebar">
+            <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+            <span class="mac-title">🧠 AI 智能因子挖掘</span>
+          </div>
+          <div class="mac-body space-y-3">
+            <p class="text-[12px] text-slate-500">AI 基于市场特征设计候选因子表达式（白名单沙箱校验），在历史数据上验证 IC，有效因子自动入库。</p>
+            <div class="flex gap-2 items-center">
+              <button class="mac-btn primary" @click="mineFactors()" :disabled="factorMining">{{factorMining?'AI 挖掘中…':'⛏ AI 挖掘因子'}}</button>
+              <span class="text-[11px] text-slate-500">每个候选都经过表达式沙箱 + IC 验证</span>
+            </div>
+            <div v-if="factorMining" class="flex items-center gap-2 text-[12.5px] text-slate-400">
+              <span class="inline-block w-3.5 h-3.5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></span>
+              AI 正在设计并验证因子表达式…
+            </div>
+            <div v-if="minedFactors.length" class="space-y-2">
+              <div v-for="(f,i) in minedFactors" :key="i" class="mac-card space-y-1.5"
+                :style="f.valid?'border-color:rgba(48,209,88,.35)':'border-color:rgba(255,69,58,.3)'">
+                <div class="flex items-center gap-2">
+                  <span class="text-[13px] font-semibold">{{f.title||f.name}}</span>
+                  <span class="pill" :class="f.valid?'green':'red'">{{f.valid?'有效':'无效'}}</span>
+                  <span class="pill purple" v-if="f.valid">{{f.rank_ic?.toFixed(4)}}</span>
+                  <span class="ml-auto text-[11px] text-slate-500 font-mono">{{f.category}}</span>
+                </div>
+                <div class="font-mono text-[11px] text-blue-400 bg-black/20 rounded px-2 py-1 overflow-x-auto">{{f.expression}}</div>
+                <div class="text-[11.5px] text-slate-400 leading-relaxed">💡 {{f.logic}}</div>
+                <div v-if="!f.valid" class="text-[11px] text-red-400">⚠ {{f.reason}}</div>
+              </div>
+              <div class="text-[11px] text-slate-500" v-if="factorMineMsg">{{factorMineMsg}}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mac-window">
+          <div class="mac-titlebar">
+            <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+            <span class="mac-title">⚗ 因子合成</span>
+          </div>
+          <div class="mac-body space-y-3">
+            <p class="text-[12px] text-slate-500">按 RankIC 加权合成组合因子，或手工指定权重。</p>
+            <div class="flex gap-2 items-center flex-wrap">
+              <select v-model="synthMethod" class="mac-input" style="width:140px">
+                <option value="ic">IC 加权</option><option value="manual">手工权重</option>
+              </select>
+              <select v-model="synthTopN" class="mac-input" style="width:100px">
+                <option :value="3">Top 3</option><option :value="5">Top 5</option>
+                <option :value="8">Top 8</option><option :value="10">Top 10</option>
+              </select>
+              <button class="mac-btn primary" @click="synthesizeFactors()" :disabled="synthLoading">{{synthLoading?'合成中…':'⚗ 合成因子'}}</button>
+            </div>
+            <div v-if="synthResult" class="mac-card space-y-2" style="border-color:rgba(63,140,255,.4)">
+              <div class="text-[13px] font-semibold">✅ 组合因子已合成</div>
+              <div class="text-[12px] text-slate-400">组合因子 RankIC：<span class="pos font-semibold">{{synthResult.composite_ic?.rank_ic?.toFixed(4)}}</span>
+                · ICIR {{synthResult.composite_ic?.icir?.toFixed(3)}} · 样本 {{synthResult.n_samples}}</div>
+              <div class="mac-label">权重分布</div>
+              <div class="flex flex-wrap gap-2">
+                <span v-for="(w,key) in synthResult.weights" :key="key" class="pill blue">{{key}} ×{{w.toFixed(2)}}</span>
+              </div>
+              <div class="mac-label">因子暴露度</div>
+              <div class="flex flex-wrap gap-2">
+                <span v-for="(e,key) in synthResult.exposure" :key="key" class="pill" :class="e>=0?'green':'orange'">{{key}} {{e.toFixed(2)}}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- DRL 动态自适应策略训练 -->
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div>
+          <span class="mac-title">🧬 深度强化学习引擎</span>
+          <span class="ml-auto text-[11px] text-slate-500">MDP 建模 · PPO 策略梯度 · 反复试错学习</span>
+        </div>
+        <div class="mac-body">
+          <div class="flex gap-1 mb-4">
+            <button class="mac-seg-btn" :class="drlMode==='factor'?'active':''" @click="drlMode='factor'">⚗️ RL 因子挖掘</button>
+            <button class="mac-seg-btn" :class="drlMode==='strategy'?'active':''" @click="drlMode='strategy'">🎯 自适应策略训练</button>
+          </div>
+
+          <!-- 模式一：RL 因子组合挖掘 -->
+          <div v-if="drlMode==='factor'">
+            <div class="text-[11px] text-slate-400 mb-2">RL 智能体在因子池上学习"选哪些因子+怎么加权"，产出组合因子（AlphaForge 式）。OOS 未达标不注册，防过拟合。</div>
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+              <div><label class="mac-label">训练轮数</label><input v-model.number="drlMineCfg.episodes" class="mac-input" type="number" min="5" max="500"/></div>
+              <div><label class="mac-label">K线数量</label><input v-model.number="drlMineCfg.limit" class="mac-input" type="number"/></div>
+              <div><label class="mac-label">预测周期 h</label><input v-model.number="drlMineCfg.horizon" class="mac-input" type="number" min="1" max="30"/></div>
+              <div><label class="mac-label">滚动IC窗口</label><input v-model.number="drlMineCfg.ic_window" class="mac-input" type="number" min="30" max="500"/></div>
+              <div><label class="mac-label">最多选因子数</label><input v-model.number="drlMineCfg.max_steps" class="mac-input" type="number" min="1" max="12"/></div>
+              <div><label class="mac-label">冗余相关阈值</label><input v-model.number="drlMineCfg.corr_threshold" class="mac-input" type="number" step="0.05" min="0.5" max="1"/></div>
+              <div class="col-span-2 flex items-end gap-2 pb-0.5">
+                <button class="mac-btn primary" @click="mineFactorByRl()" :disabled="drlMineLoading">{{drlMineLoading?'挖掘中…':'⚗️ 开始因子挖掘'}}</button>
+                <label class="mac-label mb-0" style="white-space:nowrap">OOS 达标自动注册</label>
+                <div class="mac-toggle" :class="drlMineCfg.auto_register?'on':''" @click="drlMineCfg.auto_register=!drlMineCfg.auto_register"></div>
+              </div>
+            </div>
+            <div v-if="drlMineLoading" class="text-[11px] text-slate-400 mb-3">RL 正在因子池上试错学习（约数秒~1分钟）…</div>
+            <div v-if="drlMineResult" class="mac-card mb-4" :style="{borderColor: drlMineResult.report?.valid?'rgba(48,209,88,.4)':'rgba(255,159,10,.4)'}">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-[13px] font-semibold">✅ 挖掘完成</span>
+                <span class="pill" :class="drlMineResult.report?.valid?'green':'orange'">
+                  OOS {{drlMineResult.report?.valid?'达标 ✓':'未达标'}}</span>
+                <span class="pill blue">选中 {{(drlMineResult.selected_factors||[]).length}} 个因子</span>
+                <span v-if="drlMineResult.registered" class="pill green">已注册因子库</span>
+                <span class="text-[11px] text-slate-500">{{drlMineResult.meta?.elapsed_sec}}s</span>
+              </div>
+              <div v-if="drlMineResult.report?.reason" class="text-[11px] text-orange-400 mt-1.5">⚠ {{drlMineResult.report.reason}}</div>
+              <div class="mt-3 text-[12px]">
+                <div class="mac-label mb-1">选中因子组合（IC 加权，负权重=反向暴露）</div>
+                <div class="flex flex-wrap gap-1.5">
+                  <span v-for="(w,k) in drlMineResult.weights" :key="k"
+                        class="pill" :class="w>=0?'blue':'orange'">{{k}} × {{Number(w).toFixed(3)}}</span>
+                </div>
+              </div>
+              <div class="mt-3 rounded-lg p-3 text-[11.5px]" :style="{background:'rgba(0,0,0,.25)'}">
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-slate-300">
+                  <span>OOS RankIC <b :class="(drlMineResult.report?.rank_ic||0)>=0?'pos':'neg'">{{drlMineResult.report?.rank_ic}}</b></span>
+                  <span>OOS ICIR <b class="text-slate-300">{{drlMineResult.report?.icir}}</b></span>
+                  <span>换手 <b class="text-slate-300">{{drlMineResult.report?.turnover}}</b></span>
+                  <span>Fitness <b class="text-slate-300">{{drlMineResult.report?.fitness}}</b></span>
+                </div>
+              </div>
+              <div class="flex gap-2 mt-3">
+                <button class="mac-btn primary" @click="applyRlCombo()" :disabled="!drlMineResult.report?.valid">▶ 应用此组合为因子策略</button>
+                <span class="text-[10.5px] text-slate-500 self-center">应用到 factor_signal（factor=combo），可在回测页验证绩效</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 模式二：自适应策略训练（执行层） -->
+          <template v-if="drlMode==='strategy'">
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+            <div><label class="mac-label">训练轮数</label><input v-model.number="drlCfg.episodes" class="mac-input" type="number" min="10" max="500"/></div>
+            <div><label class="mac-label">K线数量</label><input v-model.number="drlCfg.limit" class="mac-input" type="number"/></div>
+            <div><label class="mac-label">波动率风险惩罚</label><input v-model.number="drlCfg.vol_penalty" class="mac-input" type="number" step="5"/></div>
+            <div><label class="mac-label">熵正则(探索)</label><input v-model.number="drlCfg.entropy_coef" class="mac-input" type="number" step="0.01"/></div>
+          </div>
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+            <div><label class="mac-label">Actor 学习率</label><input v-model.number="drlCfg.lr_actor" class="mac-input" type="number" step="0.001"/></div>
+            <div><label class="mac-label">Critic 学习率</label><input v-model.number="drlCfg.lr_critic" class="mac-input" type="number" step="0.001"/></div>
+            <div><label class="mac-label">折扣因子 γ</label><input v-model.number="drlCfg.gamma" class="mac-input" type="number" step="0.01"/></div>
+            <div><label class="mac-label">起始资金</label><input v-model.number="drlCfg.start_cash" class="mac-input" type="number"/></div>
+          </div>
+          <div class="flex gap-2 items-center mb-4">
+            <label class="mac-label mb-0" style="white-space:nowrap">GPU 加速</label>
+            <div class="mac-toggle" :class="drlCfg.use_gpu?'on':''" @click="drlCfg.use_gpu=!drlCfg.use_gpu"></div>
+            <span class="text-[12px]" :class="drlCfg.use_gpu?'pos':'text-slate-500'">{{drlCfg.use_gpu?'已启用':'未启用'}}</span>
+            <span class="text-[10.5px] text-slate-500">特征预计算 GPU 化（需 NVIDIA GPU + cupy，不可用自动回退 CPU）</span>
+          </div>
+          <div class="flex gap-2 items-center mb-4">
+            <label class="mac-label mb-0" style="white-space:nowrap">🔁 续训模型（可选）</label>
+            <select v-model="drlCfg.base_model" class="mac-input" style="width:280px">
+              <option value="">从零开始训练</option>
+              <option v-for="m in drlModels" :key="m.name" :value="m.path">{{m.name}}</option>
+            </select>
+            <span class="text-[10.5px] text-slate-500">选择已训练模型作为起点，保留已学知识继续增强</span>
+          </div>
+          <div class="flex gap-2 items-center mb-4">
+            <label class="mac-label mb-0" style="white-space:nowrap">⏱ 早停保护</label>
+            <input v-model.number="drlCfg.early_stop_patience" class="mac-input" type="number" min="0" style="width:70px"/>
+            <span class="text-[10.5px] text-slate-500">验证收益连续 N 次无改善则提前停止（0=关闭）</span>
+          </div>
+          <div class="flex gap-2 items-center mb-4">
+            <label class="mac-label mb-0" style="white-space:nowrap">🔒 强制自动训练</label>
+            <div class="mac-toggle" :class="drlCfg.force_train?'on':''" @click="drlCfg.force_train=!drlCfg.force_train"></div>
+            <span class="text-[12px]" :class="drlCfg.force_train?'pos':'text-slate-500'">{{drlCfg.force_train?'已开启':'已关闭'}}</span>
+            <span class="text-[10.5px] text-slate-500">开启后触发早停也不中断，继续训练到设定轮数（进度不重置）</span>
+          </div>
+          <div class="flex gap-2 items-center mb-4">
+            <button class="mac-btn primary" @click="startDrlTrain()" :disabled="drlTrain.running">{{drlTrain.running?'训练中…':'▶ 开始训练'}}</button>
+            <button class="mac-btn" @click="loadDrlModels()">刷新模型库</button>
+            <span class="text-[11px] text-slate-500">状态: 波动率上升时降低仓位 · 趋势明朗时加仓</span>
+          </div>
+
+          <div v-if="drlTrain.running" class="mb-4">
+            <div class="flex justify-between text-[11px] text-slate-400 mb-1">
+              <span>训练进度：{{drlTrain.episode||0}} / {{drlTrain.episodes||0}} 轮</span>
+              <span>当前收益 {{drlTrain.total_ret!=null?drlTrain.total_ret.toFixed(4):'-'}} · 最优 {{drlTrain.best_ret!=null?drlTrain.best_ret.toFixed(4):'-'}}</span>
+              <span>探索率 ε {{drlTrain.epsilon!=null?drlTrain.epsilon.toFixed(3):'-'}} · 策略损失 {{drlTrain.policy_loss!=null?drlTrain.policy_loss.toFixed(4):'-'}}</span>
+            </div>
+            <div class="w-full h-2 rounded bg-black/30 overflow-hidden">
+              <div class="h-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all" :style="{width:(drlTrain.episodes? (drlTrain.episode||0)/drlTrain.episodes*100:0)+'%'}"></div>
+            </div>
+            <div class="text-[10.5px] text-slate-500 mt-1">loss 下降 = 策略在收敛；loss 震荡且收益不增 = 训练不稳定，可降低学习率或加大熵正则</div>
+          </div>
+
+          <div v-if="drlTrain.done" class="mac-card mb-4" style="border-color:rgba(48,209,88,.4)">
+            <div class="flex items-center gap-2">
+              <span class="text-[13px] font-semibold pos">✅ 训练完成</span>
+              <span class="pill green">最优收益 {{drlTrain.best_ret?.toFixed(4)}}</span>
+              <span class="pill blue">模型 {{drlTrain.model_name}}</span>
+              <span class="pill" :class="drlTrain.backend==='cupy'?'green':'orange'">{{drlTrain.backend==='cupy'?'⚡ GPU':'CPU'}}</span>
+              <span class="text-[11px] text-slate-500">耗时 {{drlTrain.elapsed_sec}}s</span>
+            </div>
+            <div v-if="drlTrain.error" class="text-[12px] text-red-400 mt-1">⚠ {{drlTrain.error}}</div>
+            <div v-if="drlTrain.oos_report?.enabled" class="mt-3 rounded-lg p-3 text-[11.5px]" :style="{background:'rgba(0,0,0,.25)', border:'1px dashed '+ (drlTrain.oos_report.overfit_likely?'rgba(255,159,10,.6)':'rgba(48,209,88,.5)')}">
+              <div class="flex items-center gap-2 mb-1.5">
+                <span class="text-[12px] font-semibold">🔬 样本外(OOS)独立评估</span>
+                <span class="pill" :class="drlTrain.oos_report.overfit_likely?'orange':'green'">{{drlTrain.oos_report.overfit_likely?'⚠ 疑似过拟合':'✓ 泛化正常'}}</span>
+              </div>
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-slate-300">
+                <span>OOS收益 <b :class="drlTrain.oos_report.oos_ret>=0?'pos':'neg'">{{pct(drlTrain.oos_report.oos_ret)}}</b></span>
+                <span>训练参考 <b class="text-slate-300">{{pct(drlTrain.oos_report.train_ret)}}</b></span>
+                <span>衰减率 <b :class="drlTrain.oos_report.decay>0.5?'orange-c':'text-slate-300'">{{(drlTrain.oos_report.decay*100).toFixed(0)}}%</b></span>
+                <span>OOS夏普 <b class="text-slate-300">{{drlTrain.oos_report.oos_sharpe}}</b></span>
+              </div>
+              <div class="text-[10.5px] mt-1.5" :class="drlTrain.oos_report.overfit_likely?'orange-c':'text-slate-400'">
+                {{drlTrain.oos_report.overfit_likely
+                  ? '⚠ 衰减率过高：模型可能记住了训练段行情特征，建议降低训练轮数/加大验证段占比或换更丰富数据重训。'
+                  : '已用一段训练时未见过的独立行情评估：衰减可接受，模型具备一定泛化能力。'}}
+              </div>
+            </div>
+            <div class="flex gap-2 mt-3">
+              <button class="mac-btn primary" @click="useDrlModel(drlTrain.model_name)" v-if="drlTrain.model_name">▶ 应用此智能体为当前策略</button>
+              <button class="mac-btn" @click="showDrlCurve()" v-if="drlTrain.history?.length">📈 训练曲线</button>
+            </div>
+            <div v-if="drlCurveShown" class="mt-3">
+              <div id="drlCurveChart" style="height:260px"></div>
+            </div>
+          </div>
+
+          </template>
+
+          <div>
+            <div class="mac-label mb-2">已训练模型库</div>
+            <table style="font-size:12px">
+              <thead><tr><th>模型名</th><th>大小</th><th>创建时间</th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="m in drlModels" :key="m.name">
+                  <td class="font-mono">{{m.name}}</td>
+                  <td class="num text-slate-400">{{m.size_kb}} KB</td>
+                  <td class="num text-slate-400">{{fmtTs(Date.parse(m.created_at))}}</td>
+                  <td>
+                    <div class="flex gap-1.5 justify-end">
+                      <button class="mac-btn" style="padding:3px 10px" @click="useDrlModel(m.name)">使用</button>
+                      <button class="mac-btn" style="padding:3px 10px" @click="evaluateDrlModel(m.name)">评估</button>
+                      <button class="mac-btn danger" style="padding:3px 10px" @click="deleteDrlModel(m.name)">删除</button>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="!drlModels.length"><td colspan="4"><div class="empty-state"><span class="e-ico">🧬</span><span class="e-txt">暂无已训练模型 · 开始训练你的第一个自适应智能体</span></div></td></tr>
+              </tbody>
+            </table>
+            <div v-if="drlEvalResult" class="text-[12px] text-slate-400 mt-2">
+              评估结果：总收益 <span :class="drlEvalResult.total_ret>=0?'pos':'neg'">{{pct(drlEvalResult.total_ret)}}</span>
+              · 最终权益 {{fmt(drlEvalResult.final_equity)}} · 期末仓位 {{(drlEvalResult.final_position_ratio*100).toFixed(0)}}%
+            </div>
+          </div>
+
+          <!-- 跨行情 OOS 独立评估：换币种/周期/时间段 -->
+          <div class="mt-4 mac-card" style="background:rgba(0,0,0,.18); border-color:rgba(88,130,255,.3)">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="mac-label mb-0">🔄 跨行情泛化评估（换币种/周期/时间段）</span>
+              <span class="text-[10px] text-slate-500">把模型放到一段从未见过的行情上检验，避免只会背行情</span>
+            </div>
+            <div class="flex flex-wrap gap-2 items-end">
+              <div>
+                <label class="mac-label mb-0 text-[10px]">评估模型</label>
+                <select v-model="drlOos.model" class="mac-input" style="min-width:170px">
+                  <option v-for="m in drlModels" :key="m.name" :value="m.name">{{m.name}}</option>
+                </select>
+              </div>
+              <div>
+                <label class="mac-label mb-0 text-[10px]">数据源</label>
+                <select v-model="drlOos.data_source" class="mac-input">
+                  <option value="demo">演示行情</option>
+                  <option value="exchange">实盘交易所</option>
+                  <option value="csv">本地CSV</option>
+                </select>
+              </div>
+              <div v-if="drlOos.data_source==='exchange'">
+                <label class="mac-label mb-0 text-[10px]">币种</label>
+                <input v-model="drlOos.symbol" class="mac-input" style="width:110px" list="popularSymbolList" placeholder="BTC/USDT">
+              </div>
+              <div>
+                <label class="mac-label mb-0 text-[10px]">周期</label>
+                <select v-model="drlOos.timeframe" class="mac-input">
+                  <option value="1m">1分钟</option><option value="5m">5分钟</option>
+                  <option value="15m">15分钟</option><option value="1h">1小时</option>
+                  <option value="4h">4小时</option><option value="1d">1天</option>
+                </select>
+              </div>
+              <div>
+                <label class="mac-label mb-0 text-[10px]">K线数量</label>
+                <input type="number" v-model.number="drlOos.limit" class="mac-input" style="width:90px" min="50">
+              </div>
+              <div v-if="drlOos.data_source==='csv'">
+                <label class="mac-label mb-0 text-[10px]">CSV路径</label>
+                <input v-model="drlOos.csv_path" class="mac-input" style="width:200px" placeholder="data/xxx.csv">
+              </div>
+              <button class="mac-btn primary" style="padding:6px 14px" @click="runOosEval()" :disabled="!drlOos.model || drlOos.loading">
+                {{drlOos.loading?'评估中…':'🔬 评估'}}
+              </button>
+            </div>
+
+            <div v-if="drlOos.result" class="mt-3 text-[12px]">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-mono text-[11px] text-slate-400">{{drlOos.result.eval_symbol}} · {{drlOos.result.eval_timeframe}} · {{drlOos.result.eval_bars}}根K线</span>
+                <span class="pill" :class="drlOos.result.verdict==='疑似过拟合'?'orange':(drlOos.result.verdict==='泛化良好'?'green':'blue')">{{drlOos.result.verdict}}</span>
+                <span v-if="drlOos.result.vs_train_oos?.overfit_likely" class="text-[11px] orange-c">⚠ 相比训练期OOS收益衰减 {{(drlOos.result.vs_train_oos.decay*100).toFixed(0)}}%，疑似过拟合</span>
+              </div>
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 mt-1.5 text-slate-300">
+                <span>总收益 <b :class="drlOos.result.total_ret>=0?'pos':'neg'">{{pct(drlOos.result.total_ret)}}</b></span>
+                <span>夏普 <b>{{drlOos.result.sharpe}}</b></span>
+                <span>最大回撤 <b class="neg">{{pct(drlOos.result.max_drawdown)}}</b></span>
+                <span>期末仓位 <b>{{(drlOos.result.final_position_ratio*100).toFixed(0)}}%</b></span>
+              </div>
+              <div v-if="drlOos.result.train_meta?.symbol" class="text-[10.5px] mt-1 text-slate-500">
+                训练数据：{{drlOos.result.train_meta.symbol}} · {{drlOos.result.train_meta.timeframe}}
+                <span v-if="drlOos.result.eval_symbol===drlOos.result.train_meta.symbol && drlOos.result.eval_timeframe===drlOos.result.train_meta.timeframe" class="orange-c">
+                  ⚠ 与训练同币种同周期！为验证泛化建议换不同币种/周期
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 历史战绩 ========== -->
+    <section v-if="view==='performance'" class="space-y-5">
+      <div>
+        <h1 class="page-title">历史战绩</h1>
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="stat-card"><div class="mac-label">累计盈亏</div><div class="val fade-num" :class="perfSummary?.total_pnl>=0?'pos':'neg'">{{fmt(perfSummary?.total_pnl)}}</div></div>
+        <div class="stat-card"><div class="mac-label">胜率</div><div class="val fade-num">{{pct(perfSummary?.win_rate)}}</div></div>
+        <div class="stat-card"><div class="mac-label">总交易 / 平仓</div><div class="val fade-num">{{perfSummary?.total_trades}} / {{perfSummary?.closed_trades}}</div></div>
+        <div class="stat-card"><div class="mac-label">平均盈利 / 亏损</div><div class="val fade-num" style="font-size:16px">{{fmt(perfSummary?.avg_win)}} / <span class="neg">{{fmt(perfSummary?.avg_loss)}}</span></div></div>
+      </div>
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">累计盈亏 / 资金曲线</span>
+        </div>
+        <div class="mac-body p-3"><div id="perfChart" style="height:300px"></div></div>
+      </div>
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">平仓盈亏分布</span>
+          <span class="ml-auto text-[11px] text-slate-500">{{pnlStats.wins}} 盈 / {{pnlStats.losses}} 亏</span>
+        </div>
+        <div class="mac-body p-3">
+          <div id="pnlChart" style="height:200px"></div>
+          <div class="mt-2 flex gap-6 text-[12px]">
+            <span class="text-slate-400">平均盈利 <span class="pos num">{{fmt(pnlStats.avg_win)}}</span></span>
+            <span class="text-slate-400">平均亏损 <span class="neg num">{{fmt(pnlStats.avg_loss)}}</span></span>
+            <span class="text-slate-400">盈亏比 <span class="num">{{pnlStats.ratio}}</span></span>
+            <span class="text-slate-400">最大单笔盈 <span class="pos num">{{fmt(pnlStats.best)}}</span></span>
+            <span class="text-slate-400">最大单笔亏 <span class="neg num">{{fmt(pnlStats.worst)}}</span></span>
+          </div>
+        </div>
+      </div>
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">交易明细</span>
+        </div>
+        <div class="mac-body">
+          <table><thead><tr><th>时间</th><th>交易对</th><th>方向</th><th>价格</th><th>数量</th><th>手续费</th><th>盈亏</th><th>策略</th><th>原因</th></tr></thead>
+          <tbody>
+            <tr v-for="t in perfTrades" :key="t.id">
+              <td class="text-slate-500">{{t.ts}}</td><td>{{t.symbol}}</td>
+              <td :class="t.side==='buy'?'pos':'neg'">{{t.side==='buy'?'买入':'卖出'}}</td>
+              <td>{{fmt(t.price)}}</td><td>{{t.qty}}</td><td>{{fmt(t.fee)}}</td>
+              <td :class="t.pnl>=0?'pos':'neg'">{{fmt(t.pnl)}}</td><td>{{t.strategy}}</td><td class="text-slate-500 text-[12px]">{{t.reason}}</td>
+            </tr>
+            <tr v-if="!perfTrades.length"><td colspan="9"><div class="empty-state"><span class="e-ico">📭</span><span class="e-txt">暂无交易记录</span></div></td></tr>
+          </tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 实盘启动 ========== -->
+    <section v-if="view==='live'" class="space-y-5">
+      <div>
+        <h1 class="page-title">实盘启动</h1>
+      </div>
+
+      <!-- 当前状态 -->
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">当前状态</span>
+        </div>
+        <div class="mac-body">
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div class="stat-card"><div class="mac-label">交易模式</div>
+              <div class="val fade-num" style="font-size:18px" :class="liveCfg.mode==='live'?'neg':'pos'">{{liveCfg.mode==='live'?'实盘':'纸面模拟'}}</div></div>
+            <div class="stat-card"><div class="mac-label">引擎状态</div>
+              <div class="val fade-num" style="font-size:18px" :class="liveStatus.running?'pos':'text-slate-400'">{{liveStatus.running?'运行中':'已停止'}}</div></div>
+            <div class="stat-card"><div class="mac-label">交易所</div>
+              <div class="val fade-num" style="font-size:18px;text-transform:uppercase">{{liveStatus.exchange||'-'}}</div></div>
+            <div class="stat-card"><div class="mac-label">交易对 · 周期</div>
+              <div class="val fade-num" style="font-size:18px">{{liveStatus.symbol||'-'}} · {{liveStatus.timeframe||'-'}}</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 实盘参数设置 -->
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">实盘启动参数</span>
+        </div>
+        <div class="mac-body">
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 max-w-4xl">
+            <div><label class="mac-label">交易所</label>
+              <select v-model="liveCfg.exchange" class="mac-input">
+                <option value="binance">Binance</option><option value="okx">OKX</option>
+                <option value="bybit">Bybit</option><option value="bitget">Bitget</option></select></div>
+            <div><label class="mac-label">交易对</label>
+              <input v-model="liveCfg.symbol" class="mac-input" list="popularSymbolList" placeholder="BTC/USDT"/></div>
+            <div><label class="mac-label">周期</label>
+              <select v-model="liveCfg.timeframe" class="mac-input">
+                <option value="1m">1m</option><option value="5m">5m</option><option value="15m">15m</option>
+                <option value="30m">30m</option><option value="1h">1h</option><option value="4h">4h</option><option value="1d">1d</option></select></div>
+            <div><label class="mac-label">起始资金 (USDT)</label>
+              <input v-model.number="liveCfg.start_cash" type="number" class="mac-input"/>
+              <div class="text-[10.5px] text-slate-500 mt-1">实盘与模拟实盘模式使用此资金（模拟实盘=用实盘参数做模拟验证）</div></div>
+          </div>
+          <div class="flex gap-3 mt-5">
+            <button class="mac-btn primary" @click="saveLiveConfig()">保存配置</button>
+            <button class="mac-btn" @click="loadLiveConfig()">重新加载</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 模拟模式配置（自定义初始资金 + 手续费） -->
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">🧪 模拟模式配置</span>
+          <span class="ml-auto text-[11px] text-slate-500">纸面模拟 · 初始资金与手续费可自定义（模拟实盘模式资金见上方实盘配置）</span>
+        </div>
+        <div class="mac-body">
+          <div class="grid grid-cols-2 gap-4 max-w-lg">
+            <div><label class="mac-label">初始资金 (USDT)</label>
+              <input v-model.number="paperCfg.start_cash" type="number" min="100" class="mac-input"/></div>
+            <div><label class="mac-label">手续费率</label>
+              <input v-model.number="paperCfg.fee_rate" type="number" step="0.0001" min="0" max="0.1" class="mac-input"/>
+              <div class="text-[10.5px] text-slate-500 mt-1">默认 0.001 (0.1%) · 范围 0 ~ 0.1</div></div>
+          </div>
+          <div class="flex gap-3 mt-5">
+            <button class="mac-btn primary" @click="savePaperConfig()">保存模拟配置</button>
+            <button class="mac-btn" @click="loadPaperConfig()">重新加载</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 模式切换 -->
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">交易模式切换</span>
+        </div>
+        <div class="mac-body">
+          <div class="flex items-center justify-between flex-wrap gap-3">
+            <div class="text-[12px] text-slate-400 leading-relaxed max-w-xl">
+              切换前请先停止引擎。纸面=纯模拟；模拟实盘=真实行情+模拟撮合（不下真单）；实盘=真实下单（需 API Key/Secret，小资金验证，<span class="neg">自担风险</span>）。
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              <button class="mac-btn" @click="setLiveMode('paper')">纸面模式</button>
+              <button class="mac-btn" style="border-color:rgba(191,90,242,.4)" @click="setLiveMode('simulated')" :disabled="liveStatus.running">🧪 模拟实盘</button>
+              <button class="mac-btn danger" @click="setLiveMode('live')" :disabled="liveStatus.running">实盘模式</button>
+            </div>
+          </div>
+          <div v-if="liveModeMsg" class="mt-3 text-[13px]" :class="liveModeMsgOk?'pos':'neg'">{{liveModeMsg}}</div>
+        </div>
+      </div>
+
+      <!-- 启动提示 -->
+      <div class="mac-window">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+          <span class="mac-title">启动引擎</span>
+        </div>
+        <div class="mac-body flex items-center justify-between flex-wrap gap-3">
+          <div class="text-[12px] text-slate-400 leading-relaxed">
+            配置就绪后，点击「启动引擎」开始交易。启动前请核对：交易模式、交易所、交易对、周期、风控规则（策略与工坊页）。
+          </div>
+          <div class="flex gap-2">
+            <button class="mac-btn primary" @click="startEngine()" v-if="!liveStatus.running">▶ 启动引擎</button>
+            <button class="mac-btn danger" @click="stopEngine()" v-else>■ 停止引擎</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+    const { createApp, ref, reactive, computed, onMounted, nextTick, watch } = Vue;
+const VIEW_KEY = 'cat_view';
+createApp({
+  setup() {
+    const view = ref(new URLSearchParams(location.search).get('view') || localStorage.getItem(VIEW_KEY) || 'dashboard');
+    const settingsTab = ref(new URLSearchParams(location.search).get('tab') || 'ai');
+    const theme = ref(localStorage.getItem('cat_theme')||'dark');
+    const clock = ref('');
+    const toasts = ref([]);
+    let toastId = 0;
+    const views = [
+      {key:'dashboard', label:'仪表盘'}, {key:'market', label:'行情'},
+      {key:'settings', label:'AI 与 API'}, {key:'strategy', label:'策略与工坊'},
+      {key:'backtest', label:'历史回测'}, {key:'quant', label:'量化研究'},
+      {key:'performance', label:'历史战绩'},
+      {key:'live', label:'实盘启动'}];
+    const engineStatus = ref('stopped');
+    const isPaper = ref(true);
+    const portfolio = ref(null);
+    const perfSummary = ref(null);
+    const trades = ref([]);
+    const perfTrades = ref([]);
+    const pnlStats = ref({wins:0, losses:0, avg_win:0, avg_loss:0, ratio:'-', best:0, worst:0});
+    const analysis = ref(null);
+    const analysisLoading = ref(false);
+    const currentStrategy = ref('dual_ma');
+    const strategyList = ref([]);
+    const paramSchema = ref({});
+    const strategyParams = ref({});
+    const riskRules = ref({});
+    const optLogs = ref([]);
+    const analyses = ref([]);
+    const ai = reactive({provider:'openai', base_url:'', model:'', api_key:'', has_api_key:false, api_key_masked:''});
+    const aiFeatureParams = ref(null);
+    const autoAnalysis = ref(true);
+    const aiMsg = ref(''); const aiMsgOk = ref(true); const aiTesting = ref(false);
+    const exKeys = reactive({binance:{}, okx:{}, bybit:{}, bitget:{}});
+    const bt = reactive({data_source:'demo', exchange:'binance', symbol:'BTC/USDT', timeframe:'1h', strategy_name:'dual_ma', start_cash:10000, fee_rate:0.001, slippage:0.0005, csv_path:'', since:'', limit:1000, use_gpu:false});
+    const btRunning = ref(false); const btResult = ref(null); const btHistory = ref([]);
+    const btLive = ref({running:false, done:false, pct:0, last_price:null, position:0, cash:0, kline_history:[], recent_trades:[], last_trade:null});
+    const btStep = ref('config');
+    const overfitLoading = ref(false);
+    const overfitResult = ref(null);
+    const gridScanLoading = ref(false);
+    const gridScanResult = ref(null);
+    const compareLoading = ref(false);
+    const compareResult = ref(null);
+    let btPollTimer = null;
+    // ---------- 量化研究（因子 + DRL） ----------
+    const qdata_source = ref('demo');
+    const qsymbol = ref('BTC/USDT');
+    const qtimeframe = ref('1h');
+    const qhorizon = ref(1);
+    const factorLibrary = ref([]);
+    const factorIcs = ref([]);
+    const factorStats = ref(null);
+    const factorLoading = ref(false);
+    const factorRedundant = ref([]);
+    const selectedFactors = ref(new Set());
+    const factorMining = ref(false);
+    const minedFactors = ref([]);
+    const factorMineMsg = ref('');
+    const usageLoading = ref(false);
+    const factorUsage = ref(null);
+    const synthMethod = ref('ic');
+    const synthTopN = ref(5);
+    const synthLoading = ref(false);
+    const synthResult = ref(null);
+    const drlCfg = reactive({episodes:300, limit:1200, vol_penalty:20, entropy_coef:0.05, lr_actor:0.002, lr_critic:0.005, gamma:0.99, start_cash:10000, use_gpu:false, base_model:'', force_train:false, early_stop_patience:0});
+    const drlTrain = reactive({running:false, done:false, episode:0, episodes:0, total_ret:null, best_ret:null, epsilon:null, policy_loss:null, model_name:'', error:'', history:[], elapsed_sec:null, backend:'numpy'});
+    // DRL 模式：strategy=训练自适应策略（传统）/ factor=RL 因子组合挖掘
+    const drlMode = ref('factor');
+    const drlMineCfg = reactive({episodes:60, limit:1500, horizon:1, ic_window:120, max_steps:6, corr_threshold:0.85, auto_register:true});
+    const drlMineResult = ref(null);
+    const drlMineLoading = ref(false);
+    const drlModels = ref([]);
+    const drlEvalResult = ref(null);
+    const drlCurveShown = ref(false);
+    const drlOos = reactive({model:'', data_source:'demo', symbol:'BTC/USDT', timeframe:'4h',
+                             limit:500, csv_path:'', loading:false, result:null});
+    let drlPollTimer = null;
+    let drlCurveChart = null;
+    let factorIcChart = null;
+    const designLoading = ref(false);
+    const optLoading = ref(false);
+    const iterLoading = ref(false);
+    const iterStrategyName = ref('');
+    const designed = ref(null);
+    const optResult = ref(null);
+    const iterResult = ref(null);
+    const aiStrategies = ref([]);
+    // AI 设计策略配置（品种/周期/类型/自定义要求）
+    const designSymbol = ref('当前品种');
+    const designTimeframe = ref('');
+    const designType = ref('');
+    const designCustom = ref('');
+    // AI 后台任务进度（优化/反思）
+    const aiTaskLabel = ref('');
+    const aiTaskPct = ref(0);
+    const aiTaskMessage = ref('');
+    let aiTaskPollTimer = null;
+    // ---------- 全部策略管理（版本/删除/改名） ----------
+    const allStrategies = ref([]);
+    const allStrategyFilter = ref('');
+    const filteredAllStrategies = computed(()=> allStrategyFilter.value ? allStrategies.value.filter(s=>s.kind===allStrategyFilter.value||s.source===allStrategyFilter.value) : allStrategies.value);
+    async function loadAllStrategies() {
+      try {
+        const d = await api('/strategy-repo/all');
+        allStrategies.value = d.strategies || [];
+      } catch(e) {}
+    }
+    async function applyAnyStrategy(name) {
+      try {
+        await api('/trading/strategies/select', {method:'POST', body:JSON.stringify({name})});
+        currentStrategy.value = name; toast('已应用策略: '+name,'ok');
+        loadStrategy();
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    async function renameStrategy(s) {
+      const newName = prompt('重命名策略「'+s.name+'」为（英文小写/数字/下划线）:', s.name);
+      if (!newName || newName === s.name) return;
+      try {
+        await api('/strategy-repo/rename', {method:'POST', body:JSON.stringify({old_name:s.name, new_name:newName})});
+        toast('已重命名为: '+newName,'ok'); loadAllStrategies(); loadStrategy();
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    async function deleteStrategy(s) {
+      if (!confirm('确认删除策略「'+s.name+'」？此操作不可恢复。')) return;
+      try {
+        await api('/strategy-repo/delete', {method:'POST', body:JSON.stringify({name:s.name})});
+        toast('已删除策略: '+s.name,'ok'); loadAllStrategies(); loadStrategy();
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    // ---------- 实盘 ----------
+    const liveCfg = reactive({exchange:'binance', symbol:'BTC/USDT', timeframe:'1h', start_cash:10000});
+    const liveStatus = reactive({mode:'paper', running:false, exchange:'binance', symbol:'BTC/USDT', timeframe:'1h', start_cash:10000, paper:true});
+    const liveModeMsg = ref(''); const liveModeMsgOk = ref(true);
+    // ---------- 模拟模式配置 ----------
+    const paperCfg = reactive({start_cash:10000, fee_rate:0.001});
+    async function loadPaperConfig() {
+      try {
+        const d = await api('/live/paper-config');
+        Object.assign(paperCfg, {start_cash:d.start_cash, fee_rate:d.fee_rate});
+      } catch(e) {}
+    }
+    async function savePaperConfig() {
+      try {
+        await api('/live/paper-config', {method:'PUT', body:JSON.stringify(paperCfg)});
+        toast('模拟配置已保存（下次启动生效）','ok'); loadPaperConfig();
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    async function loadLiveConfig() {
+      try {
+        const d = await api('/live/config');
+        Object.assign(liveCfg, {exchange:d.exchange, symbol:d.symbol, timeframe:d.timeframe, start_cash:d.start_cash});
+        liveCfg.mode = d.mode;
+        const s = await api('/live/status');
+        Object.assign(liveStatus, s);
+      } catch(e) {}
+    }
+    async function saveLiveConfig() {
+      try {
+        await api('/live/config', {method:'PUT', body:JSON.stringify(liveCfg)});
+        toast('实盘配置已保存','ok'); loadLiveConfig();
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    async function setLiveMode(mode) {
+      liveModeMsg.value='';
+      const modeText = {paper:'已切换到纸面模拟模式', simulated:'已切换到模拟实盘（真实行情+模拟撮合）', live:'已切换到实盘模式（启动引擎前请核对配置）'};
+      try {
+        const d = await api('/live/mode', {method:'PUT', body:JSON.stringify({mode})});
+        liveModeMsg.value = modeText[mode]||'模式已切换';
+        liveModeMsgOk.value = true; toast(liveModeMsg.value,'ok');
+        // 立即同步模式状态（右上角标签 + 当前状态）
+        await loadLiveConfig();
+        await loadAll();
+      } catch(e){ liveModeMsg.value = String(e.message||e); liveModeMsgOk.value = false; toast(String(e.message||e),'error'); }
+    }
+    // ---------- 行情 ----------
+    const marketExchanges = ['binance','okx','bybit','bitget'];
+    const marketTimeframes = ['1m','5m','15m','30m','1h','4h','1d'];
+    const exLabel = {binance:'Binance', okx:'OKX', bybit:'Bybit', bitget:'Bitget'};
+    const popularSymbols = ['BTC/USDT','ETH/USDT','SOL/USDT','BNB/USDT','XRP/USDT','DOGE/USDT','ADA/USDT','AVAX/USDT'];
+    const mkt = reactive({exchange:'binance', symbol:'BTC/USDT', timeframe:'1h'});
+    const mktTickers = ref([]);
+    const mktOverview = ref(null);
+    const mktLoading = ref(false);
+    const mktLast = ref(null);
+    const mktChange = ref(null);
+    const mktO = ref(null);
+    const mktH = ref(null);
+    const mktL = ref(null);
+    const mktV = ref(null);
+    const mktUpdated = ref('');
+    const mktFlash = ref('');
+    let _lastMktPrice = null;
+    let _lastMktSym = '';
+    const dashTickers = ref([]);
+    let marketTimer = null;
+    let equityChart=null, btChart=null, perfChart=null, mktChart=null, pnlChart=null;
+
+    async function api(path, opts={}) {
+      const r = await fetch('/api'+path, {headers:{'Content-Type':'application/json'}, ...opts});
+      if (!r.ok) { let d='请求失败'; try{d=await r.json();}catch(e){} throw new Error(typeof d==='string'?d:(d.detail||JSON.stringify(d))); }
+      return r.json();
+    }
+    const fmt = (v)=> (v===null||v===undefined)?'-':Number(v).toLocaleString('en-US',{maximumFractionDigits:4});
+    const pct = (v)=> (v===null||v===undefined)?'-':(v*100).toFixed(2)+'%';
+    const mktPrice = (v)=> (v===null||v===undefined)?'-':(Math.abs(v)>=1000?v.toFixed(2):Math.abs(v)>=1?v.toFixed(4):v.toFixed(8));
+    const fmtVol = (v)=> { if (v===null||v===undefined) return '-'; if (v>=1e9) return (v/1e9).toFixed(1)+'B'; if (v>=1e6) return (v/1e6).toFixed(1)+'M'; if (v>=1e3) return (v/1e3).toFixed(1)+'K'; return v.toFixed(0); };
+    const mktVol = (v)=> (v===null||v===undefined)?'-':'量 '+fmtVol(v);
+    const normSym = (s)=> s.includes('/') ? s : s.replace(/^(.*?)(USDT|USDC)$/, '$1/$2');
+    const fmtTs = (ms)=>{ const d=new Date(ms); const p=n=>String(n).padStart(2,'0'); return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+
+    function toggleTheme() {
+      theme.value = theme.value==='dark'?'light':'dark';
+      document.documentElement.setAttribute('data-theme', theme.value);
+      localStorage.setItem('cat_theme', theme.value);
+      // 图表是 canvas，主题切换后需重绘
+      refreshCharts();
+    }
+    function refreshCharts() {
+      nextTick(()=>{
+        try { if (view.value==='market' && mktChart) { mktChart.dispose(); mktChart=null; loadMarket(); } } catch(e) {}
+        try { if (equityChart) { equityChart.dispose(); equityChart=null; } } catch(e) {}
+        try { if (perfChart) { perfChart.dispose(); perfChart=null; } } catch(e) {}
+        try { if (pnlChart) { pnlChart.dispose(); pnlChart=null; } } catch(e) {}
+        try { if (btChart) { btChart.dispose(); btChart=null; } } catch(e) {}
+        if (view.value==='dashboard') loadEquity();
+        if (view.value==='performance') { const eq = api('/performance/equity?limit=500').then(x=>{ perfChart=renderEquity(perfChart, x.map(v=>[v.ts,v.equity]), 'perf'); }); renderPnlChart(); }
+        if (view.value==='backtest' && btResult.value) renderEquity(btChart, btResult.value.equity_curve.map((v,i)=>[i,v]), 'bt');
+      });
+    }
+    function switchView(k) {
+      // 离开视图时释放对应 ECharts 实例，防止切回时绑定到已销毁 DOM 导致白屏
+      if (view.value!==k) {
+        try { if (k!=='market' && mktChart) { mktChart.dispose(); mktChart=null; } } catch(e) {}
+        try { if (k!=='dashboard' && equityChart) { equityChart.dispose(); equityChart=null; } } catch(e) {}
+        try { if (k!=='performance' && perfChart) { perfChart.dispose(); perfChart=null; } } catch(e) {}
+        try { if (k!=='performance' && pnlChart) { pnlChart.dispose(); pnlChart=null; } } catch(e) {}
+        try { if (k!=='backtest' && btChart) { btChart.dispose(); btChart=null; } } catch(e) {}
+        try { if (k!=='quant' && drlCurveChart) { drlCurveChart.dispose(); drlCurveChart=null; } } catch(e) {}
+        try { if (k!=='quant' && factorIcChart) { factorIcChart.dispose(); factorIcChart=null; } } catch(e) {}
+      }
+      view.value = k;
+      localStorage.setItem(VIEW_KEY, k);
+      const url = new URL(location.href);
+      url.searchParams.set('view', k);
+      history.replaceState(null, '', url);
+      nextTick(()=>{ if (k==='market') { loadMarket(); loadTickers(); loadOverview(); } });
+    }
+
+    // ---------- Toast ----------
+    function toast(msg, kind='info') {
+      const icons = {ok:'✅', error:'⚠️', info:'ℹ️'};
+      const t = {id:++toastId, msg, icon:icons[kind]||icons.info, out:false};
+      toasts.value.push(t);
+      setTimeout(()=>{ t.out = true; setTimeout(()=>{ toasts.value = toasts.value.filter(x=>x.id!==t.id); }, 260); }, 3800);
+    }
+    function dismissToast(id) { toasts.value = toasts.value.filter(x=>x.id!==id); }
+
+    // ---------- 数据加载 ----------
+    async function loadAll() {
+      try {
+        const st = await api('/trading/status'); engineStatus.value = st.running?'running':'stopped'; currentStrategy.value = st.strategy;
+        const p = await api('/portfolio/summary'); portfolio.value = p;
+        perfSummary.value = await api('/performance/summary');
+        trades.value = await api('/performance/trades?limit=30');
+        try {
+          const l = await api('/live/status');
+          Object.assign(liveStatus, l);
+          // isPaper 以 KV 权威的 mode 为准（切换实盘后立即同步）
+          isPaper.value = l.mode !== 'live';
+        } catch(e2) {}
+      } catch(e) {}
+    }
+    async function loadEquity() {
+      try { const eq = await api('/performance/equity?limit=500'); renderEquity(equityChart, eq.map(x=>[x.ts, x.equity]), 'dashboard'); } catch(e) {}
+    }
+    async function loadStrategy() {
+      const d = await api('/trading/strategies');
+      strategyList.value = d.strategies;
+      const cur = d.strategies.find(s=>s.name===d.current) || strategyList.value[0];
+      currentStrategy.value = cur.name; paramSchema.value = cur.param_schema; strategyParams.value = {...cur.default_params};
+    }
+    async function loadRisk() { riskRules.value = await api('/risk/rules'); }
+    async function loadOptLogs() { optLogs.value = await api('/ai/optimization-logs?limit=20'); }
+    async function loadAnalyses() { analyses.value = await api('/ai/analyses?limit=10'); }
+    async function loadAiSettings() {
+      const d = await api('/ai/settings');
+      Object.assign(ai, {provider:d.provider, base_url:d.base_url, model:d.model, has_api_key:d.has_api_key, api_key_masked:d.api_key_masked});
+      aiFeatureParams.value = d.feature_params || null;
+      try { const t = await api('/ai/auto-analysis-toggle'); autoAnalysis.value = t.enabled; } catch(e) {}
+    }
+    const featureParamLabel = (name) => ({
+      market_analysis:'行情解读', param_optimize:'参数优化', strategy_design:'策略设计',
+      strategy_iterate:'策略迭代', trade_review:'交易复盘', factor_mine:'因子挖掘',
+    }[name]||name);
+    async function toggleAutoAnalysis() {
+      autoAnalysis.value = !autoAnalysis.value;
+      try { await api('/ai/auto-analysis-toggle', {method:'PUT', body:JSON.stringify({enabled:autoAnalysis.value})}); toast(autoAnalysis.value?'自动行情分析已开启':'自动行情分析已关闭','ok'); }
+      catch(e){ autoAnalysis.value = !autoAnalysis.value; toast(String(e.message||e),'error'); }
+    }
+    async function loadExKeys() {
+      const d = await api('/exchanges/settings');
+      for (const k of ['binance','okx','bybit','bitget']) exKeys[k] = {...(d[k]||{}), api_key:'', secret:'', password:''};
+    }
+    async function loadBtHistory() { btHistory.value = await api('/backtest/results?limit=10'); }
+    async function loadAiStrategies() { aiStrategies.value = await api('/ai/strategies'); }
+
+    // ---------- AI 策略工坊 ----------
+    async function designStrategy() {
+      designLoading.value=true; designed.value=null;
+      // 品种：当前品种传空（后端用引擎当前），否则传具体 symbol
+      const symbol = (designSymbol.value && designSymbol.value !== '当前品种') ? designSymbol.value : '';
+      const payload = {symbol, timeframe: designTimeframe.value||'', strategy_type: designType.value||'', custom_requirement: designCustom.value||''};
+      try { const d = await api('/ai/design-strategy', {method:'POST', body:JSON.stringify(payload)}); designed.value=d.strategy; loadAiStrategies(); loadStrategy(); loadAllStrategies(); toast('AI 策略设计完成','ok'); }
+      catch(e){ toast('设计失败：'+(e.message||e),'error'); }
+      finally{ designLoading.value=false; }
+    }
+    // 轮询 AI 后台任务进度（优化/反思）
+    function pollAiTask(taskId) {
+      clearInterval(aiTaskPollTimer);
+      aiTaskPollTimer = setInterval(async ()=>{
+        try {
+          const p = await api('/ai/task/'+taskId);
+          if (p.found) {
+            aiTaskLabel.value = p.stage_label||'AI 工作中';
+            aiTaskPct.value = p.pct||0;
+            aiTaskMessage.value = p.message||'';
+            if (p.error) { toast('AI 任务失败：'+p.error,'error'); stopAiTask(); }
+            if (p.done) { stopAiTask(); return p.result; }
+          }
+        } catch(e) {}
+      }, 800);
+    }
+    function stopAiTask() {
+      if (aiTaskPollTimer) { clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; }
+      optLoading.value=false; iterLoading.value=false;
+    }
+    async function autoOptimize() {
+      optLoading.value=true; optResult.value=null; aiTaskPct.value=0; aiTaskMessage.value='';
+      try {
+        const d = await api('/ai/auto-optimize', {method:'POST', body:JSON.stringify({focus:'价格行为与关键位'})});
+        pollAiTask(d.task_id);
+        // 轮询结束后取结果
+        const result = await new Promise(resolve=>{
+          const timer = setInterval(async ()=>{
+            try {
+              const p = await api('/ai/task/'+d.task_id);
+              if (p.found && p.done) { clearInterval(timer); clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; optLoading.value=false; resolve(p.result); }
+              if (p.found && p.error) { clearInterval(timer); clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; optLoading.value=false; resolve(null); }
+            } catch(e) {}
+          }, 800);
+        });
+        if (result) { optResult.value=result; toast('AI 全自动优化完成（已热更新）','ok'); }
+        else if (aiTaskPollTimer===null) { /* 已失败提示 */ }
+      } catch(e){ toast('优化失败：'+(e.message||e),'error'); }
+      finally{ clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; optLoading.value=false; }
+    }
+    async function useAiStrategy(name) {
+      try {
+        await api('/trading/strategies/select', {method:'POST', body:JSON.stringify({name})});
+        currentStrategy.value = name; loadStrategy(); toast('已切换到策略: '+name,'ok');
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    async function useDesigned() { if (designed.value) await useAiStrategy(designed.value.name); }
+    async function iterateStrategy() {
+      iterLoading.value=true; iterResult.value=null; aiTaskPct.value=0; aiTaskMessage.value='';
+      try {
+        const d = await api('/ai/iterate-strategy', {method:'POST', body:JSON.stringify({strategy_name: iterStrategyName.value})});
+        pollAiTask(d.task_id);
+        const result = await new Promise(resolve=>{
+          const timer = setInterval(async ()=>{
+            try {
+              const p = await api('/ai/task/'+d.task_id);
+              if (p.found && p.done) { clearInterval(timer); clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; iterLoading.value=false; resolve(p.result); }
+              if (p.found && p.error) { clearInterval(timer); clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; iterLoading.value=false; resolve(null); }
+            } catch(e) {}
+          }, 800);
+        });
+        if (result) { iterResult.value=result; toast('AI 深度反思迭代完成','ok'); loadAiStrategies(); loadStrategy(); loadAllStrategies(); }
+      } catch(e){ toast('迭代失败：'+(e.message||e),'error'); }
+      finally{ clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; iterLoading.value=false; }
+    }
+    async function useIterated() { if (iterResult.value) await useAiStrategy(iterResult.value.name); }
+
+    // ---------- 图表 ----------
+    // 主题感知配色：深/浅色共用一套协调色，text/line 随主题变化
+    function chartTheme() {
+      const dark = theme.value==='dark';
+      return {
+        tooltip: dark ? 'rgba(24,24,28,.92)' : 'rgba(250,250,252,.94)',
+        tooltipBorder: dark ? 'rgba(255,255,255,.12)' : 'rgba(0,0,0,.1)',
+        text: dark ? '#f5f5f7' : '#1d1d1f',
+        axis: dark ? '#98989f' : '#6e6e73',
+        line: dark ? 'rgba(255,255,255,.12)' : 'rgba(0,0,0,.12)',
+        split: dark ? 'rgba(255,255,255,.07)' : 'rgba(0,0,0,.07)',
+      };
+    }
+    function initChart(elId) {
+      const el = document.getElementById(elId);
+      if (!el) return null;
+      if (el._chart) return el._chart;
+      const chart = echarts.init(el);
+      el._chart = chart;
+      return chart;
+    }
+    function renderEquity(chart, data, key) {
+      nextTick(()=>{
+        const el = document.getElementById(key==='dashboard'?'equityChart':key==='perf'?'perfChart':'btChart');
+        if (!el) return;
+        if (!chart) chart = initChart(key==='dashboard'?'equityChart':key==='perf'?'perfChart':'btChart');
+        const ct = chartTheme();
+        chart.setOption({
+          backgroundColor:'transparent',
+          tooltip:{trigger:'axis', backgroundColor:ct.tooltip, borderColor:ct.tooltipBorder, textStyle:{color:ct.text, fontSize:12}},
+          grid:{left:60,right:20,top:24,bottom:40},
+          xAxis:{type:'time', axisLine:{lineStyle:{color:ct.line}}, axisLabel:{color:ct.axis, fontSize:11}},
+          yAxis:{type:'value', scale:true, splitLine:{lineStyle:{color:ct.split}}, axisLabel:{color:ct.axis, fontSize:11}},
+          series:[{type:'line', data, showSymbol:false, lineStyle:{color:'#3f8cff',width:2},
+                   areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[
+                     {offset:0,color:'rgba(63,140,255,.28)'},{offset:1,color:'rgba(63,140,255,.02)'}]}}}]
+        });
+      });
+      return chart;
+    }
+
+    // ---------- 盈亏分布图 ----------
+    function renderPnlChart() {
+      nextTick(()=>{
+        const el = document.getElementById('pnlChart');
+        if (!el) return;
+        pnlChart = pnlChart || echarts.init(el);
+        // 只统计平仓（sell）的盈亏
+        const pnls = perfTrades.value.filter(t=>t.side==='sell' && t.pnl!==null && t.pnl!==undefined);
+        if (!pnls.length) {
+          pnlChart.clear();
+          return;
+        }
+        const labels = pnls.map((t,i)=>'#'+(i+1));
+        const data = pnls.map(t=>t.pnl);
+        const wins = pnls.filter(t=>t.pnl>=0);
+        const losses = pnls.filter(t=>t.pnl<0);
+        const totalWins = wins.reduce((a,b)=>a+b.pnl,0);
+        const totalLosses = Math.abs(losses.reduce((a,b)=>a+b.pnl,0));
+        const avgWin = wins.length ? totalWins/wins.length : 0;
+        const avgLoss = losses.length ? totalLosses/losses.length : 0;
+        pnlStats.value = {
+          wins: wins.length, losses: losses.length,
+          avg_win: avgWin, avg_loss: avgLoss,
+          ratio: (avgLoss>0 && avgWin>0) ? (avgWin/avgLoss).toFixed(2) : '-',
+          best: wins.length ? Math.max(...wins.map(t=>t.pnl)) : 0,
+          worst: losses.length ? Math.min(...losses.map(t=>t.pnl)) : 0,
+        };
+        const ct = chartTheme();
+        pnlChart.setOption({
+          animation:false,
+          backgroundColor:'transparent',
+          tooltip:{trigger:'axis', backgroundColor:ct.tooltip, borderColor:ct.tooltipBorder, textStyle:{color:ct.text, fontSize:12}},
+          grid:{left:60,right:20,top:14,bottom:30},
+          xAxis:{type:'category', data:labels, axisLine:{lineStyle:{color:ct.line}}, axisLabel:{color:ct.axis, fontSize:10, interval:Math.max(0,Math.floor(data.length/20)-1)}},
+          yAxis:{type:'value', splitLine:{lineStyle:{color:ct.split}}, axisLabel:{color:ct.axis, fontSize:11}},
+          series:[{
+            type:'bar', data:data.map(v=>({value:v, itemStyle:{color: v>=0 ? 'rgba(48,209,88,.8)' : 'rgba(255,69,58,.8)', borderRadius: v>=0 ? [3,3,0,0] : [0,0,3,3]}})),
+            barMaxWidth:20
+          }]
+        });
+      });
+    }
+
+    // ---------- 引擎 ----------
+    async function startEngine() { try { await api('/trading/start', {method:'POST'}); engineStatus.value='running'; toast('交易引擎已启动','ok'); loadAll(); } catch(e){ toast(String(e.message||e),'error'); } }
+    async function stopEngine() { try { await api('/trading/stop', {method:'POST'}); engineStatus.value='stopped'; toast('交易引擎已停止','info'); } catch(e){ toast(String(e.message||e),'error'); } }
+
+    // ---------- AI ----------
+    async function saveAiSettings() {
+      try { await api('/ai/settings', {method:'PUT', body:JSON.stringify(ai)}); aiMsg.value='✓ 已保存（密钥已加密）'; aiMsgOk.value=true; toast('AI 配置已保存','ok'); loadAiSettings(); }
+      catch(e){ aiMsg.value=String(e.message||e); aiMsgOk.value=false; toast(String(e.message||e),'error'); }
+    }
+    async function testAi() {
+      aiTesting.value=true; aiMsg.value='';
+      // 用表单当前值测试（不落库）——修复"改了模型/地址但测试的是旧配置"的问题
+      const payload = {provider:ai.provider, base_url:ai.base_url, model:ai.model, api_key:ai.api_key||''};
+      try { const d = await api('/ai/test', {method:'POST', body:JSON.stringify(payload)}); aiMsg.value='✓ '+d.message; aiMsgOk.value=true; toast('AI 连接成功','ok'); }
+      catch(e){ aiMsg.value=String(e.message||e); aiMsgOk.value=false; toast(String(e.message||e),'error'); }
+      finally{ aiTesting.value=false; }
+    }
+    // 切换提供商时自动填入该提供商的主流默认模型（避免选了 DeepSeek 还带着 gpt-4o-mini 测试失败）
+    const AI_DEFAULT_MODELS = {openai:'gpt-4o-mini', deepseek:'deepseek-chat', custom:''};
+    watch(()=>ai.provider, (p, old)=>{
+      if (p===old) return;
+      const d = AI_DEFAULT_MODELS[p];
+      if (d) ai.model = d;
+      else if (!ai.model) ai.model = 'gpt-4o-mini';
+    });
+    async function runAnalysis() {
+      analysisLoading.value=true;
+      try { const d = await api('/ai/analyze', {method:'POST'}); analysis.value=d.result; }
+      catch(e){ toast('解读失败：'+(e.message||e),'error'); }
+      finally{ analysisLoading.value=false; }
+    }
+
+    // ---------- 交易所 ----------
+    async function saveExKeys(ex) {
+      try {
+        await api('/exchanges/settings', {method:'PUT', body:JSON.stringify({exchange:ex, ...exKeys[ex]})});
+        loadExKeys(); toast(ex+' 密钥已保存','ok');
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    async function testEx(ex) {
+      try { const d = await api('/exchanges/test', {method:'POST', body:JSON.stringify({exchange:ex, ...exKeys[ex]})}); toast('连接成功: '+JSON.stringify(d.assets),'ok'); }
+      catch(e){ toast('连接失败：'+(e.message||e),'error'); }
+    }
+
+    // ---------- 策略与风控 ----------
+    async function selectStrategy() { await api('/trading/strategies/select', {method:'POST', body:JSON.stringify({name:currentStrategy.value})}); loadStrategy(); }
+    async function saveParams() {
+      try { await api('/trading/strategies/params', {method:'PUT', body:JSON.stringify({params:strategyParams.value})}); toast('参数已热更新','ok'); }
+      catch(e){ toast(String(e.message||e),'error'); }
+    }
+    async function saveRisk() {
+      try { await api('/risk/rules', {method:'PUT', body:JSON.stringify(riskRules.value)}); toast('风控规则已保存','ok'); loadRisk(); }
+      catch(e){ toast(String(e.message||e),'error'); }
+    }
+    const riskCooldown = ref({active:false, remaining_sec:0, consecutive_losses:0});
+    async function loadRiskCooldown() {
+      try { riskCooldown.value = await api('/risk/cooldown'); } catch(e) {}
+    }
+
+    // ---------- 回测 ----------
+    async function runOverfit() {
+      overfitLoading.value = true; overfitResult.value = null;
+      try {
+        const d = await api('/backtest/overfit', {method:'POST', body:JSON.stringify(bt)});
+        overfitResult.value = d;
+        const msg = '过拟合检测：'+d.verdict+(d.score!=null?'（'+d.score+' 分）':'');
+        toast(msg, d.verdict==='通过'?'ok':d.verdict==='无法判定'?'info':'error');
+        nextTick(()=>{ const el=document.getElementById('bt-overfit'); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); });
+      } catch(e){ toast('过拟合检测失败：'+(e.message||e),'error'); }
+      finally { overfitLoading.value = false; }
+    }
+    // 参数网格扫描：对当前策略的关键数值参数自动生成扫描网格
+    function buildParamGrid() {
+      // 从 param_schema 取数值参数，生成 3-4 个采样点（围绕默认值展开）
+      const grid = {};
+      const schema = paramSchema.value || {};
+      const defaults = strategyParams.value || {};
+      let count = 0;
+      for (const [name, spec] of Object.entries(schema)) {
+        const t = spec.type;
+        if ((t !== 'int' && t !== 'float') || count >= 2) continue;  // 最多扫 2 个参数，避免组合爆炸
+        const lo = spec.min, hi = spec.max;
+        const cur = defaults[name];
+        if (lo === undefined || hi === undefined || cur === undefined) continue;
+        const spread = hi - lo;
+        if (spread < 2) continue;
+        // 采样点：当前值 ±20% 附近 + 边界
+        const points = [];
+        const step = spread / 4;
+        for (let k = 1; k <= 3; k++) {
+          const v = t === 'int' ? Math.round(lo + k * step) : +(lo + k * step).toFixed(4);
+          if (v >= lo && v <= hi && !points.includes(v)) points.push(v);
+        }
+        if (points.length >= 2) {
+          grid[name] = points;
+          count++;
+        }
+      }
+      if (!count) {
+        // 兜底：没有可扫描参数时用当前参数单点
+        grid[Object.keys(defaults)[0]] = [defaults[Object.keys(defaults)[0]]];
+      }
+      return grid;
+    }
+    async function runGridScan() {
+      gridScanLoading.value = true; gridScanResult.value = null;
+      const grid = buildParamGrid();
+      const baseParams = { ...strategyParams.value };
+      for (const k of Object.keys(grid)) delete baseParams[k];
+      try {
+        const d = await api('/backtest/grid-scan', {method:'POST', body:JSON.stringify({
+          data_source:bt.data_source, exchange:bt.exchange, symbol:bt.symbol, timeframe:bt.timeframe,
+          strategy_name:bt.strategy_name, param_grid:grid, base_params:baseParams,
+          start_cash:bt.start_cash, fee_rate:bt.fee_rate, slippage:bt.slippage, limit:bt.limit})});
+        gridScanResult.value = d;
+        toast('参数扫描完成：'+d.scanned+' 组','ok');
+        nextTick(()=>{ const el=document.getElementById('bt-gridscan'); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); });
+      } catch(e){ toast('参数扫描失败：'+(e.message||e),'error'); }
+      finally { gridScanLoading.value = false; }
+    }
+    async function useGridBest() {
+      if (!gridScanResult.value?.best) return;
+      try {
+        await api('/trading/strategies/params', {method:'PUT', body:JSON.stringify({params:gridScanResult.value.best.params})});
+        strategyParams.value = { ...gridScanResult.value.best.params };
+        toast('已应用最优参数','ok');
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    async function runOverfitForBest() {
+      if (!gridScanResult.value?.best) return;
+      bt.strategy_params = gridScanResult.value.best.params;
+      await runOverfit();
+    }
+    async function compareStrategies() {
+      compareLoading.value = true; compareResult.value = null;
+      try {
+        const d = await api('/backtest/compare', {method:'POST', body:JSON.stringify({
+          data_source:bt.data_source, exchange:bt.exchange, symbol:bt.symbol, timeframe:bt.timeframe,
+          start_cash:bt.start_cash, fee_rate:bt.fee_rate, slippage:bt.slippage, limit:bt.limit})});
+        compareResult.value = d;
+        toast('策略对比完成：'+d.results.length+' 个策略','ok');
+        nextTick(()=>{ const el=document.getElementById('bt-compare'); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); });
+      } catch(e){ toast('策略对比失败：'+(e.message||e),'error'); }
+      finally { compareLoading.value = false; }
+    }
+    async function runBacktest() {
+      btRunning.value=true; btResult.value=null;
+      btLive.value = {running:true, done:false, pct:0, last_price:null, position:0, cash:0, kline_history:[], recent_trades:[], last_trade:null};
+      btStep.value = 'monitor';
+      nextTick(()=>btGoto('monitor'));
+      try {
+        const d = await api('/backtest/run', {method:'POST', body:JSON.stringify(bt)});
+        await new Promise(r=>setTimeout(r,300));
+        let tries=0;
+        while(tries++<240){
+          // 实时进度（K线 + 成交盈亏）
+          try {
+            const p = await api('/backtest/progress/'+d.task_id);
+            if (p.found) {
+              btLive.value.pct = p.pct || 0;
+              btLive.value.last_price = p.last_price;
+              btLive.value.position = p.last_item?.position ?? btLive.value.position;
+              btLive.value.cash = p.last_item?.cash ?? btLive.value.cash;
+              btLive.value.kline_history = p.kline_history || [];
+              if (p.last_trade) {
+                btLive.value.recent_trades = [(p.last_trade)].concat(btLive.value.recent_trades).slice(0,20);
+                btLive.value.last_trade = p.last_trade;
+              }
+              if (p.error) { toast('回测失败：'+p.error,'error'); btRunning.value=false; btLive.value.running=false; return; }
+              if (p.done) { btLive.value.running=false; btLive.value.pct=100; btLive.value.done=true; }
+            }
+          } catch(e) {}
+          // 最终结果
+          const r = await api('/backtest/results/'+d.task_id);
+          if (r.metrics.error) { toast('回测失败：'+r.metrics.error,'error'); btRunning.value=false; btLive.value.running=false; return; }
+          if (r.metrics.status!=='running' && r.metrics.backtest_engine) {
+            btResult.value=r; btLive.value.running=false; btLive.value.pct=100; btLive.value.done=true;
+            renderEquity(btChart, r.equity_curve.map((v,i)=>[i, v]), 'bt'); loadBtHistory();
+            // 完成后自动切到「回测结果」步骤并滚动
+            btStep.value = 'result';
+            nextTick(()=>btGoto('result'));
+            break;
+          }
+          if (tries>=240) break;
+          await new Promise(r2=>setTimeout(r2,200));
+        }
+      } catch(e){ toast('回测出错：'+(e.message||e),'error'); }
+      btRunning.value=false;
+    }
+    async function loadBtResult(id) {
+      const r = await api('/backtest/results/'+id);
+      if (!r.metrics.error && r.metrics.status!=='running') {
+        btResult.value=r; renderEquity(btChart, r.equity_curve.map((v,i)=>[i,v]), 'bt');
+        btLive.value.done=true; btLive.value.running=false;
+        btStep.value='result'; nextTick(()=>btGoto('result'));
+      }
+    }
+    // 步骤导航：滚动到对应区块
+    function btGoto(key) {
+      btStep.value = key;
+      const ids = {config:'bt-config', monitor:'bt-monitor', result:'bt-result', history:'bt-history'};
+      const el = document.getElementById(ids[key]);
+      if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
+    }
+
+    // ---------- 行情 ----------
+    async function loadMarket() {
+      if (view.value!=='market') return;
+      mktLoading.value = true;
+      // 交易对/交易所变化时重置价格基线，避免切换瞬间误触发闪烁
+      const symKey = mkt.exchange + '|' + mkt.symbol;
+      if (symKey !== _lastMktSym) {
+        _lastMktSym = symKey;
+        _lastMktPrice = null;
+        mktFlash.value = '';
+      }
+      try {
+        const d = await api('/market/klines?exchange='+mkt.exchange+'&symbol='+encodeURIComponent(mkt.symbol)+'&timeframe='+mkt.timeframe+'&limit=300');
+        renderMarketChart(d.klines);
+        if (d.klines.length) {
+          const last = d.klines[d.klines.length-1];
+          const prev = d.klines[d.klines.length-2];
+          const newPrice = last[4];
+          mktUpdated.value = new Date().toLocaleTimeString('zh-CN', {hour12:false});
+          // 检测价格方向并闪烁
+          if (_lastMktPrice!==null && _lastMktPrice!==newPrice) {
+            mktFlash.value = newPrice>_lastMktPrice ? 'up' : 'down';
+            setTimeout(()=>{ mktFlash.value=''; }, 950);
+          }
+          _lastMktPrice = newPrice;
+          mktLast.value = newPrice;
+          mktO.value = last[1];
+          mktH.value = last[2];
+          mktL.value = last[3];
+          mktV.value = last[5];
+          mktChange.value = prev ? (newPrice-prev[4])/prev[4]*100 : null;
+        }
+      } catch(e){ toast(String(e.message||e),'error'); }
+      finally{ mktLoading.value = false; }
+    }
+    function renderMarketChart(klines) {
+      if (!klines || !klines.length) return;
+      nextTick(()=>{
+        const el = document.getElementById('marketChart');
+        if (!el) return;
+        if (!mktChart) mktChart = echarts.init(el);
+        // ECharts candlestick 数据格式: [open, close, low, high]
+        // 后端 klines: [ts, open, high, low, close, volume]
+        const ohlc = klines.map(k=>[k[1], k[4], k[3], k[2]]);
+        const vols = klines.map(k=>({value:k[5], itemStyle:{color: k[4]>=k[1] ? 'rgba(48,209,88,.55)' : 'rgba(255,69,58,.55)'}}));
+        const closes = klines.map(k=>k[4]);
+        const cats = klines.map(k=>fmtTs(k[0]));
+        const ma = (n) => closes.map((_,i)=> i<n-1 ? null : +(closes.slice(i-n+1,i+1).reduce((a,b)=>a+b,0)/n).toFixed(4));
+        const ct = chartTheme();
+        mktChart.setOption({
+          animation:false,
+          tooltip:{trigger:'axis', axisPointer:{type:'cross'}, backgroundColor:ct.tooltip, borderColor:ct.tooltipBorder, textStyle:{color:ct.text, fontSize:12}},
+          legend:{data:['K线','MA5','MA10','MA20'], top:0, textStyle:{color:ct.axis, fontSize:11}, itemWidth:14, itemHeight:8},
+          grid:[{left:56,right:14,top:26,height:'58%'},{left:56,right:14,top:'72%',height:'16%'}],
+          xAxis:[
+            {type:'category', data:cats, boundaryGap:true, axisLine:{lineStyle:{color:ct.line}}, axisLabel:{color:ct.axis, fontSize:10.5}, splitLine:{show:false}},
+            {type:'category', gridIndex:1, data:cats, axisLabel:{show:false}, axisLine:{lineStyle:{color:ct.line}}, axisTick:{show:false}}
+          ],
+          yAxis:[
+            {type:'value', scale:true, splitLine:{lineStyle:{color:ct.split}}, axisLabel:{color:ct.axis, fontSize:10.5, formatter:v=>mktPrice(v)}},
+            {type:'value', gridIndex:1, splitLine:{show:false}, axisLabel:{color:ct.axis, fontSize:10, formatter:v=>fmtVol(v)}}
+          ],
+          dataZoom:[
+            {type:'inside', xAxisIndex:[0,1], start:45, end:100},
+            {type:'slider', xAxisIndex:[0,1], start:45, end:100, bottom:2, height:18,
+              borderColor:ct.line, backgroundColor:theme.value==='dark'?'rgba(255,255,255,.03)':'rgba(0,0,0,.03)',
+              fillerColor:'rgba(63,140,255,.18)', handleStyle:{color:'#3f8cff'},
+              textStyle:{color:ct.axis, fontSize:10}, dataBackground:{lineStyle:{color:ct.line}, areaStyle:{color:theme.value==='dark'?'rgba(255,255,255,.04)':'rgba(0,0,0,.04)'}}}
+          ],
+          series:[
+            {name:'K线', type:'candlestick', data:ohlc, itemStyle:{color:'#30d158', color0:'#ff453a', borderColor:'#30d158', borderColor0:'#ff453a'}, barWidth:'70%'},
+            {name:'MA5', type:'line', data:ma(5), smooth:true, showSymbol:false, lineStyle:{width:1.2, color:'#ffd60a'}},
+            {name:'MA10', type:'line', data:ma(10), smooth:true, showSymbol:false, lineStyle:{width:1.2, color:'#5ac8fa'}},
+            {name:'MA20', type:'line', data:ma(20), smooth:true, showSymbol:false, lineStyle:{width:1.2, color:'#bf5af2'}},
+            {name:'成交量', type:'bar', xAxisIndex:1, yAxisIndex:1, data:vols, barWidth:'70%'}
+          ]
+        });
+      });
+    }
+    async function loadTickers() {
+      try {
+        const d = await api('/market/tickers?exchange='+mkt.exchange+'&limit=40');
+        mktTickers.value = d.tickers || [];
+      } catch(e) {}
+    }
+    async function loadOverview() {
+      try {
+        const d = await api('/market/overview?exchange='+mkt.exchange);
+        mktOverview.value = d;
+      } catch(e) {}
+    }
+    async function loadDashTickers() {
+      try {
+        const d = await api('/market/tickers?exchange=binance&limit=15');
+        // 优先展示主流币
+        const preferred = ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','AVAXUSDT'];
+        const byName = {};
+        (d.tickers||[]).forEach(t=>{ byName[t.symbol]=t; });
+        const ordered = preferred.map(s=>byName[s]).filter(Boolean);
+        const rest = (d.tickers||[]).filter(t=>!preferred.includes(t.symbol));
+        dashTickers.value = ordered.concat(rest).slice(0,8);
+      } catch(e) {}
+    }
+    function switchMarketEx(ex) {
+      mkt.exchange = ex; mkt.symbol = 'BTC/USDT';
+      loadMarket(); loadTickers(); loadOverview();
+    }
+
+    // ---------- 量化研究 ----------
+    async function loadFactorLibrary() {
+      try {
+        const d = await api('/factors/library');
+        factorLibrary.value = d.factors || [];
+      } catch(e) {}
+    }
+    function toggleFactor(key) {
+      if (selectedFactors.value.has(key)) selectedFactors.value.delete(key);
+      else selectedFactors.value.add(key);
+    }
+    function factorName(key) {
+      const f = factorLibrary.value.find(x=>x.key===key);
+      return f ? f.name : key;
+    }
+    function factorCatLabel(key) {
+      const f = factorLibrary.value.find(x=>x.key===key);
+      return f ? (f.category_label||f.category) : key;
+    }
+    function factorCatColor(key) {
+      const f = factorLibrary.value.find(x=>x.key===key);
+      const m = {momentum:'blue', volatility:'orange', volume:'green', trend:'purple', mean_reversion:'red', macro:'blue'};
+      return m[f?.category]||'blue';
+    }
+    const monotonicCount = computed(()=> (factorStats.value?.monotonic_count) || 0);
+    async function loadFactorAnalysis() {
+      factorLoading.value = true;
+      try {
+        const d = await api('/factors/compute', {method:'POST', body:JSON.stringify({
+          data_source:qdata_source.value, exchange:'binance', symbol:qsymbol.value, timeframe:qtimeframe.value,
+          limit:1000, horizon:qhorizon.value})});
+        factorIcs.value = d.ic_table || [];
+        factorStats.value = {n_factors:d.n_factors, n_candles:d.n_candles, monotonic_count:Object.values(d.group_returns||{}).filter(g=>g.monotonic).length};
+        factorRedundant.value = d.redundant_pairs || [];
+        renderFactorIcChart();
+        toast('因子分析完成：'+d.n_factors+' 个因子','ok');
+      } catch(e){ toast('因子分析失败：'+(e.message||e),'error'); }
+      finally { factorLoading.value = false; }
+    }
+    function renderFactorIcChart() {
+      const ics = factorIcs.value;
+      if (!ics.length) return;
+      // v-if 容器在 factorIcs 赋值后经 Vue 渲染，需等两拍 DOM 就绪
+      setTimeout(()=>{
+        const el = document.getElementById('factorIcChart');
+        if (!el) return;
+        if (el._chart) { factorIcChart = el._chart; }
+        else { factorIcChart = echarts.init(el); el._chart = factorIcChart; }
+        const ct = chartTheme();
+        // 取 Top 15 排序（按 |RankIC|）
+        const top = [...ics].sort((a,b)=>Math.abs(b.rank_ic)-Math.abs(a.rank_ic)).slice(0,15);
+        const data = top.map(r=>({value:+(r.rank_ic||0).toFixed(4), name:r.key}));
+        factorIcChart.setOption({
+          backgroundColor:'transparent',
+          tooltip:{trigger:'axis', axisPointer:{type:'shadow'}, backgroundColor:ct.tooltip, borderColor:ct.tooltipBorder, textStyle:{color:ct.text, fontSize:12},
+            formatter:p=>{ const v=p[0]; return `${v.name}<br/>RankIC: <b>${v.value}</b><br/>ICIR: ${(top.find(t=>t.key===v.name)?.icir||0).toFixed(3)}`; }},
+          grid:{left:90, right:40, top:10, bottom:24},
+          xAxis:{type:'value', axisLabel:{color:ct.axis, fontSize:10.5}, splitLine:{lineStyle:{color:ct.split}}},
+          yAxis:{type:'category', data:data.map(d=>d.name), axisLabel:{color:ct.axis, fontSize:10.5}},
+          series:[{
+            type:'bar', data, barWidth:'60%',
+            itemStyle:{color:p=>p.value>=0?'#30d158':'#ff453a', borderRadius:[0,3,3,0]},
+            label:{show:true, position:'right', color:ct.axis, fontSize:10, formatter:'{c}'},
+          }],
+          animation:false,
+        });
+        factorIcChart.resize();
+      }, 100);
+    }
+    async function loadFactorUsage() {
+      usageLoading.value = true; factorUsage.value = null;
+      try {
+        const d = await api('/factors/usage', {method:'POST', body:JSON.stringify({
+          data_source:qdata_source.value, symbol:qsymbol.value, timeframe:qtimeframe.value,
+          limit:1000, horizon:qhorizon.value})});
+        factorUsage.value = d;
+        const sigCount = (d.signals||[]).filter(s=>s.signal!=='中性').length;
+        toast('使用方案已生成：'+sigCount+' 个因子有信号','ok');
+      } catch(e){ toast('生成失败：'+(e.message||e),'error'); }
+      finally { usageLoading.value = false; }
+    }
+    async function useFactorStrategy() {
+      if (!factorUsage.value?.recommended) return;
+      try {
+        const params = factorUsage.value.recommended.params || {};
+        await api('/trading/strategies/select', {method:'POST', body:JSON.stringify({name:'factor_signal'})});
+        await api('/trading/strategies/params', {method:'PUT', body:JSON.stringify({params})});
+        currentStrategy.value = 'factor_signal';
+        toast('已应用因子择时策略（基于 '+factorUsage.value.recommended.based_on+'）','ok');
+        loadStrategy();
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    async function runFactorBacktest() {
+      if (!factorUsage.value?.recommended) return;
+      const params = factorUsage.value.recommended.params || {};
+      bt.strategy_name = 'factor_signal';
+      bt.strategy_params = params;
+      switchView('backtest');
+      nextTick(()=>{ runBacktest(); });
+    }
+    async function mineFactors() {
+      factorMining.value = true; minedFactors.value = []; factorMineMsg.value = '';
+      try {
+        const d = await api('/factors/mine', {method:'POST', body:JSON.stringify({
+          data_source:qdata_source.value, symbol:qsymbol.value, timeframe:qtimeframe.value,
+          limit:600, horizon:qhorizon.value, auto_register:true})});
+        minedFactors.value = d.candidates || [];
+        const valid = (d.valid||[]).length;
+        if (valid) factorMineMsg.value = '已发现 '+valid+' 个有效因子并加入因子库';
+        toast('AI 因子挖掘完成：'+(d.valid||[]).length+' 个有效','ok');
+        loadFactorLibrary();
+      } catch(e){ toast('因子挖掘失败：'+(e.message||e),'error'); }
+      finally { factorMining.value = false; }
+    }
+    async function synthesizeFactors() {
+      synthLoading.value = true;
+      try {
+        const d = await api('/factors/synthesize', {method:'POST', body:JSON.stringify({
+          data_source:qdata_source.value, symbol:qsymbol.value, timeframe:qtimeframe.value,
+          limit:800, horizon:qhorizon.value, top_n:synthTopN.value})});
+        synthResult.value = d;
+        toast('组合因子合成完成','ok');
+      } catch(e){ toast('因子合成失败：'+(e.message||e),'error'); }
+      finally { synthLoading.value = false; }
+    }
+    async function startDrlTrain() {
+      drlTrain.running = true; drlTrain.done = false; drlTrain.error = ''; drlTrain.model_name = '';
+      drlEvalResult.value = null;
+      try {
+        const d = await api('/drl/train', {method:'POST', body:JSON.stringify({
+          data_source:qdata_source.value, symbol:qsymbol.value, timeframe:qtimeframe.value,
+          limit:drlCfg.limit, episodes:drlCfg.episodes, lr_actor:drlCfg.lr_actor, lr_critic:drlCfg.lr_critic,
+          gamma:drlCfg.gamma, vol_penalty:drlCfg.vol_penalty, entropy_coef:drlCfg.entropy_coef,
+          start_cash:drlCfg.start_cash, use_gpu:drlCfg.use_gpu, base_model:drlCfg.base_model,
+          force_train:drlCfg.force_train, early_stop_patience:drlCfg.early_stop_patience})});
+        await new Promise(r=>setTimeout(r,300));
+        let tries = 0;
+        while(tries++ < 600) {
+          try {
+            const p = await api('/drl/train/'+d.task_id);
+            if (p.found) {
+              drlTrain.episode = p.episode||0; drlTrain.episodes = p.episodes||drlCfg.episodes;
+              drlTrain.total_ret = p.total_ret; drlTrain.best_ret = p.best_ret; drlTrain.epsilon = p.epsilon;
+              if (p.policy_loss != null) drlTrain.policy_loss = p.policy_loss;
+              if (p.backend) drlTrain.backend = p.backend;
+              if (p.error) { drlTrain.error = p.error; toast('训练失败：'+p.error,'error'); drlTrain.running=false; return; }
+              if (p.done) {
+                drlTrain.done = true; drlTrain.running = false;
+                drlTrain.model_name = p.model_name; drlTrain.elapsed_sec = p.elapsed_sec;
+                drlTrain.history = p.history || [];
+                drlTrain.oos_report = p.oos_report || null;
+                if (p.backend) drlTrain.backend = p.backend;
+                toast('训练完成！模型：'+p.model_name+' 最优收益 '+String(p.best_ret?.toFixed(4)),'ok');
+                loadDrlModels();
+                return;
+              }
+            }
+          } catch(e) {}
+          if (tries>=600) { drlTrain.running=false; toast('训练超时','error'); return; }
+          await new Promise(r=>setTimeout(r,500));
+        }
+      } catch(e){ drlTrain.running=false; toast('训练出错：'+(e.message||e),'error'); }
+    }
+    async function mineFactorByRl() {
+      drlMineLoading.value = true; drlMineResult.value = null;
+      try {
+        const d = await api('/drl/mine-factor', {method:'POST', body:JSON.stringify({
+          data_source:qdata_source.value, symbol:qsymbol.value, timeframe:qtimeframe.value,
+          limit:drlMineCfg.limit, episodes:drlMineCfg.episodes, horizon:drlMineCfg.horizon,
+          ic_window:drlMineCfg.ic_window, max_steps:drlMineCfg.max_steps,
+          corr_threshold:drlMineCfg.corr_threshold, auto_register:drlMineCfg.auto_register})});
+        drlMineResult.value = d;
+        const ok = d.report?.valid;
+        toast('RL 因子挖掘完成：选中 '+(d.selected_factors||[]).length+' 个因子，OOS '+(ok?'通过 ✓':'未达标'),
+              ok?'ok':'warn');
+        loadFactorLibrary();
+      } catch(e){ toast('因子挖掘失败：'+(e.message||e),'error'); }
+      finally { drlMineLoading.value = false; }
+    }
+    async function applyRlCombo() {
+      const r = drlMineResult.value;
+      if (!r || !r.weights || !Object.keys(r.weights).length) { toast('没有可应用的组合因子','error'); return; }
+      try {
+        const params = {factor:'combo', mode:'trend', buy_threshold:0, combo_spec:JSON.stringify(r.weights)};
+        await api('/trading/strategies/select', {method:'POST', body:JSON.stringify({name:'factor_signal'})});
+        await api('/trading/strategies/params', {method:'PUT', body:JSON.stringify({params})});
+        currentStrategy.value = 'factor_signal';
+        toast('已应用 RL 组合因子策略（'+Object.keys(r.weights).join(', ')+'）','ok');
+        loadStrategy();
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    async function loadDrlModels() {
+      try {
+        const d = await api('/drl/models');
+        drlModels.value = d.models || [];
+      } catch(e) {}
+    }
+    async function useDrlModel(name) {
+      try {
+        const d = await api('/drl/models/'+name+'/use', {method:'POST', body:'{}'});
+        toast('已应用智能体策略：'+d.strategy,'ok');
+        loadStrategy();
+      } catch(e){ toast('应用失败：'+(e.message||e),'error'); }
+    }
+    async function evaluateDrlModel(name) {
+      try {
+        const d = await api('/drl/models/'+name+'/evaluate', {method:'POST', body:'{}'});
+        drlEvalResult.value = d;
+        toast('评估完成：总收益 '+pct(d.total_ret),'ok');
+      } catch(e){ toast('评估失败：'+(e.message||e),'error'); }
+    }
+    async function runOosEval() {
+      if (!drlOos.model) { toast('请先选择一个已训练模型','error'); return; }
+      drlOos.loading = true; drlOos.result = null;
+      try {
+        const d = await api('/drl/models/'+drlOos.model+'/evaluate_oos', {method:'POST',
+          body: JSON.stringify({
+            data_source: drlOos.data_source, symbol: drlOos.symbol,
+            timeframe: drlOos.timeframe, limit: drlOos.limit, csv_path: drlOos.csv_path,
+          })});
+        drlOos.result = d;
+        toast('跨行情评估完成：'+d.verdict, d.verdict==='疑似过拟合'?'error':'ok');
+      } catch(e){ toast('评估失败：'+(e.message||e),'error'); }
+      finally { drlOos.loading = false; }
+    }
+    async function deleteDrlModel(name) {
+      if (!confirm('确认删除模型「'+name+'」？模型文件和对应策略将一并删除，不可恢复。')) return;
+      try {
+        await api('/drl/models/'+name+'/delete', {method:'POST', body:'{}'});
+        toast('模型已删除: '+name,'ok');
+        loadDrlModels(); loadAllStrategies(); loadStrategy();
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    function showDrlCurve() {
+      const h = drlTrain.history || [];
+      if (!h.length) return;
+      drlCurveShown.value = !drlCurveShown.value;
+      if (!drlCurveShown.value) return;
+      // 等容器 v-if 渲染后再初始化（setTimeout 保证 Vue 挂载完成）
+      setTimeout(()=>{
+        const el = document.getElementById('drlCurveChart');
+        if (!el) return;
+        if (el._chart) { drlCurveChart = el._chart; }
+        else { drlCurveChart = echarts.init(el); el._chart = drlCurveChart; }
+        const ct = chartTheme();
+        // 长训练降采样：几千/几万点压缩到最多 500 点，保证渲染流畅
+        const maxPoints = 500;
+        const step = Math.max(1, Math.ceil(h.length / maxPoints));
+        const sampled = h.filter((_, i) => i % step === 0 || i === h.length - 1);
+        drlCurveChart.setOption({
+          backgroundColor:'transparent',
+          tooltip:{trigger:'axis', backgroundColor:ct.tooltip, borderColor:ct.tooltipBorder, textStyle:{color:ct.text, fontSize:12}},
+          grid:{left:60, right:20, top:30, bottom:30},
+          xAxis:{type:'category', data:sampled.map(x=>x.episode), axisLine:{lineStyle:{color:ct.line}}, axisLabel:{color:ct.axis, fontSize:10.5}, name:'训练轮'},
+          yAxis:{type:'value', axisLabel:{color:ct.axis, fontSize:10.5}, splitLine:{lineStyle:{color:ct.grid}}, scale:true},
+          legend:{data:['累计收益','验证收益'], top:0, textStyle:{color:ct.axis, fontSize:11}},
+          series:[
+            {name:'累计收益', type:'line', smooth:true, showSymbol:false, data:sampled.map(x=>x.total_ret),
+             lineStyle:{width:2, color:'#4b93ff'}, areaStyle:{color:'rgba(75,147,255,.15)'}},
+            {name:'验证收益', type:'line', smooth:true, showSymbol:false,
+             data:sampled.map(x=>x.val_ret!=null?x.val_ret:null), lineStyle:{width:2, color:'#8a5cff'}},
+          ],
+          animation:false,
+        });
+        drlCurveChart.resize();
+      }, 100);
+      const wrap = document.getElementById('drlCurveWrap');
+      if (wrap) wrap.scrollIntoView({behavior:'smooth'});
+    }
+
+    // ---------- 时钟与定时刷新 ----------
+    function tick() { clock.value = new Date().toLocaleTimeString('zh-CN', {hour12:false}); }
+    onMounted(async ()=>{
+      document.documentElement.setAttribute('data-theme', theme.value);
+      tick(); setInterval(tick, 1000);
+      await Promise.all([loadAiSettings(), loadExKeys(), loadStrategy(), loadRisk(), loadOptLogs(), loadBtHistory(), loadAiStrategies(), loadAnalyses(), loadPaperConfig()]);
+      loadFactorLibrary(); loadDrlModels(); loadAllStrategies();
+      await loadAll();
+      equityChart = renderEquity(equityChart, (await api('/performance/equity?limit=500')).map(x=>[x.ts, x.equity]), 'dashboard');
+      await loadEquity();
+      perfTrades.value = await api('/performance/trades?limit=200');
+      renderPnlChart();
+      perfChart = renderEquity(perfChart, (await api('/performance/equity?limit=500')).map(x=>[x.ts, x.equity]), 'perf');
+      // 根据初始视图加载对应数据（支持 ?view= 直达）
+      if (view.value==='market') { loadMarket(); loadTickers(); loadOverview(); }
+      loadDashTickers();
+      // 仪表盘：账户/持仓 5s 刷新（本地数据库，无限频压力）；行情条 3s 秒级更新
+      setInterval(async ()=>{ await loadAll(); if(view.value==='dashboard') { loadEquity(); } }, 5000);
+      setInterval(async ()=>{ if(view.value==='dashboard') loadDashTickers(); }, 3000);
+      // 风控冷却状态轮询（策略页展示）
+      loadRiskCooldown();
+      setInterval(loadRiskCooldown, 10000);
+      // 市场页：后端 TTL 缓存 3-5s，前端 5s 轮询即可秒级跟价且不触发交易所限频
+      setInterval(async ()=>{ if(view.value==='market') { loadMarket(); loadTickers(); loadOverview(); } }, 5000);
+    });
+
+    return {view, settingsTab, theme, clock, toasts, views, engineStatus, isPaper, portfolio, perfSummary, trades, perfTrades, pnlStats,
+      analysis, analysisLoading, currentStrategy, strategyList, paramSchema, strategyParams, riskRules, riskCooldown, optLogs, analyses,
+      ai, aiMsg, aiMsgOk, aiTesting, aiFeatureParams, featureParamLabel, autoAnalysis, toggleAutoAnalysis, exKeys, bt, btRunning, btResult, btHistory, btLive, btStep, btGoto,
+      overfitLoading, overfitResult, runOverfit,
+      gridScanLoading, gridScanResult, runGridScan, useGridBest, runOverfitForBest,
+      compareLoading, compareResult, compareStrategies,
+      designLoading, optLoading, iterLoading, iterStrategyName, designed, optResult, iterResult, aiStrategies,
+      designSymbol, designTimeframe, designType, designCustom, aiTaskLabel, aiTaskPct, aiTaskMessage,
+      marketExchanges, marketTimeframes, exLabel, popularSymbols, mkt, mktTickers, mktOverview, mktLoading, mktLast, mktChange, mktO, mktH, mktL, mktV, mktFlash, mktUpdated, dashTickers,
+      fmt, pct, mktPrice, fmtVol, mktVol, fmtTs, normSym, toggleTheme, refreshCharts, toast, dismissToast, switchView,
+      startEngine, stopEngine, saveAiSettings, testAi, runAnalysis,
+      saveExKeys, testEx, selectStrategy, saveParams, saveRisk, runBacktest, loadBtResult,
+      designStrategy, autoOptimize, useAiStrategy, useDesigned,
+      iterateStrategy, useIterated,
+      liveCfg, liveStatus, liveModeMsg, liveModeMsgOk, loadLiveConfig, saveLiveConfig, setLiveMode,
+      paperCfg, loadPaperConfig, savePaperConfig,
+      allStrategies, allStrategyFilter, filteredAllStrategies, loadAllStrategies, applyAnyStrategy, renameStrategy, deleteStrategy,
+      qdata_source, qsymbol, qtimeframe, qhorizon, factorLibrary, factorIcs, factorStats, factorLoading,
+      factorRedundant, monotonicCount, factorName, factorCatLabel, factorCatColor, toggleFactor,
+      loadFactorAnalysis, mineFactors, minedFactors, factorMining, factorMineMsg,
+      usageLoading, factorUsage, loadFactorUsage, useFactorStrategy, runFactorBacktest,
+      synthMethod, synthTopN, synthLoading, synthResult, synthesizeFactors,
+      drlCfg, drlTrain, drlModels, drlEvalResult, drlCurveShown, drlOos,
+      drlMode, drlMineCfg, drlMineResult, drlMineLoading,
+      startDrlTrain, loadDrlModels, useDrlModel, evaluateDrlModel, deleteDrlModel, showDrlCurve,
+      mineFactorByRl, applyRlCombo,
+      runOosEval,
+      loadMarket, switchMarketEx};
+  }
+}).mount('#app');
+</script>
+</body>
+</html>

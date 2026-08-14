@@ -109,6 +109,27 @@ async def test_ai(body: Optional[AITestIn] = None, db: Database = Depends(get_db
         raise HTTPException(status_code=502, detail=str(e))
 
 
+class AIModelsIn(BaseModel):
+    provider: str = ""
+    base_url: str = ""
+    api_key: str = ""
+
+
+@router.post("/models")
+async def fetch_ai_models(body: AIModelsIn, engine=Depends(get_engine)):
+    """拉取可用模型列表（Cherry Studio 式：填 Key+地址一键获取）。
+
+    用表单临时值请求 {base_url}/models，不保存、不落日志、不回显 Key。
+    """
+    try:
+        models = await engine.ai_client.list_models(body.base_url, body.api_key)
+        return {"ok": True, "models": models}
+    except AINotConfigured as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except AICallError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @router.post("/analyze")
 async def analyze_now(engine=Depends(get_engine)):
     snap = await engine._current_snapshot()

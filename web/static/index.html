@@ -406,19 +406,25 @@
     <option value="ETH/BTC"></option><option value="BTC/ETH"></option>
   </datalist>
 
-  <!-- 主流 AI 模型候选（按提供商过滤，仍可自由输入任意模型） -->
+  <!-- 主流 AI 模型候选（按提供商过滤，仍可自由输入任意模型）。
+       拉取到服务端模型列表后优先显示动态列表（Cherry Studio 式） -->
   <datalist id="aiModelList">
-    <template v-if="ai.provider==='openai'">
-      <option value="gpt-4o-mini"></option><option value="gpt-4o"></option>
-      <option value="gpt-4.1-mini"></option><option value="gpt-4.1"></option>
-      <option value="o3-mini"></option><option value="gpt-4-turbo"></option>
-    </template>
-    <template v-else-if="ai.provider==='deepseek'">
-      <option value="deepseek-chat"></option><option value="deepseek-reasoner"></option>
+    <template v-if="aiModelListOptions.length">
+      <option v-for="m in aiModelListOptions" :key="m" :value="m"></option>
     </template>
     <template v-else>
-      <option value="claude-sonnet-4-5"></option><option value="qwen-max"></option>
-      <option value="glm-4-plus"></option><option value="moonshot-v1-32k"></option>
+      <template v-if="ai.provider==='openai'">
+        <option value="gpt-4o-mini"></option><option value="gpt-4o"></option>
+        <option value="gpt-4.1-mini"></option><option value="gpt-4.1"></option>
+        <option value="o3-mini"></option><option value="gpt-4-turbo"></option>
+      </template>
+      <template v-else-if="ai.provider==='deepseek'">
+        <option value="deepseek-chat"></option><option value="deepseek-reasoner"></option>
+      </template>
+      <template v-else>
+        <option value="claude-sonnet-4-5"></option><option value="qwen-max"></option>
+        <option value="glm-4-plus"></option><option value="moonshot-v1-32k"></option>
+      </template>
     </template>
   </datalist>
 
@@ -761,7 +767,14 @@
                   <option value="custom">自定义兼容接口</option>
                 </select></div>
               <div><label class="mac-label">模型名称</label>
-                <input v-model="ai.model" class="mac-input" list="aiModelList" placeholder="gpt-4o-mini / deepseek-chat"/></div>
+                <div class="flex gap-2">
+                  <input v-model="ai.model" class="mac-input" list="aiModelList" placeholder="gpt-4o-mini / deepseek-chat"/>
+                  <!-- 获取模型：Cherry Studio 式——识别 Key+地址自动拉取可用模型 -->
+                  <button class="mac-btn flex-none" style="padding:8px 12px" @click="fetchAiModels()"
+                          :disabled="ai.fetchingModels" :aria-label="ai.fetchingModels?'正在拉取模型列表':'获取模型列表'">
+                    {{ai.fetchingModels?'拉取中…':'获取模型'}}
+                  </button>
+                </div></div>
               <div class="col-span-2"><label class="mac-label">API 地址 (Endpoint)</label>
                 <input v-model="ai.base_url" class="mac-input" placeholder="https://api.openai.com/v1"/></div>
               <div class="col-span-2"><label class="mac-label">API Key（加密存储，仅显示掩码）</label>
@@ -2146,7 +2159,9 @@ createApp({
     const riskRules = ref({});
     const optLogs = ref([]);
     const analyses = ref([]);
-    const ai = reactive({provider:'openai', base_url:'', model:'', api_key:'', has_api_key:false, api_key_masked:''});
+    const ai = reactive({provider:'openai', base_url:'', model:'', api_key:'', has_api_key:false, api_key_masked:'', fetchingModels:false});
+    // 拉取到的服务端模型列表（Cherry Studio 式：datalist 动态候选，空则用静态兜底）
+    const aiModelListOptions = ref([]);
     const aiFeatureParams = ref(null);
     const autoAnalysis = ref(true);
     const aiMsg = ref(''); const aiMsgOk = ref(true); const aiTesting = ref(false);
@@ -2583,8 +2598,24 @@ createApp({
 
     // ---------- AI ----------
     async function saveAiSettings() {
-      try { await api('/ai/settings', {method:'PUT', body:JSON.stringify(ai)}); aiMsg.value='✓ 已保存（密钥已加密）'; aiMsgOk.value=true; toast('AI 配置已保存','ok'); loadAiSettings(); }
+      try { await api('/ai/settings', {method:'PUT', body:JSON.stringify(ai)}); aiMsg.value='✓ 已保存（密钥已加密）'; aiMsgOk.value=true; toast('AI 配置已保存','ok'); loadAiSettings();
+        // 保存成功后自动拉取模型列表（Cherry Studio 式；失败静默，不打断保存反馈）
+        if (ai.base_url && (ai.api_key || ai.has_api_key)) fetchAiModels().catch(()=>{});
+      }
       catch(e){ aiMsg.value=String(e.message||e); aiMsgOk.value=false; toast(String(e.message||e),'error'); }
+    }
+    async function fetchAiModels() {
+      if (ai.fetchingModels) return;
+      ai.fetchingModels = true;
+      try {
+        const d = await api('/ai/models', {method:'POST', body:JSON.stringify({
+          provider: ai.provider, base_url: ai.base_url, api_key: ai.api_key||''})});
+        aiModelListOptions.value = d.models || [];
+        // 自动选中第一个（当前模型为空或不在列表时）
+        if (d.models && d.models.length && (!ai.model || !d.models.includes(ai.model))) ai.model = d.models[0];
+        toast('已获取 '+d.models.length+' 个可用模型','ok');
+      } catch(e){ toast('获取模型失败：'+(e.message||e),'error'); }
+      finally{ ai.fetchingModels = false; }
     }
     async function testAi() {
       aiTesting.value=true; aiMsg.value='';
@@ -3216,7 +3247,7 @@ createApp({
       marketExchanges, marketTimeframes, exLabel, popularSymbols, mkt, mktTickers, mktOverview, mktLoading, mktLast, mktChange, mktO, mktH, mktL, mktV, mktFlash, mktUpdated, dashTickers,
       fmt, pct, mktPrice, fmtVol, mktVol, fmtTs, normSym, toggleTheme, refreshCharts, toast, dismissToast, switchView,
       uiModal, uiConfirm, uiPrompt, uiModalOk, uiModalCancel,
-      startEngine, stopEngine, saveAiSettings, testAi, runAnalysis,
+      startEngine, stopEngine, saveAiSettings, testAi, fetchAiModels, aiModelListOptions, runAnalysis,
       saveExKeys, testEx, selectStrategy, saveParams, saveRisk, runBacktest, loadBtResult,
       designStrategy, autoOptimize, useAiStrategy, useDesigned,
       iterateStrategy, useIterated,

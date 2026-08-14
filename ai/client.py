@@ -357,6 +357,39 @@ class AIClient:
                 return None
         return None
 
+    async def list_models(self, base_url: str, api_key: str) -> list[str]:
+        """拉取 OpenAI 兼容 /models 端点返回的可用模型列表（Cherry Studio 式配置）。
+
+        base_url/api_key 为表单临时值：不保存、不落日志、不回显。
+        失败抛 AICallError（带友好提示）；不支持 models 端点的服务可保留手动输入。
+        """
+        base = (base_url or "").strip().rstrip("/")
+        if not base:
+            raise AINotConfigured("请先填写 API 地址（Base URL）")
+        if not api_key:
+            raise AINotConfigured("请先填写 API Key")
+        headers = {"Authorization": f"Bearer {api_key}"}
+        client = self._client_for_loop()
+        try:
+            r = await client.get(base + "/models", headers=headers,
+                                 timeout=httpx.Timeout(20.0))
+            if r.status_code == 401:
+                raise AICallError("API Key 无效（401）：请检查密钥后重试")
+            if r.status_code == 404:
+                raise AICallError("该服务不支持 /models 端点（404），请手动输入模型名")
+            r.raise_for_status()
+            data = r.json()
+            models = sorted({m.get("id", "") for m in (data.get("data") or []) if m.get("id")})
+            if not models:
+                raise AICallError("该服务返回的模型列表为空")
+            return models
+        except AICallError:
+            raise
+        except httpx.HTTPStatusError as e:
+            raise AICallError(f"模型列表拉取失败: HTTP {e.response.status_code}")
+        except httpx.HTTPError as e:
+            raise AICallError(f"模型列表拉取失败（网络不可达或地址错误）: {e}")
+
     async def test_connection(self, override: Optional[dict] = None) -> str:
         """测试连接：发送一句简单问候，返回模型回复文本。
 

@@ -39,6 +39,17 @@ def probe_local_proxy() -> str:
     return ""
 
 
+class _Utf8YamlSource(YamlConfigSettingsSource):
+    """UTF-8 读取 config.yaml：pydantic-settings 默认以系统编码（中文 Windows=GBK）
+    文本模式打开，UTF-8 中文注释直接 UnicodeDecodeError（启动即崩）。
+    """
+
+    def _read_file(self, file_path):
+        import yaml
+        with open(file_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(ROOT / ".env"),
@@ -52,7 +63,7 @@ class Settings(BaseSettings):
                                    dotenv_settings, file_secret_settings):
         """注册 config/config.yaml 为配置源（曾仅声明 yaml_file 无 source，文件被静默忽略）。"""
         return (init_settings, env_settings, dotenv_settings,
-                YamlConfigSettingsSource(settings_cls), file_secret_settings)
+                _Utf8YamlSource(settings_cls), file_secret_settings)
 
     # 安全
     master_key: str = ""       # 可选：固定主密钥（.env 配置），留空则自动生成 data/master.key

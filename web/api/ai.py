@@ -171,9 +171,18 @@ async def auto_optimize(payload: dict = {}, engine=Depends(get_engine)):
                 _ai_progress(task_id, "ai", "AI 正在分析价格行为与优化参数", 40,
                              "AI 思考中（依据 S/R、量能、近期盈亏）…")
                 result = await engine.optimizer.optimize_price_action(
-                    engine.strategy, perf, snap, focus, backtests)
+                    engine.strategy, perf, snap, focus, backtests, apply=False)
                 if result is None:
                     raise RuntimeError("AI 优化失败（未配置 AI 或调用出错）")
+                # 参数应用调度回主循环（持策略锁）：曾 worker 直接 update_params
+                # 绕过锁，与 K 线处理并发写 params；asyncio.Lock 不能跨循环直接获取
+                if result.get("params") and engine._loop is not None:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        engine.apply_strategy_params(engine.strategy.name, result["params"]),
+                        engine._loop)
+                    fut.result(timeout=10.0)
+                else:
+                    log.warning("[ai] 无主循环引用，参数未应用（仅记录）: %s", result.get("params"))
                 _ai_progress(task_id, "validate", "校验输出并热更新", 75,
                              "参数已过量化规则校验")
                 result["market_features"] = {

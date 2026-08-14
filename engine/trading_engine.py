@@ -68,6 +68,12 @@ class TradingEngine:
         # 策略切换/参数热更新 vs K 线处理互斥（必须在 __init__ 创建：
         # 曾只在 start 时创建，引擎未启动时 select_strategy 等直接 AttributeError 500）
         self._strategy_lock = asyncio.Lock()
+        # 主事件循环引用：后台 AI worker 线程经 run_coroutine_threadsafe 把
+        # 参数应用调度回主循环（持 _strategy_lock），避免跨循环用锁
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         # 实盘余额缓存（避免每根K线打 REST）
         self._live_balance: dict = {}
         self._live_balance_ts: float = 0.0
@@ -182,9 +188,15 @@ class TradingEngine:
                 t.cancel()
             if self.hub:
                 self.hub.stop()
-            # 等待所有任务真正退出，避免快速重启时新旧任务并存导致重复下单
+            # 等待所有任务真正退出，避免快速重启时新旧任务并存导致重复下单。
+            # 带超时：live 模式下取消中的 _on_candle 可能卡在交易所请求上，
+            # 曾无 timeout 极端时 stop 永久挂起（孤儿单由交易所侧对账兜底）
             if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True), timeout=10.0)
+                except asyncio.TimeoutError:
+                    log.warning("[engine] 任务退出超时，强制继续停止流程")
             if self.exchange:
                 await self.exchange.close()
             await self.bus.publish(Event(EventType.ENGINE_STATE, {"state": "stopped"}, source="engine"))
@@ -364,7 +376,10 @@ class TradingEngine:
                     if now - self._last_optimize >= settings.ai_optimize_interval:
                         self._last_optimize = now
                         perf = await self._recent_performance()
-                        await self.optimizer.optimize_price_action(self.strategy, perf, snap, "价格行为与关键位")
+                        # 持策略锁执行：optimizer 内部会 update_params 当前策略，
+                        # 与 _on_candle 的读参/信号段互斥（同循环 asyncio.Lock 安全）
+                        async with self._strategy_lock:
+                            await self.optimizer.optimize_price_action(self.strategy, perf, snap, "价格行为与关键位")
                     if now - self._last_review >= settings.ai_review_interval:
                         self._last_review = now
                         trades = await self._recent_trades(limit=100)
@@ -575,6 +590,18 @@ class TradingEngine:
     async def update_strategy_params(self, params: dict) -> dict:
         async with self._strategy_lock:
             return {"params": self.strategy.update_params(params)}
+
+    async def apply_strategy_params(self, name: str, params: dict) -> dict:
+        """带策略锁应用参数——后台 AI worker 线程经 run_coroutine_threadsafe 调回主循环。
+
+        曾 worker 直接 strategy.update_params 绕过锁，与 _on_candle_locked 持锁期间
+        并发写 params（多键非原子），信号读到混合参数。
+        """
+        async with self._strategy_lock:
+            st = get_strategy(name)
+            applied = st.update_params(params)
+            log.info("[engine] 参数热更新（主循环持锁）: %s", applied)
+            return applied
 
     def list_strategies(self) -> list[dict]:
         return list_strategies()

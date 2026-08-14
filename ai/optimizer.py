@@ -18,8 +18,13 @@ class ParamOptimizer:
 
     async def optimize_price_action(self, strategy: Strategy, performance: dict, snap: dict,
                                     focus: str = "价格行为与关键位",
-                                    backtests: Optional[list] = None) -> Optional[dict]:
-        """全自动优化：重点针对关键位识别与价格行为确认，返回 {params, reason, focus}。"""
+                                    backtests: Optional[list] = None,
+                                    apply: bool = True) -> Optional[dict]:
+        """全自动优化：重点针对关键位识别与价格行为确认，返回 {params, reason, focus}。
+
+        apply=False 时只返回参数不应用（由调用方持策略锁应用——
+        后台 worker 线程直接 update_params 会绕过引擎的策略锁，与 K 线处理竞态）。
+        """
         try:
             result = await self._client.chat_json_validated(
                 price_action_optimize_messages(strategy, performance, snap, focus, backtests or []),
@@ -30,7 +35,7 @@ class ParamOptimizer:
             return None
 
         new_params = result.get("params") or {}
-        applied = strategy.update_params(new_params)
+        applied = strategy.update_params(new_params) if apply else dict(strategy.params)
         async with self._db.session() as s:
             from core.database import OptimizationLog
             s.add(OptimizationLog(

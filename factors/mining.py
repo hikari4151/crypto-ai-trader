@@ -305,7 +305,9 @@ def dynamic_composite(mat: pd.DataFrame, close: pd.Series, h: int = 1,
     # 逐时点权重：|IC|≥门槛 的 top_n，按 |IC| 加权（负 IC 反向暴露）
     n = len(mat)
     weight_rows = np.zeros((n, len(mat.columns)))
-    z = (mat - mat.mean()) / (mat.std() + 1e-12)
+    # 标准化用 expanding（截至当期）统计量：曾用全样本 mean/std（含未来段），
+    # 组合值携带未来分布信息且与实盘滚动缓冲（factor_signal 300 根局部 z）口径漂移
+    z = (mat - mat.expanding().mean()) / (mat.expanding().std() + 1e-12)
     z = z.fillna(0.0).to_numpy(float)
     cols = list(mat.columns)
     for t in range(n):

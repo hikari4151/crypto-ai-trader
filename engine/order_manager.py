@@ -132,6 +132,11 @@ class OrderManager:
             price = float(order.get("average") or order.get("price") or 0.0)
             fee_info = order.get("fee") or {}
             fee = float(fee_info.get("cost") or 0.0)
+            if order.get("status") != "closed" and filled > 0:
+                # 部分成交且仍挂单：剩余部分交易所继续撮合，系统无补记机制——
+                # 告警提示人工核对，避免误以为全部成交
+                log.warning("[order] 订单部分成交且仍挂单（剩余未管理，请人工核对）: %s %s oid=%s filled=%s/%s",
+                            signal.side, signal.symbol, order.get("id", ""), filled, qty)
             if filled <= 0:
                 # 限价单未成交（挂单中）：不落库、不发事件、返回 None——
                 # 曾把 qty=0 当成交处理，导致策略 on_fill 假触发、频率计数污染

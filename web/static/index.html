@@ -93,6 +93,17 @@
   /* macOS 系统设置大标题 */
   .page-title{font-size:26px;font-weight:600;letter-spacing:-.02em;line-height:1.2;margin:2px 0 6px}
 
+  /* ---------- 毛玻璃确认/输入弹窗 ---------- */
+  .ui-modal-mask{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;
+    background:rgba(0,0,0,.35);backdrop-filter:blur(6px);animation:fadeIn .18s ease}
+  .ui-modal{width:min(420px,90vw);background:var(--win-bg);backdrop-filter:blur(40px) saturate(180%);
+    border:1px solid var(--border2);border-radius:14px;padding:20px;box-shadow:var(--shadow),inset 0 1px 0 rgba(255,255,255,.06);
+    animation:modalIn .22s var(--ease-spring)}
+  .ui-modal-title{font-size:15px;font-weight:600;letter-spacing:-.01em;margin-bottom:8px}
+  .ui-modal-msg{font-size:13px;color:var(--muted);line-height:1.6;white-space:pre-wrap;word-break:break-all}
+  @keyframes modalIn{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
+  @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+
   /* ---------- macOS 菜单栏 ---------- */
   .menubar{height:44px;display:flex;align-items:center;gap:3px;padding:0 14px;position:fixed;top:0;left:0;right:0;z-index:50;
     background:var(--menu-bg);backdrop-filter:blur(40px) saturate(200%);border-bottom:1px solid var(--border);}
@@ -230,8 +241,7 @@
   :root[data-theme="light"] ::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.28);border-radius:6px;border:2px solid transparent;background-clip:content-box}
 
   /* ---------- Toast ---------- */
-  #toasts{position:fixed;top:56px;right:16px;z-index:200;display:flex;flex-direction:column;gap:8px;pointer-events:none}
-  .toast{pointer-events:auto;min-width:220px;max-width:360px;padding:10px 14px;border-radius:10px;font-size:13px;line-height:1.45;
+  #toasts{position:fixed;top:56px;right:16px;z-index:200;display:flex;flex-direction:column;gap:8px;pointer-events:none}  .toast{pointer-events:auto;min-width:220px;max-width:360px;padding:10px 14px;border-radius:10px;font-size:13px;line-height:1.45;
     background:var(--win-bg);backdrop-filter:blur(24px) saturate(180%);border:1px solid var(--border2);box-shadow:var(--shadow);
     display:flex;align-items:flex-start;gap:9px;animation:toastIn .22s cubic-bezier(.2,.9,.3,1.2)}
   .toast.out{animation:toastOut .25s ease forwards}
@@ -345,6 +355,23 @@
     </div>
   </div>
 
+  <!-- 毛玻璃确认/输入弹窗（替代原生 prompt/confirm） -->
+  <transition name="fade">
+  <div v-if="uiModal.show" class="ui-modal-mask" @click.self="uiModalCancel">
+    <div class="ui-modal" role="dialog" :aria-label="uiModal.title">
+      <div class="ui-modal-title">{{uiModal.title}}</div>
+      <div class="ui-modal-msg">{{uiModal.msg}}</div>
+      <input v-if="uiModal.mode==='prompt'" v-model="uiModal.value"
+             class="mac-input mt-2" :placeholder="uiModal.placeholder"
+             @keydown.enter.prevent="uiModalOk" @keydown.esc.prevent="uiModalCancel">
+      <div class="flex justify-end gap-2 mt-4">
+        <button class="mac-btn" @click="uiModalCancel">取消</button>
+        <button class="mac-btn primary" @click="uiModalOk">确定</button>
+      </div>
+    </div>
+  </div>
+  </transition>
+
   <!-- ================= macOS 菜单栏 ================= -->
   <div class="menubar">
     <div class="flex items-center gap-2 mr-2 select-none">
@@ -362,7 +389,11 @@
       </span>
       <span class="pill" :class="liveStatus.mode==='live'?'red':liveStatus.mode==='simulated'?'purple':'blue'">{{liveStatus.mode==='live'?'实盘':liveStatus.mode==='simulated'?'模拟实盘':'纸面模拟'}}</span>
       <span class="strategy-tag hidden md:inline text-slate-500">策略 {{currentStrategy}}</span>
-      <button class="mac-btn" style="padding:4px 9px" @click="toggleTheme()">{{theme==='dark'?'🌙':'☀️'}}</button>
+      <button class="mac-btn" style="padding:4px 9px" @click="toggleTheme()" :aria-label="theme==='dark'?'切换到浅色模式':'切换到深色模式'">
+        <!-- 主题图标：SVG（曾用 🌙☀️ emoji，Windows 渲染与 macOS 质感割裂） -->
+        <svg v-if="theme==='dark'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
       <span class="clock-slot font-mono text-slate-400 w-[74px] text-right select-none">{{clock}}</span>
     </div>
   </div>
@@ -395,6 +426,7 @@
   <main class="p-5 space-y-5 max-w-[1400px] mx-auto">
 
     <!-- ========== 仪表盘 ========== -->
+<transition name="page" mode="out-in">  <!-- view: dashboard -->
     <section v-if="view==='dashboard'" class="space-y-5">
       <div class="flex items-center justify-between">
         <div>
@@ -568,8 +600,10 @@
         </div>
       </div>
     </section>
+</transition>
 
     <!-- ========== 行情（实时图表） ========== -->
+<transition name="page" mode="out-in">  <!-- view: market -->
     <section v-if="view==='market'" class="space-y-5">
       <div class="flex items-center justify-between">
         <div>
@@ -693,8 +727,10 @@
         </div>
       </div>
     </section>
+</transition>
 
     <!-- ========== AI 与 API（System Settings 风格） ========== -->
+<transition name="page" mode="out-in">  <!-- view: settings -->
     <section v-if="view==='settings'" class="space-y-5">
       <div>
         <h1 class="page-title">AI 与 API</h1>
@@ -758,7 +794,7 @@
                 </div>
                 <div class="flex items-center gap-2">
                   <span class="text-[11px]" :class="autoAnalysis?'pos':'text-slate-500'">{{autoAnalysis?'已开启':'已关闭'}}</span>
-                  <div class="mac-toggle" :class="autoAnalysis?'on':''" @click="toggleAutoAnalysis()"></div>
+                  <div class="mac-toggle" role="switch" :aria-checked="autoAnalysis?true:false" tabindex="0" :class="autoAnalysis?'on':''" @click="toggleAutoAnalysis()" @keydown.enter.prevent="toggleAutoAnalysis()" @keydown.space.prevent="toggleAutoAnalysis()"></div>
                 </div>
               </div>
             </div>
@@ -847,8 +883,10 @@
         </div>
       </div>
     </section>
+</transition>
 
     <!-- ========== 策略与工坊 ========== -->
+<transition name="page" mode="out-in">  <!-- view: strategy -->
     <section v-if="view==='strategy'" class="space-y-5">
       <div>
         <h1 class="page-title">策略与 AI 工坊</h1>
@@ -1122,8 +1160,10 @@
         </div>
       </div>
     </section>
+</transition>
 
     <!-- ========== 历史回测 ========== -->
+<transition name="page" mode="out-in">  <!-- view: backtest -->
     <section v-if="view==='backtest'" class="space-y-5">
       <div class="flex items-center justify-between">
         <h1 class="page-title" style="margin:0">历史回测</h1>
@@ -1190,7 +1230,7 @@
             <div v-if="bt.data_source==='exchange'"><label class="mac-label">K线数量</label><input v-model.number="bt.limit" class="mac-input"/></div>
             <div><label class="mac-label">GPU 加速</label>
               <div class="flex items-center gap-2 mt-1">
-                <div class="mac-toggle" :class="bt.use_gpu?'on':''" @click="bt.use_gpu=!bt.use_gpu"></div>
+                <div class="mac-toggle" role="switch" :aria-checked="bt.use_gpu?true:false" tabindex="0" :class="bt.use_gpu?'on':''" @click="bt.use_gpu=!bt.use_gpu" @keydown.enter.prevent="bt.use_gpu=!bt.use_gpu" @keydown.space.prevent="bt.use_gpu=!bt.use_gpu"></div>
                 <span class="text-[12px]" :class="bt.use_gpu?'pos':'text-slate-500'">{{bt.use_gpu?'已启用':'未启用'}}</span>
               </div>
               <div class="text-[10.5px] text-slate-500 mt-1">向量化引擎 · 需 NVIDIA GPU</div>
@@ -1418,8 +1458,10 @@
         </div>
       </div>
     </section>
+</transition>
 
     <!-- ========== 量化研究 ========== -->
+<transition name="page" mode="out-in">  <!-- view: quant -->
     <section v-if="view==='quant'" class="space-y-5">
       <div class="flex items-center justify-between">
         <h1 class="page-title" style="margin:0">量化研究</h1>
@@ -1645,7 +1687,7 @@
               <div class="col-span-2 flex items-end gap-2 pb-0.5">
                 <button class="mac-btn primary" @click="mineFactorByRl()" :disabled="drlMineLoading">{{drlMineLoading?'挖掘中…':'⚗️ 开始因子挖掘'}}</button>
                 <label class="mac-label mb-0" style="white-space:nowrap">OOS 达标自动注册</label>
-                <div class="mac-toggle" :class="drlMineCfg.auto_register?'on':''" @click="drlMineCfg.auto_register=!drlMineCfg.auto_register"></div>
+                <div class="mac-toggle" role="switch" :aria-checked="drlMineCfg.auto_register?true:false" tabindex="0" :class="drlMineCfg.auto_register?'on':''" @click="drlMineCfg.auto_register=!drlMineCfg.auto_register" @keydown.enter.prevent="drlMineCfg.auto_register=!drlMineCfg.auto_register" @keydown.space.prevent="drlMineCfg.auto_register=!drlMineCfg.auto_register"></div>
               </div>
             </div>
             <div v-if="drlMineLoading" class="text-[11px] text-slate-400 mb-3">RL 正在因子池上试错学习（约数秒~1分钟）…</div>
@@ -1697,7 +1739,7 @@
           </div>
           <div class="flex gap-2 items-center mb-4">
             <label class="mac-label mb-0" style="white-space:nowrap">GPU 加速</label>
-            <div class="mac-toggle" :class="drlCfg.use_gpu?'on':''" @click="drlCfg.use_gpu=!drlCfg.use_gpu"></div>
+            <div class="mac-toggle" role="switch" :aria-checked="drlCfg.use_gpu?true:false" tabindex="0" :class="drlCfg.use_gpu?'on':''" @click="drlCfg.use_gpu=!drlCfg.use_gpu" @keydown.enter.prevent="drlCfg.use_gpu=!drlCfg.use_gpu" @keydown.space.prevent="drlCfg.use_gpu=!drlCfg.use_gpu"></div>
             <span class="text-[12px]" :class="drlCfg.use_gpu?'pos':'text-slate-500'">{{drlCfg.use_gpu?'已启用':'未启用'}}</span>
             <span class="text-[10.5px] text-slate-500">特征预计算 GPU 化（需 NVIDIA GPU + cupy，不可用自动回退 CPU）</span>
           </div>
@@ -1716,7 +1758,7 @@
           </div>
           <div class="flex gap-2 items-center mb-4">
             <label class="mac-label mb-0" style="white-space:nowrap">🔒 强制自动训练</label>
-            <div class="mac-toggle" :class="drlCfg.force_train?'on':''" @click="drlCfg.force_train=!drlCfg.force_train"></div>
+            <div class="mac-toggle" role="switch" :aria-checked="drlCfg.force_train?true:false" tabindex="0" :class="drlCfg.force_train?'on':''" @click="drlCfg.force_train=!drlCfg.force_train" @keydown.enter.prevent="drlCfg.force_train=!drlCfg.force_train" @keydown.space.prevent="drlCfg.force_train=!drlCfg.force_train"></div>
             <span class="text-[12px]" :class="drlCfg.force_train?'pos':'text-slate-500'">{{drlCfg.force_train?'已开启':'已关闭'}}</span>
             <span class="text-[10.5px] text-slate-500">开启后触发早停也不中断，继续训练到设定轮数（进度不重置）</span>
           </div>
@@ -1870,8 +1912,10 @@
         </div>
       </div>
     </section>
+</transition>
 
     <!-- ========== 历史战绩 ========== -->
+<transition name="page" mode="out-in">  <!-- view: performance -->
     <section v-if="view==='performance'" class="space-y-5">
       <div>
         <h1 class="page-title">历史战绩</h1>
@@ -1925,8 +1969,10 @@
         </div>
       </div>
     </section>
+</transition>
 
     <!-- ========== 实盘启动 ========== -->
+<transition name="page" mode="out-in">  <!-- view: live -->
     <section v-if="view==='live'" class="space-y-5">
       <div>
         <h1 class="page-title">实盘启动</h1>
@@ -2041,6 +2087,7 @@
         </div>
       </div>
     </section>
+</transition>
   </main>
 </div>
 
@@ -2054,6 +2101,28 @@ createApp({
     const theme = ref(localStorage.getItem('cat_theme')||'dark');
     const clock = ref('');
     const toasts = ref([]);
+    // 毛玻璃确认/输入弹窗（替代原生 prompt/confirm，曾直接击穿 macOS 沉浸感）
+    const uiModal = ref({show:false, mode:'confirm', title:'', msg:'', value:'', placeholder:''});
+    let uiModalResolve = null;
+    function uiConfirm(msg, title='确认操作') {
+      uiModal.value = {show:true, mode:'confirm', title, msg, value:'', placeholder:''};
+      return new Promise(res=>{ uiModalResolve = res; });
+    }
+    function uiPrompt(msg, def='', title='输入', placeholder='') {
+      uiModal.value = {show:true, mode:'prompt', title, msg, value:def, placeholder};
+      return new Promise(res=>{ uiModalResolve = res; });
+    }
+    function uiModalOk() {
+      const m = uiModal.value;
+      if (m.mode==='prompt' && !m.value.trim()) return;   // 输入不能为空
+      uiModal.value = {...m, show:false};
+      if (uiModalResolve) { uiModalResolve(m.mode==='prompt' ? m.value.trim() : true); uiModalResolve=null; }
+    }
+    function uiModalCancel() {
+      const m = uiModal.value;
+      uiModal.value = {...m, show:false};
+      if (uiModalResolve) { uiModalResolve(m.mode==='prompt' ? null : false); uiModalResolve=null; }
+    }
     let toastId = 0;
     const views = [
       {key:'dashboard', label:'仪表盘'}, {key:'market', label:'行情'},
@@ -2164,7 +2233,7 @@ createApp({
       } catch(e){ toast(String(e.message||e),'error'); }
     }
     async function renameStrategy(s) {
-      const newName = prompt('重命名策略「'+s.name+'」为（英文小写/数字/下划线）:', s.name);
+      const newName = await uiPrompt('重命名策略「'+s.name+'」为（英文小写/数字/下划线）:', s.name, '重命名策略', '新名称（英文小写/数字/下划线）');
       if (!newName || newName === s.name) return;
       try {
         await api('/strategy-repo/rename', {method:'POST', body:JSON.stringify({old_name:s.name, new_name:newName})});
@@ -2172,7 +2241,7 @@ createApp({
       } catch(e){ toast(String(e.message||e),'error'); }
     }
     async function deleteStrategy(s) {
-      if (!confirm('确认删除策略「'+s.name+'」？此操作不可恢复。')) return;
+      if (!await uiConfirm('确认删除策略「'+s.name+'」？此操作不可恢复。', '删除策略')) return;
       try {
         await api('/strategy-repo/delete', {method:'POST', body:JSON.stringify({name:s.name})});
         toast('已删除策略: '+s.name,'ok'); loadAllStrategies(); loadStrategy();
@@ -2366,26 +2435,30 @@ createApp({
       finally{ designLoading.value=false; }
     }
     // 轮询 AI 后台任务进度（优化/反思）——单一轮询源：曾与 autoOptimize/iterateStrategy
-    // 内联 Promise 各开一个 setInterval 轮询同一 task_id（双倍请求），现统一返回 Promise
+    // 内联 Promise 各开一个 setInterval 轮询同一 task_id（双倍请求），现统一返回 Promise。
+    // timer 用 Set 管理：曾单例 aiTaskPollTimer，连续点击时后发起者 clear 前者 interval，
+    // 前者的 Promise 永不 resolve（loading 卡死）
+    const aiTaskTimers = new Set();
     function pollAiTask(taskId) {
-      clearInterval(aiTaskPollTimer);
       return new Promise((resolve)=>{
-        aiTaskPollTimer = setInterval(async ()=>{
+        const timer = setInterval(async ()=>{
           try {
             const p = await api('/ai/task/'+taskId);
             if (p.found) {
               aiTaskLabel.value = p.stage_label||'AI 工作中';
               aiTaskPct.value = p.pct||0;
               aiTaskMessage.value = p.message||'';
-              if (p.error) { toast('AI 任务失败：'+p.error,'error'); stopAiTask(); resolve(null); return; }
-              if (p.done) { stopAiTask(); resolve(p.result); return; }
+              if (p.error) { toast('AI 任务失败：'+p.error,'error'); clearInterval(timer); aiTaskTimers.delete(timer); resolve(null); return; }
+              if (p.done) { clearInterval(timer); aiTaskTimers.delete(timer); resolve(p.result); return; }
             }
           } catch(e) {}
         }, 800);
+        aiTaskTimers.add(timer);
       });
     }
     function stopAiTask() {
-      if (aiTaskPollTimer) { clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; }
+      aiTaskTimers.forEach(t=>clearInterval(t));
+      aiTaskTimers.clear();
       optLoading.value=false; iterLoading.value=false;
     }
     async function autoOptimize() {
@@ -2395,7 +2468,7 @@ createApp({
         const result = await pollAiTask(d.task_id);
         if (result) { optResult.value=result; toast('AI 全自动优化完成（已热更新）','ok'); }
       } catch(e){ toast('优化失败：'+(e.message||e),'error'); }
-      finally{ clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; optLoading.value=false; }
+      finally{ stopAiTask(); }
     }
     async function useAiStrategy(name) {
       try {
@@ -2411,7 +2484,7 @@ createApp({
         const result = await pollAiTask(d.task_id);
         if (result) { iterResult.value=result; toast('AI 深度反思迭代完成','ok'); loadAiStrategies(); loadStrategy(); loadAllStrategies(); }
       } catch(e){ toast('迭代失败：'+(e.message||e),'error'); }
-      finally{ clearInterval(aiTaskPollTimer); aiTaskPollTimer=null; iterLoading.value=false; }
+      finally{ stopAiTask(); }
     }
     async function useIterated() { if (iterResult.value) await useAiStrategy(iterResult.value.name); }
 
@@ -2446,6 +2519,7 @@ createApp({
         if (!chart) chart = initChart(key==='dashboard'?'equityChart':key==='perf'?'perfChart':'btChart');
         const ct = chartTheme();
         chart.setOption({
+          animation:false,   // 轮询刷新（5s loadEquity 全量重绘）关过渡动画，消除持续跳动感
           backgroundColor:'transparent',
           tooltip:{trigger:'axis', backgroundColor:ct.tooltip, borderColor:ct.tooltipBorder, textStyle:{color:ct.text, fontSize:12}},
           grid:{left:60,right:20,top:24,bottom:40},
@@ -2720,9 +2794,11 @@ createApp({
     }
 
     // ---------- 行情 ----------
+    let _mktReqSeq = 0;   // 请求序号：慢网络下乱序响应丢弃（曾先到后写导致闪烁方向错乱）
     async function loadMarket() {
       if (view.value!=='market') return;
       mktLoading.value = true;
+      const seq = ++_mktReqSeq;
       // 交易对/交易所变化时重置价格基线，避免切换瞬间误触发闪烁
       const symKey = mkt.exchange + '|' + mkt.symbol;
       if (symKey !== _lastMktSym) {
@@ -2732,6 +2808,7 @@ createApp({
       }
       try {
         const d = await api('/market/klines?exchange='+mkt.exchange+'&symbol='+encodeURIComponent(mkt.symbol)+'&timeframe='+mkt.timeframe+'&limit=300');
+        if (seq !== _mktReqSeq) return;   // 过期响应丢弃
         renderMarketChart(d.klines);
         if (d.klines.length) {
           const last = d.klines[d.klines.length-1];
@@ -2985,7 +3062,12 @@ createApp({
               }
             }
           } catch(e) {}
-          if (tries>=600) { drlTrain.running=false; toast('训练超时','error'); return; }
+          if (tries>=600) {
+            drlTrain.running=false;
+            toast('训练超时（后台仍在继续，稍后可在模型列表查看结果）','error');
+            loadDrlModels();   // 兜底刷新：超时后模型可能已完成
+            return;
+          }
           await new Promise(r=>setTimeout(r,500));
         }
       } catch(e){ drlTrain.running=false; toast('训练出错：'+(e.message||e),'error'); }
@@ -3053,7 +3135,7 @@ createApp({
       finally { drlOos.loading = false; }
     }
     async function deleteDrlModel(name) {
-      if (!confirm('确认删除模型「'+name+'」？模型文件和对应策略将一并删除，不可恢复。')) return;
+      if (!await uiConfirm('确认删除模型「'+name+'」？模型文件和对应策略将一并删除，不可恢复。', '删除模型')) return;
       try {
         await api('/drl/models/'+name+'/delete', {method:'POST', body:'{}'});
         toast('模型已删除: '+name,'ok');
@@ -3123,7 +3205,7 @@ createApp({
       setInterval(async ()=>{ if(view.value==='market') { loadMarket(); loadTickers(); loadOverview(); } }, 5000);
     });
 
-    return {view, settingsTab, theme, clock, toasts, views, engineStatus, isPaper, portfolio, perfSummary, trades, perfTrades, pnlStats,
+    return {view, settingsTab, theme, clock, toasts, views, engineStatus,isPaper, portfolio, perfSummary, trades, perfTrades, pnlStats,
       analysis, analysisLoading, currentStrategy, strategyList, paramSchema, strategyParams, riskRules, riskCooldown, optLogs, analyses,
       ai, aiMsg, aiMsgOk, aiTesting, aiFeatureParams, featureParamLabel, autoAnalysis, toggleAutoAnalysis, exKeys, bt, btRunning, btResult, btHistory, btLive, btStep, btGoto,
       overfitLoading, overfitResult, runOverfit,
@@ -3133,6 +3215,7 @@ createApp({
       designSymbol, designTimeframe, designType, designCustom, aiTaskLabel, aiTaskPct, aiTaskMessage,
       marketExchanges, marketTimeframes, exLabel, popularSymbols, mkt, mktTickers, mktOverview, mktLoading, mktLast, mktChange, mktO, mktH, mktL, mktV, mktFlash, mktUpdated, dashTickers,
       fmt, pct, mktPrice, fmtVol, mktVol, fmtTs, normSym, toggleTheme, refreshCharts, toast, dismissToast, switchView,
+      uiModal, uiConfirm, uiPrompt, uiModalOk, uiModalCancel,
       startEngine, stopEngine, saveAiSettings, testAi, runAnalysis,
       saveExKeys, testEx, selectStrategy, saveParams, saveRisk, runBacktest, loadBtResult,
       designStrategy, autoOptimize, useAiStrategy, useDesigned,

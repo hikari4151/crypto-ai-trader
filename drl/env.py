@@ -31,13 +31,20 @@ class TradingEnv:
                  warmup: int = 60,
                  backend: str = "numpy",
                  extra_factors: Optional[np.ndarray] = None,
-                 state_window: int = 1) -> None:
+                 state_window: int = 1,
+                 # 可选奖励塑形（系数=0 即关闭，默认关；A/B 验证后开启）
+                 reward_dd_penalty: float = 0.0,      # 回撤加深惩罚（含 dd>12% 硬约束）
+                 reward_losing_penalty: float = 0.0,  # 连亏惩罚（3 连亏起二次斜坡）
+                 reward_trend_align: float = 0.0) -> None:  # 趋势一致性奖励（低波动趋势持仓同向加分）
         self.df = df
         self.start_cash = start_cash
         self.fee_rate = fee_rate
         self.vol_penalty = vol_penalty      # 波动率惩罚系数
         self.cost_scale = cost_scale        # 交易成本缩放
         self.min_trade_zone = min_trade_zone  # 调仓死区：与目标仓位差异小于此比例则不调仓
+        self.reward_dd_penalty = reward_dd_penalty
+        self.reward_losing_penalty = reward_losing_penalty
+        self.reward_trend_align = reward_trend_align
         self.warmup = warmup
         self.backend = backend
         # 状态窗口：堆叠最近 N 根K线的特征，给 MLP 时序记忆（单点特征看不到形态变化）。
@@ -66,6 +73,10 @@ class TradingEnv:
         self._entry_price: Optional[float] = None
         self._prev_equity = start_cash
         self._done = False
+        # 奖励塑形状态（回撤峰值 / 连亏计数）
+        self._peak_equity = start_cash
+        self._last_dd = 0.0
+        self._losing_streak = 0
 
     @property
     def state_dim(self) -> int:
@@ -187,6 +198,28 @@ class TradingEnv:
         risk_penalty = self.vol_penalty * ((pos * vol / vol_ref) ** 2)
         reward_bp = float(np.clip(ret * 10000.0, -150.0, 150.0))
         reward = reward_bp - risk_penalty
+
+        # ---- 4. 可选奖励塑形（系数=0 即关闭；回撤惩罚对齐真实目标、连亏抑制
+        #      "抄底死扛"、趋势一致性强化"趋势加仓"方向） ----
+        if self.reward_dd_penalty > 0 or self.reward_losing_penalty > 0 or self.reward_trend_align > 0:
+            self._peak_equity = max(self._peak_equity, equity_next)
+            dd_t = (self._peak_equity - equity_next) / max(self._peak_equity, 1e-9)
+            if self.reward_dd_penalty > 0:
+                # 回撤加深才罚（增量），噪声小；dd>12% 加重罚（接近风险管理条）
+                if dd_t > self._last_dd:
+                    reward -= self.reward_dd_penalty * (dd_t - self._last_dd) * 100.0
+                if dd_t > 0.12:
+                    reward -= 3.0 * self.reward_dd_penalty
+            self._last_dd = dd_t
+            if self.reward_losing_penalty > 0:
+                self._losing_streak = self._losing_streak + 1 if ret < 0 else 0
+                if self._losing_streak > 2:
+                    reward -= self.reward_losing_penalty * ((self._losing_streak - 2) ** 2)
+            if self.reward_trend_align > 0 and self._t >= 20 and vol > 0:
+                # 低波动趋势中持仓与方向一致才加分；高波动自动失效，不与 vol_penalty 冲突
+                ret20 = (self._closes[self._t] / self._closes[self._t - 20]) - 1.0
+                vol_factor = max(0.0, 1.0 - min(1.0, vol / 3.0))
+                reward += self.reward_trend_align * pos * (1.0 if ret20 > 0 else -1.0) * vol_factor
 
         info = {
             "equity": equity_next, "ret_pct": ret * 100.0,

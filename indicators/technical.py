@@ -61,6 +61,24 @@ def bollinger(values: Any, period: int = 20, num_std: float = 2.0) -> tuple[np.n
     return mid + num_std * std, mid, mid - num_std * std
 
 
+def atr(highs, lows, closes, period: int = 14) -> np.ndarray:
+    """真实波幅均值（Wilder 平滑）——波动率基准，供 ATR 归一化与风险提示。"""
+    h = np.asarray(highs, dtype=float)
+    l = np.asarray(lows, dtype=float)
+    c = np.asarray(closes, dtype=float)
+    n = len(c)
+    out = np.full(n, np.nan)
+    if n < period + 1:
+        return out
+    prev_c = np.roll(c, 1)
+    prev_c[0] = c[0]
+    tr = np.maximum(h - l, np.maximum(np.abs(h - prev_c), np.abs(l - prev_c)))
+    out[period] = tr[1:period + 1].mean()
+    for i in range(period + 1, n):
+        out[i] = (out[i - 1] * (period - 1) + tr[i]) / period
+    return out
+
+
 def support_resistance(highs, lows, closes, window: int = 10, min_touches: int = 2) -> dict:
     """基于摆动高低点聚类识别关键支撑/阻力位（价格行为学核心）。"""
     highs = np.asarray(highs, dtype=float)
@@ -165,6 +183,18 @@ def compute_latest(ohlcv: list) -> dict[str, Any]:
     # 量比（与 fast_engine 的 vol_ratio 口径一致：当前量/5期均量，暖机期=1.0）
     vol_ma5 = vols[-5:].mean() if len(vols) >= 5 else 0.0
     vol_ratio = float(vols[-1] / vol_ma5) if vol_ma5 > 0 else 1.0
+    # ---- 增强指标（ATR/%B/MA 斜率/带宽）：供 AI 上下文与风险提示 ----
+    atr_arr = atr(highs, lows, closes, 14)
+    atr_now = _nan(atr_arr[last])
+    atr_pct = round(atr_now / closes[last] * 100, 3) if atr_now > 0 else 0.0
+    # %B：价格在布林带内位置（0=下轨 1=上轨）；带宽（收口/扩张）
+    bb_u, bb_m, bb_l = _nan(up[last]), _nan(mid[last]), _nan(low[last])
+    bb_position = float(np.clip((closes[last] - bb_l) / (bb_u - bb_l + 1e-12), 0, 1)) if bb_u > bb_l else 0.5
+    bb_width = round((bb_u - bb_l) / bb_m * 100, 3) if bb_m > 0 else 0.0
+    # MA 斜率（ATR 归一化）：近 8 根 MA10 变化 / ATR——趋势强度证据
+    ma_slope = 0.0
+    if last >= 8 and not np.isnan(ma_fast[last]) and not np.isnan(ma_fast[last - 8]) and atr_now > 0:
+        ma_slope = round((ma_fast[last] - ma_fast[last - 8]) / atr_now, 3)
     return {
         "close": float(closes[last]),
         "open": float(opens[last]),
@@ -179,6 +209,10 @@ def compute_latest(ohlcv: list) -> dict[str, Any]:
         "bb_upper": _nan(up[last]),
         "bb_mid": _nan(mid[last]),
         "bb_lower": _nan(low[last]),
+        "atr_pct": atr_pct,          # 波动率（ATR/close %）
+        "bb_position": bb_position,  # %B：布林带内位置 0~1
+        "bb_width": bb_width,        # 带宽 %（收口/扩张）
+        "ma_slope": ma_slope,        # MA10 斜率（ATR 归一化）
         "volume": float(vols[-1]),
         "vol_ratio": vol_ratio,
         "high": float(highs[-1]),

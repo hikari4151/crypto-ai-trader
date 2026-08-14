@@ -341,7 +341,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                      min_trade_zone=float(cfg.get("min_trade_zone", 0.05)),
                      backend=backend,
                      extra_factors=extra_factors_all[:len(train_df)] if extra_factors_all is not None else None,
-                     state_window=state_window)
+                     state_window=state_window,
+                     reward_dd_penalty=float(cfg.get("reward_dd_penalty", 0.0)),
+                     reward_losing_penalty=float(cfg.get("reward_losing_penalty", 0.0)),
+                     reward_trend_align=float(cfg.get("reward_trend_align", 0.0)))
     agent = ACAgent(env.state_dim, len(ACTION_BUCKETS), hidden=hidden,
                     lr_actor=float(cfg.get("lr_actor", 2e-3)),
                     lr_critic=float(cfg.get("lr_critic", 5e-3)),

@@ -9,6 +9,7 @@
 
 配合 ai/client.py 的按功能参数预设（温度/token）与 chat_json_validated 校验重试机制。
 """
+from datetime import datetime
 from typing import Any, Optional
 
 # ============ 输出纪律（所有任务共用） ============
@@ -33,17 +34,26 @@ _NO_HALLUCINATION = (
 def _snapshot_block(snap: dict) -> str:
     ind = snap.get("indicators", {})
     candles = snap.get("candles", [])[-30:]
+    tf = snap.get("timeframe", "")
     lines = [
+        f"- 周期: {tf or '未知'}（每根K线={tf}，时间窗口 {len(candles)} 根）",
         f"- 最新收盘价: {ind.get('close')}",
         f"- MA10/MA30: {ind.get('ma_fast')} / {ind.get('ma_slow')}",
         f"- MACD(DIF/DEA/HIST): {ind.get('macd')} / {ind.get('macd_signal')} / {ind.get('macd_hist')}",
         f"- RSI(14): {ind.get('rsi')}",
         f"- 布林带 上/中/下: {ind.get('bb_upper')} / {ind.get('bb_mid')} / {ind.get('bb_lower')}",
-        f"- 近5根成交量合计: {ind.get('volume')}",
+        f"- %B位置: {ind.get('bb_position')}  带宽: {ind.get('bb_width')}%",
+        f"- 波动率 ATR%: {ind.get('atr_pct')}  均线斜率(MA10/ATR): {ind.get('ma_slope')}",
+        f"- 最新一根成交量: {ind.get('volume')}  量比: {ind.get('vol_ratio')}",
         f"- 最近 {len(candles)} 根K线(OHLCV):",
     ]
     for c in candles[-10:]:
-        lines.append(f"  [{c[0]}] O={c[1]} H={c[2]} L={c[3]} C={c[4]} V={c[5]}")
+        # K线时间戳转 ISO（原始毫秒对 LLM 不友好，曾直接打印毫秒）
+        try:
+            ts = datetime.fromtimestamp(c[0] / 1000).strftime("%m-%d %H:%M")
+        except Exception:  # noqa: BLE001
+            ts = str(c[0])
+        lines.append(f"  [{ts}] O={c[1]} H={c[2]} L={c[3]} C={c[4]} V={c[5]}")
     return "\n".join(lines)
 
 
@@ -136,6 +146,10 @@ def market_analysis_messages(snap: dict, position: float, recent_trades: list[di
         '  —— trade_plan 给定时：side 必须与 bias 一致；做多要求 stop<entry<tp，做空要求 stop>entry>tp；\n'
         '     RR=(|tp-entry|/|entry-stop|)>=1.0 且 win_rate×reward > (1-win_rate)×risk，否则方案会被程序拒绝\n'
         '  —— 没有把握给出三价时省略 trade_plan，不要硬填}\n'
+        ' "bull_strength": 可选 0-100 多头力量评分, "bear_strength": 可选 0-100 空头力量评分\n'
+        ' "risk_level": 可选 "low|medium|high" 风险总评（与 warnings 并存）\n'
+        ' "outlook_24h": 可选 24小时展望 {"scenario": "情景描述", "probability": 0-1, "trigger": "触发条件"}\n'
+        '  —— bull_strength/bear_strength/risk_level/outlook_24h 均为可选字段，有依据才填，不硬凑}\n'
         "【量化规则（不满足会被拒绝）】\n"
         "- bias=long/short 时 confidence 必须 >=0.6\n"
         "- signals 方向必须与 bias 一致（bias=long 不允许建议做空）\n"
@@ -285,23 +299,33 @@ def design_strategy_messages(snap: dict, recent_trades: list[dict],
 
 # ============ 5. AI 策略迭代（温度 0.6 / token 8192） ============
 def _previous_block(previous: Optional[list]) -> str:
-    """前代迭代记录块：让 AI 看到历史迭代的 critique/改进点，形成正循环。"""
+    """前代迭代记录块：让 AI 看到历史迭代的 critique/改进点与回测指标，形成正循环。"""
     if not previous:
         return ""
-    lines = ["【前代迭代记录（上一代说了什么/改了什么，请先对照回测检验其效果）】"]
+    lines = ["【前代迭代记录（上一代说了什么/改了什么，请先对照其回测指标检验效果）】"]
     for p in previous:
+        bt = p.get("backtest") or {}
+        bt_txt = ""
+        if bt:
+            new_m = bt.get("new") or {}
+            old_m = bt.get("old") or {}
+            bt_txt = (f"  注册回测: 收益 {new_m.get('total_return')} vs 旧 {old_m.get('total_return')}, "
+                      f"回撤 {new_m.get('max_drawdown')}, 胜率 {new_m.get('win_rate')} "
+                      f"（{'超越旧策略' if bt.get('improved') else '未超越'}）")
         lines.append(
             f"- 版本 {p.get('version', '?')} [{p.get('name', '')}]:\n"
             f"  批判: {p.get('critique', '')}\n"
             f"  改进点: {'；'.join(p.get('improvements', []) or [])}\n"
             f"  总结: {p.get('summary', '')}"
+            f"{bt_txt}"
         )
     return "\n".join(lines) + "\n"
 
 
 def iteration_messages(strategy, performance: dict, snap: dict,
                        backtests: Optional[list] = None,
-                       previous: Optional[list] = None) -> list[dict]:
+                       previous: Optional[list] = None,
+                       goal: str = "") -> list[dict]:
     from .price_action_kb import add_price_action_knowledge
     sys = (
         "你是顶级量化策略评审与迭代专家，对现有策略做批判性深度反思并给出改进版。\n"
@@ -329,11 +353,13 @@ def iteration_messages(strategy, performance: dict, snap: dict,
         + _NO_HALLUCINATION
     )
     sys = add_price_action_knowledge(sys, compact=True) + "\n" + _OUTPUT_RULE
+    goal_txt = f"\n【本次迭代目标（用户指定，请优先围绕它改进）】{goal}\n" if goal else ""
     user = (f"【当前策略】名称: {strategy.name}\n"
             f"描述: {strategy.description}\n"
             f"参数schema: {strategy.param_schema}\n"
             f"当前参数: {strategy.params}\n"
             f"【近期表现】{performance}\n"
+            f"{goal_txt}"
             f"{_previous_block(previous)}"
             f"{_backtests_block(backtests or [])}"
             f"【市场快照】{_snapshot_block(snap)}\n"

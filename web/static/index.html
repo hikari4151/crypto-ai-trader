@@ -589,6 +589,33 @@
                 🔄 {{analysis._continuity.note}}
               </div>
               <p style="line-height:1.6">{{analysis.summary}}</p>
+              <!-- 多空力量对比条 + 风险总评 + 24h 展望（AI 可选输出） -->
+              <div v-if="analysis.bull_strength!=null || analysis.bear_strength!=null" class="text-[12px] rounded-lg px-3 py-2"
+                style="background:rgba(0,0,0,.22);border:1px solid var(--border)">
+                <div class="font-semibold mb-1.5">⚖️ 多空力量对比</div>
+                <div class="flex items-center gap-2">
+                  <span class="pos font-semibold w-9 text-right flex-none">{{analysis.bull_strength}}</span>
+                  <div class="flex-1 flex h-2 rounded-full overflow-hidden" style="background:rgba(255,69,58,.22)">
+                    <div :style="{width: (analysis.bull_strength||0)+'%', background:'var(--green)', transition:'width .4s ease'}"></div>
+                  </div>
+                  <span class="neg font-semibold w-9 flex-none">{{analysis.bear_strength}}</span>
+                </div>
+                <div class="flex justify-between text-[10.5px] text-slate-500 mt-1">
+                  <span class="pos">多头</span><span class="neg">空头</span>
+                </div>
+              </div>
+              <div v-if="analysis.outlook_24h" class="text-[12px] rounded-lg px-3 py-2"
+                style="background:rgba(10,132,255,.07);border:1px solid rgba(10,132,255,.3)">
+                <span class="font-semibold">🔭 24小时展望</span>
+                <span class="text-slate-400">{{analysis.outlook_24h.scenario}}</span>
+                <span v-if="analysis.outlook_24h.probability!=null" class="pill blue ml-1">概率 {{Math.round(analysis.outlook_24h.probability*100)}}%</span>
+                <div v-if="analysis.outlook_24h.trigger" class="text-[11px] text-slate-500 mt-1">触发: {{analysis.outlook_24h.trigger}}</div>
+              </div>
+              <div v-if="analysis.risk_level" class="text-[12px]">
+                <span class="mac-label" style="color:var(--muted)">🛡 风险总评</span>
+                <span class="pill" :class="analysis.risk_level==='high'?'red':analysis.risk_level==='medium'?'orange':'green'">
+                  {{analysis.risk_level==='high'?'高风险':analysis.risk_level==='medium'?'中风险':'低风险'}}</span>
+              </div>
               <div v-if="analysis.warnings?.length">
                 <div class="mac-label" style="color:var(--red)">⚠️ 风险提示</div>
                 <ul class="list-disc pl-5 text-slate-400 space-y-1"><li v-for="w in analysis.warnings" :key="w">{{w}}</li></ul>

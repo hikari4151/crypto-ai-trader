@@ -74,6 +74,10 @@ class TrainIn(BaseModel):
     state_window: int = 1         # 状态窗口：堆叠最近 N 根K线特征（时序记忆，1=单点）
     factor_expression: str = ""   # 可选：注入因子信号列（因子表达式，如 close/ma(close,30)-1），
                                   # 部署时 rl_adaptive 必须配置同一表达式
+    # ---- 可选奖励塑形（0=关闭；回撤/连亏/趋势一致性，A/B 验证后开启） ----
+    reward_dd_penalty: float = 0.0       # 回撤加深惩罚系数（含 dd>12% 硬约束）
+    reward_losing_penalty: float = 0.0   # 连亏惩罚（3 连亏起二次斜坡）
+    reward_trend_align: float = 0.0      # 趋势一致性奖励（低波动趋势持仓同向加分）
 
 
 def _validate_train(body: TrainIn) -> None:
@@ -234,6 +238,10 @@ async def start_training(body: TrainIn, db=Depends(get_db)):
             df = asyncio.run(_load_df(body))
             cfg = body.model_dump()
             cfg["hidden"] = tuple(body.hidden)
+            # 奖励塑形参数（默认 0=关闭，A/B 验证后可调）
+            cfg["reward_dd_penalty"] = body.reward_dd_penalty
+            cfg["reward_losing_penalty"] = body.reward_losing_penalty
+            cfg["reward_trend_align"] = body.reward_trend_align
 
             def on_progress(info):
                 with PROGRESS_LOCK:
@@ -287,6 +295,9 @@ async def start_training(body: TrainIn, db=Depends(get_db)):
                 _md["factor_expression"] = result.get("factor_expression", "")
                 _md["factor_mu"] = float(result.get("factor_mu", 0.0))
                 _md["factor_sd"] = float(result.get("factor_sd", 1.0))
+                # 训练死区（min_trade_zone）写入模型：部署端调仓死区与训练严格一致
+                # （曾注册策略固定 buy_zone=0.02，与训练 0.05 不一致 → 部署更激进交易）
+                _md["min_trade_zone"] = float(getattr(body, "min_trade_zone", 0.05) or 0.05)
                 with open(model_path, "w", encoding="utf-8") as f:
                     json.dump(_md, f, ensure_ascii=False)
             except Exception as e:  # noqa: BLE001
@@ -550,6 +561,13 @@ async def evaluate_oos(name: str, body: OosEvalIn):
         "steps": traj["steps"],
         "train_meta": train_meta,
     }
+    # Buy&Hold 基准：同一段行情的"躺平收益"，超额收益 = 策略收益 - 持有收益
+    try:
+        bh_ret = float(df["close"].iloc[-1] / df["close"].iloc[0] - 1) if len(df) > 1 else 0.0
+    except Exception:  # noqa: BLE001
+        bh_ret = 0.0
+    result["buy_hold_ret"] = round(bh_ret, 6)
+    result["excess_ret"] = round(result["total_ret"] - bh_ret, 6)
     # 泛化对比：本段 OOS 收益 vs 训练时独立 OOS 段收益（同一模型，不同行情）
     if train_oos_ret is not None and abs(train_oos_ret) > 1e-9:
         decay = 1.0 - result["total_ret"] / train_oos_ret

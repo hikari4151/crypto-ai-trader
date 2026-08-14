@@ -195,6 +195,25 @@ def _validate_market_analysis(data: dict, snap: dict, ctx: dict = {}) -> list[di
         ref = ctx.get("trade_plan_ref_price") or ref_price
         for msg in validate_trade_plan(trade_plan, bias, ref):
             errors.append({"field": "trade_plan", "reason": msg})
+
+    # ---- 可选增强字段（存在即校验、缺失不拒绝——兼容旧模型/旧输出） ----
+    for f in ("bull_strength", "bear_strength"):
+        v = data.get(f)
+        if v is not None and (not isinstance(v, (int, float)) or not 0 <= v <= 100):
+            errors.append({"field": f, "reason": f"{f} 必须在 0-100"})
+    rl = data.get("risk_level")
+    if rl is not None and rl not in ("low", "medium", "high"):
+        errors.append({"field": "risk_level", "reason": "risk_level 必须为 low/medium/high"})
+    ol = data.get("outlook_24h")
+    if ol is not None:
+        if not isinstance(ol, dict) or not isinstance(ol.get("scenario"), str):
+            errors.append({"field": "outlook_24h", "reason": "outlook_24h 需包含 scenario 字符串"})
+        if isinstance(ol, dict) and "probability" in ol:
+            try:
+                if not 0 <= float(ol["probability"]) <= 1:
+                    errors.append({"field": "outlook_24h", "reason": "outlook_24h.probability 必须在 0-1"})
+            except (TypeError, ValueError):
+                errors.append({"field": "outlook_24h", "reason": "outlook_24h.probability 必须为数值"})
     return errors
 
 

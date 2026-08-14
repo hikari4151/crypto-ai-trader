@@ -43,11 +43,19 @@ class StrategyIteration:
 
     async def iterate(self, strategy: Strategy, performance: dict, snap: dict,
                       backtests: Optional[list] = None,
-                      previous: Optional[list] = None) -> Optional[dict]:
-        """对现有策略做一次深度反思迭代（参考历史回测与前代迭代记录）。失败时返回 None。"""
+                      previous: Optional[list] = None,
+                      validation_df=None, validation_symbol: str = "BTC/USDT",
+                      validation_timeframe: str = "1h",
+                      require_improve: bool = True,
+                      goal: str = "") -> Optional[dict]:
+        """对现有策略做一次深度反思迭代（参考历史回测与前代迭代记录）。失败时返回 None。
+
+        validation_df：同数据回测验证门（先回测后注册，绩效差拒绝）——
+        由调用方传入快照 K 线构造的 DataFrame；None 时跳过验证直接注册。
+        """
         try:
             result = await self._client.chat_json_validated(
-                iteration_messages(strategy, performance, snap, backtests or [], previous or []),
+                iteration_messages(strategy, performance, snap, backtests or [], previous or [], goal=goal),
                 feature="strategy_iterate",
                 ctx={"param_schema": strategy.param_schema})
         except (AINotConfigured, AICallError) as e:
@@ -110,6 +118,49 @@ class StrategyIteration:
         except Exception:  # noqa: BLE001
             log.warning("[ai] 迭代过拟合守卫跳过", exc_info=True)
 
+        # ---- 回测验证门（先回测后注册）：同数据新旧对比，绩效差拒绝注册 ----
+        # 曾对比回测在注册后执行、仅展示——劣质迭代照样入库污染策略库。
+        comparison = None
+        if validation_df is not None and len(validation_df) >= 200:
+            try:
+                from backtest.engine import BacktestConfig
+                from backtest.fast_engine import run_backtest_fast
+                old_bt = run_backtest_fast(validation_df, BacktestConfig(
+                    symbol=validation_symbol, timeframe=validation_timeframe,
+                    strategy_name=strategy.name, strategy_params=dict(strategy.params or {})))["metrics"]
+                new_bt = run_backtest_fast(validation_df, BacktestConfig(
+                    symbol=validation_symbol, timeframe=validation_timeframe,
+                    strategy_name=executor, strategy_params=applied))["metrics"]
+                comparison = {
+                    "old": {"total_return": old_bt["total_return"], "sharpe": old_bt["sharpe"],
+                            "max_drawdown": old_bt["max_drawdown"], "win_rate": old_bt["win_rate"]},
+                    "new": {"total_return": new_bt["total_return"], "sharpe": new_bt["sharpe"],
+                            "max_drawdown": new_bt["max_drawdown"], "win_rate": new_bt["win_rate"]},
+                    "improved": bool(new_bt["total_return"] > old_bt["total_return"]
+                                     and new_bt["max_drawdown"] < old_bt["max_drawdown"] * 1.3),
+                    "note": "同数据快速回测对比（含手续费/滑点）",
+                }
+                spec["comparison"] = comparison
+                if require_improve and not comparison["improved"]:
+                    log.warning("[ai] 迭代策略 %s 回测未超越旧策略，拒绝注册: %s",
+                                spec["name"], comparison["improved"])
+                    spec["registered"] = False
+                    spec["rejected_reason"] = (
+                        f"同数据回测未超越上一代（新收益 {new_bt['total_return']:.2%} "
+                        f"vs 旧 {old_bt['total_return']:.2%}），保留旧策略")
+                    async with self._db.session() as s:
+                        from core.database import OptimizationLog
+                        s.add(OptimizationLog(
+                            kind="iteration_blocked",
+                            summary=f"策略[{strategy.name}] 迭代 [{spec['name']}] 因回测未提升被拒绝",
+                            suggestion=json.dumps({"comparison": comparison}, ensure_ascii=False),
+                            params_json=json.dumps(applied, ensure_ascii=False),
+                        ))
+                        await s.commit()
+                    return spec
+            except Exception:  # noqa: BLE001
+                log.warning("[ai] 迭代回测验证失败（降级为直接注册）: %s", exc_info=True)
+
         # 注册为可用策略（新策略名 = 基础名_v序号，如 dual_ma_v1）
         from strategies import register_dynamic
         iter_spec = {
@@ -126,8 +177,11 @@ class StrategyIteration:
             "critique": spec.get("critique", ""),
             "improvements": spec.get("improvements", []),
             "executor": executor,          # 保留原策略执行器，注册时不再默认 price_action
+            "backtest": comparison,        # 注册时的回测验证指标（下一代迭代可见）
         }
         register_dynamic(new_name, iter_spec)
+        spec["registered"] = True
+        spec["comparison"] = comparison
         # 持久化到 AiStrategy（重启后仍可见，全部策略列表能显示迭代策略）
         from core.database import AiStrategy
         from sqlalchemy import select

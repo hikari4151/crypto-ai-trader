@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from typing import Any, Optional
 
@@ -349,6 +350,21 @@ class TradingEngine:
             await self.bus.publish(Event(EventType.TRADE, {"fill": fill, "signal": signal.__dict__}, source="engine"))
 
     # ---------------- 定时任务 ----------------
+    async def _analysis_context(self, snap: dict) -> tuple[float, list]:
+        """行情分析上下文：当前持仓数量 + 近期平仓记录（供 AI 解读联动账户状态）。"""
+        symbol = snap.get("symbol", self.symbol)
+        pos = 0.0
+        if self.paper and self.paper_account:
+            pos = self.paper_account.positions.get(symbol, {}).get("qty", 0.0)
+        elif self.exchange and self.exchange.has_private:
+            try:
+                bal = await self._live_balance_cached()
+                pos = float(bal.get(symbol.split("/")[0], {}).get("total", 0.0) or 0.0)
+            except Exception:  # noqa: BLE001
+                pass
+        recent = await self._recent_trades(10)
+        return float(pos), recent
+
     async def _portfolio_loop(self) -> None:
         while self.running:
             try:
@@ -372,7 +388,9 @@ class TradingEngine:
                     auto_on = (await self.db.kv_get("ai_auto_analysis_enabled", "1")) != "0"
                     if auto_on and now - self._last_analysis >= settings.ai_market_analysis_interval:
                         self._last_analysis = now
-                        await self.analyst.safe_analyze(snap)
+                        # 注入真实持仓与近期交易（曾恒传 0/空，提示词两块死数据）
+                        pos, recent = await self._analysis_context(snap)
+                        await self.analyst.safe_analyze(snap, position=pos, recent_trades=recent)
                     if now - self._last_optimize >= settings.ai_optimize_interval:
                         self._last_optimize = now
                         perf = await self._recent_performance()
@@ -511,12 +529,15 @@ class TradingEngine:
                     select(AiStrategy).order_by(AiStrategy.id.desc()).limit(200)
                 )).scalars().all()
             out = []
+            # 基础名归一化：对 dual_ma_v2 再迭代时 based_on 是 "dual_ma_v2"，
+            # 但存储的记录 based_on="dual_ma"——曾精确匹配拉不到任何前代历史
+            base = re.sub(r"_v\d+$", "", based_on)
             for r in rows:
                 try:
                     spec = json.loads(r.spec_json or "{}")
                     if spec.get("created_by") != "ai_iteration":
                         continue
-                    if spec.get("based_on") != based_on:
+                    if spec.get("based_on") not in (based_on, base):
                         continue
                     out.append({
                         "name": spec.get("name", ""),
@@ -525,6 +546,8 @@ class TradingEngine:
                         "improvements": spec.get("improvements", []),
                         "summary": spec.get("summary", ""),
                         "params": spec.get("params", {}),
+                        # 注册时的回测验证指标（迭代验证门持久化，AI 可见"上一代真实表现"）
+                        "backtest": spec.get("backtest"),
                     })
                     if len(out) >= limit:
                         break

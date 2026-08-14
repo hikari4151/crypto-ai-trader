@@ -136,7 +136,9 @@ async def analyze_now(engine=Depends(get_engine)):
     if not snap:
         raise HTTPException(status_code=400, detail="暂无行情数据，请先启动引擎")
     try:
-        result = await engine.analyst.analyze(snap)
+        # 注入真实持仓与近期交易（曾恒传 0/空）
+        pos, recent = await engine._analysis_context(snap)
+        result = await engine.analyst.analyze(snap, position=pos, recent_trades=recent)
         return {"ok": True, "result": result}
     except AINotConfigured as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -266,46 +268,32 @@ async def iterate_strategy(payload: dict = {}, engine=Depends(get_engine)):
                 previous = await engine._previous_iterations(target.name)
                 _ai_progress(task_id, "ai", "AI 批判性反思中", 45,
                              "审视失效点 + 对照前代改进效果…")
-                result = await engine.iteration.iterate(target, perf, snap, backtests, previous)
+                # 回测验证门：快照 K 线构造同数据 DataFrame，iterate 内部先回测后注册
+                validation_df = None
+                try:
+                    candles = guard_candles or snap.get("candles", [])
+                    if len(candles) >= 200:
+                        import pandas as pd
+                        validation_df = pd.DataFrame(candles, columns=["ts", "open", "high", "low", "close", "volume"])
+                        validation_df["timestamp"] = pd.to_datetime(validation_df["ts"], unit="ms", utc=True)
+                        validation_df = validation_df.set_index("timestamp")[["open", "high", "low", "close", "volume"]].astype(float)
+                except Exception:  # noqa: BLE001
+                    validation_df = None
+                result = await engine.iteration.iterate(
+                    target, perf, snap, backtests, previous,
+                    validation_df=validation_df,
+                    validation_symbol=snap.get("symbol", "BTC/USDT"),
+                    validation_timeframe=snap.get("timeframe", "1h"),
+                    require_improve=True,
+                    goal=(payload or {}).get("goal", ""))
                 if result is None:
                     raise RuntimeError("AI 迭代失败（未配置 AI 或调用出错）")
                 _ai_progress(task_id, "validate", "校验输出并注册", 80,
-                             "参数已过量化规则校验与过拟合检测")
+                             "参数已过量化规则校验与回测验证")
                 result["market_features"] = {
                     "sr": snap.get("indicators", {}).get("sr"),
                     "pa": snap.get("indicators", {}).get("pa"),
                 }
-                # 迭代前后绩效对比（量化验证"每一代正向提升"，借鉴 freqtrade 的 backtest 验证习惯）
-                try:
-                    _ai_progress(task_id, "compare", "新旧参数回测对比", 90,
-                                 "用同一数据验证迭代是否真正提升…")
-                    candles = guard_candles or snap.get("candles", [])
-                    if len(candles) >= 200:
-                        import pandas as pd
-                        df = pd.DataFrame(candles, columns=["ts", "open", "high", "low", "close", "volume"])
-                        df["timestamp"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-                        df = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]].astype(float)
-                        from backtest.engine import BacktestConfig
-                        from backtest.fast_engine import run_backtest_fast
-                        old_params = dict(target.params or {})
-                        new_params = dict(result.get("params") or {})
-                        old_bt = run_backtest_fast(df, BacktestConfig(
-                            symbol=snap.get("symbol", "BTC/USDT"), timeframe=snap.get("timeframe", "1h"),
-                            strategy_name=target.name, strategy_params=old_params))["metrics"]
-                        new_bt = run_backtest_fast(df, BacktestConfig(
-                            symbol=snap.get("symbol", "BTC/USDT"), timeframe=snap.get("timeframe", "1h"),
-                            strategy_name=result.get("name") or target.name,
-                            strategy_params=new_params))["metrics"]
-                        result["comparison"] = {
-                            "old": {"total_return": old_bt["total_return"], "sharpe": old_bt["sharpe"],
-                                    "max_drawdown": old_bt["max_drawdown"], "win_rate": old_bt["win_rate"]},
-                            "new": {"total_return": new_bt["total_return"], "sharpe": new_bt["sharpe"],
-                                    "max_drawdown": new_bt["max_drawdown"], "win_rate": new_bt["win_rate"]},
-                            "improved": bool(new_bt["total_return"] > old_bt["total_return"]),
-                            "note": "同数据快速回测对比（含手续费/滑点）",
-                        }
-                except Exception as e:  # noqa: BLE001
-                    log.warning("[ai] 迭代对比回测失败: %s", e)
                 _ai_finish(task_id, result=result)
             except Exception as e:  # noqa: BLE001
                 log.exception("[ai] 策略迭代失败")

@@ -80,6 +80,7 @@ class RLAdaptiveStrategy(Strategy):
             self._factor_mu = None
             self._factor_sd = None
             self._factor_expr_from_model = ""
+            self._trade_zone = None   # 训练死区（模型内记录），None 时用 params.buy_zone 兜底
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     md = json.load(f)
@@ -87,6 +88,8 @@ class RLAdaptiveStrategy(Strategy):
                     self._factor_mu = float(md["factor_mu"])
                     self._factor_sd = float(md["factor_sd"])
                 self._factor_expr_from_model = str(md.get("factor_expression", "") or "")
+                if "min_trade_zone" in md:
+                    self._trade_zone = float(md["min_trade_zone"])
             except Exception as e:  # noqa: BLE001
                 log.warning("[rl] 模型元数据读取失败: %s", e)
             return True
@@ -201,7 +204,9 @@ class RLAdaptiveStrategy(Strategy):
 
         action = self._agent.greedy_action(state)
         target = float(ACTION_BUCKETS[action])
-        zone = float(self.params.get("buy_zone", 0.02))
+        # 调仓死区：优先取模型内训练值（部署与训练严格一致），params.buy_zone 兜底
+        zone = float(self._trade_zone if self._trade_zone is not None
+                     else self.params.get("buy_zone", 0.02))
         diff = target - pos_ratio
 
         if diff > zone and equity > 0 and cash > 0:

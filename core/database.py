@@ -116,6 +116,14 @@ class Database:
     def session(self) -> AsyncSession:
         return self.session_factory()
 
+    async def update_trade_pnl(self, trade_id: int, pnl: float) -> None:
+        """回写成交记录的平仓盈亏（卖出成交后由引擎调用）。"""
+        async with self.session() as s:
+            row = await s.get(Trade, trade_id)
+            if row is not None:
+                row.pnl = pnl
+                await s.commit()
+
     # ---------- KV（加密） ----------
     async def kv_get(self, key: str, default: Optional[str] = None) -> Optional[str]:
         async with self.session() as s:
@@ -128,13 +136,17 @@ class Database:
             return decrypt(row.value) if row and row.value else default
 
     async def kv_set(self, key: str, value: str, is_secret: bool = False) -> None:
+        # 原子 UPSERT：曾先 SELECT 后 INSERT/UPDATE 两段式，并发写同 key
+        # （引擎 check 与 /api/risk/rules 同拍 seeding）可能主键冲突 IntegrityError
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        stored = encrypt(value) if is_secret else value
+        stmt = sqlite_insert(KV).values(key=key, value=stored, is_secret=is_secret)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[KV.key],
+            set_={"value": stored, "is_secret": is_secret},
+        )
         async with self.session() as s:
-            row = (await s.execute(select(KV).where(KV.key == key))).scalar_one_or_none()
-            stored = encrypt(value) if is_secret else value
-            if row:
-                row.value, row.is_secret = stored, is_secret
-            else:
-                s.add(KV(key=key, value=stored, is_secret=is_secret))
+            await s.execute(stmt)
             await s.commit()
 
     async def kv_json_get(self, key: str, default: Any = None) -> Any:

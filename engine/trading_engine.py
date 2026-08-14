@@ -65,6 +65,9 @@ class TradingEngine:
         # 多个 MARKET_CANDLE 事件可能同时进入 _on_candle——风控检查与下单
         # 之间存在 await 点，并发执行会导致重复下单，必须串行化
         self._candle_lock = asyncio.Lock()
+        # 策略切换/参数热更新 vs K 线处理互斥（必须在 __init__ 创建：
+        # 曾只在 start 时创建，引擎未启动时 select_strategy 等直接 AttributeError 500）
+        self._strategy_lock = asyncio.Lock()
         # 实盘余额缓存（避免每根K线打 REST）
         self._live_balance: dict = {}
         self._live_balance_ts: float = 0.0
@@ -157,7 +160,6 @@ class TradingEngine:
             log.warning("[engine] 恢复每日盈亏失败: %s", e)
 
         self.hub = MarketDataHub(self.exchange_id, [self.symbol], [self.timeframe], self.bus)
-        self._strategy_lock = asyncio.Lock()   # 策略切换/参数热更新 vs K 线处理互斥
         self.running = True
         self._tasks = [
             asyncio.create_task(self.hub.run(), name="hub"),
@@ -325,6 +327,13 @@ class TradingEngine:
                 self._daily_pnl += pnl
                 # 记录平仓盈亏给风控（连续亏损冷却判断 + 每日盈亏持久化）
                 await self.risk.record_trade(pnl, signal.reason)
+                # 平仓盈亏回写 Trade 行：曾只累加内存/风控 KV，性能页的
+                # win_rate/total_pnl/avg_win/avg_loss 与 AI 复盘按 pnl=0 聚合全部失真
+                if fill.get("trade_id"):
+                    try:
+                        await self.db.update_trade_pnl(fill["trade_id"], pnl)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("[engine] 平仓盈亏落库失败: %s", e)
             await self.bus.publish(Event(EventType.TRADE, {"fill": fill, "signal": signal.__dict__}, source="engine"))
 
     # ---------------- 定时任务 ----------------

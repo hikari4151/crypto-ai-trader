@@ -93,7 +93,8 @@ class AIClient:
         self._default = defaults or {}
         self._cache: dict[str, str] = {}
         self._cache_at = 0.0
-        self._lock = asyncio.Lock()
+        # 注：不再用 asyncio.Lock 保护配置缓存——后台 worker 线程（独立事件循环）
+        # 与主循环共用本实例，asyncio.Lock 跨循环 acquire 会抛异常（见 _load_config）
         self._limiter = _SlidingWindowLimiter(
             rpm=int(self._default.get("ai_rate_limit_rpm", 30)),
             min_interval=float(self._default.get("ai_rate_limit_min_interval", 2.0)),
@@ -132,29 +133,34 @@ class AIClient:
         return entry[1]
 
     async def _load_config(self) -> dict:
-        """读取 AI 配置：优先数据库 KV，其次 .env 默认。"""
-        async with self._lock:
-            now = time.time()
-            if self._cache and now - self._cache_at < 30:
-                return dict(self._cache)
-            # 并行读取全部配置项（曾 5 次顺序 kv_get）
-            provider, base_url, api_key, model, temperature, max_tokens = await asyncio.gather(
-                self._db.kv_get("ai_provider"), self._db.kv_get("ai_base_url"),
-                self._db.kv_get_secret("ai_api_key"), self._db.kv_get("ai_model"),
-                self._db.kv_get("ai_temperature"), self._db.kv_get("ai_max_tokens"),
-            )
-            provider = provider or self._default.get("ai_provider", "openai")
-            base_url = base_url or self._default.get("ai_base_url", "")
-            api_key = api_key or self._default.get("ai_api_key", "")
-            model = model or self._default.get("ai_model", "gpt-4o-mini")
-            temperature = float(temperature or self._default.get("ai_temperature", 0.7))
-            max_tokens = int(max_tokens or self._default.get("ai_max_tokens", 2048))
-            self._cache = {
-                "provider": provider, "base_url": base_url, "api_key": api_key,
-                "model": model, "temperature": temperature, "max_tokens": max_tokens,
-            }
-            self._cache_at = now
+        """读取 AI 配置：优先数据库 KV，其次 .env 默认。
+
+        无锁实现：曾用 asyncio.Lock，后台 AI worker 线程（独立事件循环）与主循环
+        共用本实例 → 锁绑定第一个循环，其它循环 acquire 抛
+        "bound to a different event loop"，AI 调用间歇性/永久失败。
+        KV 读取幂等，并发重复读无害；GIL 下 dict 赋值原子。
+        """
+        now = time.time()
+        if self._cache and now - self._cache_at < 30:
             return dict(self._cache)
+        # 并行读取全部配置项（曾 5 次顺序 kv_get）
+        provider, base_url, api_key, model, temperature, max_tokens = await asyncio.gather(
+            self._db.kv_get("ai_provider"), self._db.kv_get("ai_base_url"),
+            self._db.kv_get_secret("ai_api_key"), self._db.kv_get("ai_model"),
+            self._db.kv_get("ai_temperature"), self._db.kv_get("ai_max_tokens"),
+        )
+        provider = provider or self._default.get("ai_provider", "openai")
+        base_url = base_url or self._default.get("ai_base_url", "")
+        api_key = api_key or self._default.get("ai_api_key", "")
+        model = model or self._default.get("ai_model", "gpt-4o-mini")
+        temperature = float(temperature or self._default.get("ai_temperature", 0.7))
+        max_tokens = int(max_tokens or self._default.get("ai_max_tokens", 2048))
+        self._cache = {
+            "provider": provider, "base_url": base_url, "api_key": api_key,
+            "model": model, "temperature": temperature, "max_tokens": max_tokens,
+        }
+        self._cache_at = now
+        return dict(self._cache)
 
     async def _resolve_url(self, cfg: dict) -> str:
         base = (cfg["base_url"] or _PROVIDER_PATHS.get(cfg["provider"], "")).rstrip("/")

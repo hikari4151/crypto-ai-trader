@@ -57,15 +57,24 @@ class OrderManager:
         return min(pos, pos * pct) if pct < 1.0 else pos
 
     async def _place_paper(self, signal: Signal, last_price: float, strategy_name: str) -> Optional[dict]:
-        price = signal.limit_price or last_price
-        qty = self._resolve_qty(signal, price)
-        if qty <= 0:
-            log.info("[order] 纸面订单跳过（数量为 0）：%s %s", signal.side, signal.symbol)
+        try:
+            price = signal.limit_price or last_price
+            qty = self._resolve_qty(signal, price)
+            if qty <= 0:
+                log.info("[order] 纸面订单跳过（数量为 0）：%s %s", signal.side, signal.symbol)
+                return None
+            # 使用账户配置的手续费率（默认 0.1%）
+            fee_rate = getattr(self.paper_account, "fee_rate", 0.001) if self.paper_account else 0.001
+            fee = qty * price * fee_rate
+            fill = self.paper_account.apply_fill(signal.symbol, signal.side, qty, price, fee)
+        except ValueError as e:
+            # 余额/持仓不足等边界：曾直接抛出中断整根 K 线处理
+            # （事件被 bus 吞掉，后续止损止盈信号全部丢失）
+            log.warning("[order] 纸面成交被拒（%s %s）: %s", signal.side, signal.symbol, e)
             return None
-        # 使用账户配置的手续费率（默认 0.1%）
-        fee_rate = getattr(self.paper_account, "fee_rate", 0.001) if self.paper_account else 0.001
-        fee = qty * price * fee_rate
-        fill = self.paper_account.apply_fill(signal.symbol, signal.side, qty, price, fee)
+        except Exception as e:  # noqa: BLE001
+            log.exception("[order] 纸面成交异常: %s", signal)
+            return None
         trade_id = await self._record_trade(signal, price, qty, fee, strategy_name)
         await self._bus.publish(Event(EventType.ORDER_FILL, {
             "symbol": signal.symbol, "side": signal.side, "price": price, "qty": qty, "trade_id": trade_id,

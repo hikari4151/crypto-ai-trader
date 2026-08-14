@@ -24,8 +24,12 @@ class PortfolioManager:
     def update_prices(self, prices: dict[str, float]) -> None:
         self._last_prices.update(prices)
 
-    async def snapshot(self) -> dict:
-        """返回 {equity, cash, positions_value, positions:[...]}，并落库资金曲线。"""
+    async def snapshot(self, persist: bool = True) -> dict:
+        """返回 {equity, cash, positions_value, positions:[...]}，并落库资金曲线。
+
+        persist=False（API 轮询路径）：只读不落库——曾前端 5s 轮询 /summary
+        每次落一条 EquitySnapshot（日增约 1.7 万行）；引擎 15s 快照循环仍落库。
+        """
         if self.paper and self.paper_account:
             positions = []
             for sym, p in self.paper_account.positions.items():
@@ -69,10 +73,11 @@ class PortfolioManager:
 
         result = {"equity": round(equity, 4), "cash": round(cash, 4),
                   "positions_value": round(positions_value, 4), "positions": positions}
-        from core.database import EquitySnapshot
-        async with self._db.session() as s:
-            s.add(EquitySnapshot(equity=equity, cash=cash, positions_value=positions_value))
-            await s.commit()
+        if persist:
+            from core.database import EquitySnapshot
+            async with self._db.session() as s:
+                s.add(EquitySnapshot(equity=equity, cash=cash, positions_value=positions_value))
+                await s.commit()
         await self._bus.publish(Event(EventType.PORTFOLIO_UPDATE, result, source="portfolio"))
         return result
 

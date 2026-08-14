@@ -93,6 +93,10 @@ class RiskManager:
 
     async def add_daily_pnl(self, pnl: float) -> None:
         """累计每日盈亏；跨日时归档昨日并重置；每次更新持久化（跨重启保留）。"""
+        # 确保先加载持久化值：曾直接覆盖当日 KV，若 record_trade 先于
+        # get_daily_pnl 调用会把历史累计清零（丢数据）
+        if not self._daily_pnl_loaded:
+            await self.get_daily_pnl()
         today = time.strftime("%Y-%m-%d")
         if self._daily_pnl_date and self._daily_pnl_date != today:
             # 跨日：归档昨日并重置今日
@@ -321,7 +325,10 @@ class RiskManager:
         now = time.time()
         cutoff_24h = now - 86400
         prices_24h = [p for t, p in self._price_history if t >= cutoff_24h]
-        if len(prices_24h) >= 10 and not closing:
+        # 最小时间跨度约束：曾只数样本数（5s 节流 50 秒就凑够 10 个），
+        # 刚启动的新实例会把"2 分钟跌 25%"误判为 24 小时跌幅触发冷却
+        span_ok = len(prices_24h) >= 10 and (prices_24h[-1][0] - prices_24h[0][0]) >= 2 * 3600
+        if span_ok and not closing:
             drop_24h = (prices_24h[0] - prices_24h[-1]) / prices_24h[0]
             threshold_24h = rules.get("flash_crash_24h_drop_pct", 0.25)
             if drop_24h >= threshold_24h:

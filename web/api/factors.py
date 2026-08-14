@@ -182,6 +182,12 @@ async def factor_usage(body: FactorComputeIn):
         }
         fs = factor_map.get(best["key"], "macd_hist")
         mode = "reversal" if best["category"] in ("mean_reversion",) or best["label"] in ("超买", "超卖") else "trend"
+        # IC 方向修正：负 IC（rank_ic<0）意味着因子值越低未来收益越高，
+        # 必须用 reversal 语义（低买高卖）——曾忽略 ic_dir，负 IC 因子被映射成
+        # 正向 trend 策略，推荐方向与系统自身发现的 IC 方向相反
+        if best.get("ic_dir", 1) < 0 and mode == "trend":
+            mode = "reversal"
+            log.info("[factors] 因子 %s 为负 IC，翻转推荐策略方向为 reversal", best["key"])
         params = {"factor": fs, "mode": mode, "buy_threshold": 0.0, "sell_threshold": 0.0,
                   "stop_loss_pct": 0.03, "take_profit_pct": 0.06, "size_pct": 0.5}
         if fs == "rsi_osc":

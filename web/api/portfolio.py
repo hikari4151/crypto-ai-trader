@@ -42,8 +42,8 @@ async def summary(db=Depends(get_db), engine=Depends(get_engine)):
                 result = await _fetch_live_balance(exchange_id, api_key, secret, password)
                 _live_cache.update({"ts": now, "data": result})
                 return result
-        # 纸面模式：引擎内部快照
-        return await engine.portfolio.snapshot()
+        # 纸面模式：引擎内部快照（只读不落库，落库由引擎 15s 快照循环负责）
+        return await engine.portfolio.snapshot(persist=False)
     except Exception as e:  # noqa: BLE001
         log.exception("[portfolio] 获取资产失败")
         return {"equity": None, "cash": None, "positions_value": None,

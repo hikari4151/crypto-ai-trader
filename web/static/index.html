@@ -27,19 +27,28 @@
 <style>
   *{box-sizing:border-box}
   [v-cloak]{display:none}
+  /* ===== 设计 token（apple-design：色板/字体/圆角/阴影/动效单一来源） ===== */
   :root{
-    --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","PingFang SC","Helvetica Neue","Segoe UI",Arial,sans-serif;
+    color-scheme:dark;
+    --font:-apple-system,BlinkMacSystemFont,system-ui,"SF Pro Text","SF Pro Display","PingFang SC","Helvetica Neue","Segoe UI",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
     --text:#f5f5f7; --muted:#98989f; --border:rgba(255,255,255,.08); --border2:rgba(255,255,255,.13);
     --menu-bg:rgba(24,24,28,.72); --win-bg:rgba(30,30,36,.78); --bar-bg:rgba(255,255,255,.05);
     --input-bg:rgba(0,0,0,.3); --accent:#0A84FF; --green:#30d158; --red:#ff453a; --orange:#ff9f0a;
     --sidebar-bg:rgba(0,0,0,.2); --hover:rgba(255,255,255,.07);
-    --shadow:0 12px 44px rgba(0,0,0,.5);
+    --shadow:0 12px 32px rgba(0,0,0,.28);
+    /* 圆角阶梯（收敛：8/10/12/20） */
+    --r-sm:8px; --r-md:10px; --r-lg:12px; --r-full:20px;
+    /* 动效（Apple 参数：阻尼 1.0 无过冲；按压即时反馈） */
+    --ease-spring:cubic-bezier(.25,.6,.35,1);
+    --press-ms:60ms;
   }
   :root[data-theme="light"]{
+    color-scheme:light;
     --text:#1d1d1f; --muted:#6e6e73; --border:rgba(0,0,0,.09); --border2:rgba(0,0,0,.15);
     --menu-bg:rgba(248,248,250,.8); --win-bg:rgba(248,248,250,.88); --bar-bg:rgba(0,0,0,.03);
     --input-bg:rgba(0,0,0,.05); --sidebar-bg:rgba(0,0,0,.04); --hover:rgba(0,0,0,.06);
-    --shadow:0 12px 40px rgba(0,0,0,.12); --accent:#007AFF;
+    --shadow:0 10px 28px rgba(0,0,0,.10); --accent:#007AFF;
   }
   html,body{height:100%}
   body{font-family:var(--font);color:var(--text);overflow-x:hidden;
@@ -89,22 +98,24 @@
     background:var(--menu-bg);backdrop-filter:blur(40px) saturate(200%);border-bottom:1px solid var(--border);}
   .menu-item{padding:5px 13px;border-radius:7px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .18s cubic-bezier(.3,.9,.4,1);white-space:nowrap;font-weight:500}
   .menu-item:hover{background:var(--hover);color:var(--text)}
-  .menu-item.active{background:linear-gradient(180deg,var(--accent),#0a5cdc);color:#fff;box-shadow:0 1px 4px rgba(10,132,255,.4),inset 0 1px 0 rgba(255,255,255,.18)}
+  .menu-item.active{background:linear-gradient(180deg,var(--accent),#0a5cdc);color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
   :root[data-theme="light"] .menu-item.active{color:#fff;background:linear-gradient(180deg,#2e8bff,#0a66e0)}
   .status-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:6px}
-  .dot-on{background:var(--green);box-shadow:0 0 8px rgba(48,209,88,.8)}
-  .dot-off{background:var(--orange);box-shadow:0 0 6px rgba(255,159,10,.6)}
+  .dot-on{background:var(--green)}
+  .dot-off{background:var(--orange)}
 
   /* ---------- macOS 窗口 ---------- */
   .mac-window{background:var(--win-bg);backdrop-filter:blur(40px) saturate(180%);border:1px solid var(--border);
-    border-radius:14px;box-shadow:0 18px 50px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.06);overflow:hidden}
-  :root[data-theme="light"] .mac-window{backdrop-filter:blur(40px) saturate(150%);box-shadow:0 18px 44px rgba(0,0,0,.1),0 4px 14px rgba(0,0,0,.06),inset 0 1px 0 rgba(255,255,255,.9)}
+    border-radius:14px;box-shadow:var(--shadow),inset 0 1px 0 rgba(255,255,255,.06);overflow:hidden}
+  :root[data-theme="light"] .mac-window{backdrop-filter:blur(40px) saturate(150%);box-shadow:0 10px 28px rgba(0,0,0,.10),inset 0 1px 0 rgba(255,255,255,.9)}
   .mac-titlebar{display:flex;align-items:center;gap:10px;padding:9px 16px;background:var(--bar-bg);border-bottom:1px solid var(--border);backdrop-filter:blur(20px) saturate(150%)}
   .mac-title{font-size:12.5px;font-weight:600;color:var(--muted);letter-spacing:.2px}
   .mac-body{padding:16px}
   .traffic{display:flex;gap:8px;flex:none}
   .tl{width:12px;height:12px;border-radius:50%;flex:none;position:relative;transition:filter .12s}
   .tl.r{background:#ff5f57} .tl.y{background:#febc2e} .tl.g{background:#28c840}
+  /* 兼容历史模板的 .tl.b（黄灯别名） */
+  .tl.b{background:#febc2e}
   /* macOS 红绿灯悬停显示图标 */
   .traffic:hover .tl.r::after{content:'×';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:9px;font-weight:700;color:rgba(0,0,0,.55);line-height:1}
   .traffic:hover .tl.y::after{content:'−';position:absolute;top:50%;left:50%;transform:translate(-50%,-52%);font-size:10px;font-weight:700;color:rgba(0,0,0,.55);line-height:1}
@@ -112,10 +123,10 @@
 
   /* ---------- macOS 控件 ---------- */
   .mac-btn{background:rgba(255,255,255,.09);border:1px solid var(--border2);border-radius:8px;padding:7px 16px;
-    font-size:13.5px;color:var(--text);cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:6px;font-weight:500;line-height:1.4;
+    font-size:13.5px;color:var(--text);cursor:pointer;transition:background .15s,border-color .15s,box-shadow .15s;display:inline-flex;align-items:center;gap:6px;font-weight:500;line-height:1.4;
     box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
-  .mac-btn:hover{background:rgba(255,255,255,.16);transform:translateY(-1px)}
-  .mac-btn:active{transform:translateY(0);box-shadow:inset 0 1px 3px rgba(0,0,0,.2)}
+  .mac-btn:hover{background:rgba(255,255,255,.16)}
+  .mac-btn:active{transform:scale(.97);transition-duration:var(--press-ms);box-shadow:inset 0 1px 3px rgba(0,0,0,.2)}
   .mac-btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
   .mac-btn.primary{background:linear-gradient(180deg,#4b93ff,#0A84FF);border:none;color:#fff;box-shadow:0 1px 4px rgba(10,132,255,.4),inset 0 1px 0 rgba(255,255,255,.2)}
   .mac-btn.primary:hover{filter:brightness(1.1)}
@@ -133,6 +144,15 @@
   .mac-input::placeholder{color:var(--muted)}
   select.mac-input{cursor:pointer}
   .mac-label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px;font-weight:600;letter-spacing:.2px}
+  /* macOS 复选框（策略布尔参数）：曾 class 未定义，渲染为系统原生方块 */
+  .mac-toggle-input{appearance:none;-webkit-appearance:none;width:16px;height:16px;border-radius:4px;
+    border:1px solid var(--border2);background:var(--input-bg);cursor:pointer;position:relative;flex:none;
+    transition:background .15s,border-color .15s;vertical-align:middle}
+  .mac-toggle-input:hover{border-color:var(--border2)}
+  .mac-toggle-input:checked{background:var(--accent);border-color:transparent}
+  .mac-toggle-input:checked::after{content:'';position:absolute;left:4.5px;top:1.5px;width:5px;height:9px;
+    border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .mac-toggle-input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .mac-toggle{width:40px;height:24px;border-radius:12px;background:rgba(255,255,255,.16);position:relative;cursor:pointer;transition:.25s;flex:none;box-shadow:inset 0 1px 2px rgba(0,0,0,.2)}
   :root[data-theme="light"] .mac-toggle{background:rgba(0,0,0,.14)}
   .mac-toggle.on{background:var(--green)}
@@ -154,10 +174,13 @@
   .mac-card{background:rgba(255,255,255,.045);border:1px solid var(--border);border-radius:11px;padding:14px;backdrop-filter:blur(12px) saturate(140%)}
   :root[data-theme="light"] .mac-card{background:rgba(0,0,0,.025)}
   .stat-card{background:var(--win-bg);border:1px solid var(--border);border-radius:14px;padding:14px 18px;backdrop-filter:blur(28px) saturate(170%);transition:border-color .2s,transform .2s,box-shadow .25s}
-  .stat-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 14px 34px rgba(0,0,0,.28),0 3px 10px rgba(0,0,0,.16)}
-  :root[data-theme="light"] .stat-card:hover{box-shadow:0 14px 34px rgba(0,0,0,.12),0 3px 10px rgba(0,0,0,.08)}
+  .stat-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 12px 28px rgba(0,0,0,.22),0 2px 8px rgba(0,0,0,.12)}
+  :root[data-theme="light"] .stat-card:hover{box-shadow:0 12px 28px rgba(0,0,0,.10),0 2px 8px rgba(0,0,0,.06)}
   .stat-card .val{font-size:23px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1.25;background:linear-gradient(180deg,var(--text) 0%,var(--text) 55%,rgba(128,128,134,.85) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;display:inline-block}
   :root[data-theme="light"] .stat-card .val{background:linear-gradient(180deg,#1d1d1f 0%,#3a3a3c 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  /* 涨跌语义色优先于渐变：-webkit-text-fill-color 是继承属性，曾把 pos/neg 全盖成中性灰 */
+  .stat-card .val.pos,.stat-card .val.neg{background:none;-webkit-text-fill-color:currentColor}
+  .stat-card .val.pos{color:var(--green)} .stat-card .val.neg{color:var(--red)}
 
   /* ---------- 回测步骤导航 ---------- */
   .bt-steps{display:flex;align-items:center;gap:0;position:sticky;top:52px;z-index:40;
@@ -213,7 +236,7 @@
     display:flex;align-items:flex-start;gap:9px;animation:toastIn .22s cubic-bezier(.2,.9,.3,1.2)}
   .toast.out{animation:toastOut .25s ease forwards}
   @keyframes toastIn{from{opacity:0;transform:translateY(-8px) scale(.96)}to{opacity:1;transform:none}}
-  @keyframes toastOut{to{opacity:0;transform:translateX(12px)}}
+  @keyframes toastOut{to{opacity:0;transform:translateY(-6px) scale(.97)}}
   .toast .ico{flex:none;font-size:15px;line-height:1.2}
 
   /* ---------- 动画 ---------- */
@@ -221,10 +244,7 @@
   .fade-enter-from,.fade-leave-to{opacity:0}
   .page-enter-active{transition:opacity .18s ease,transform .18s ease}
   .page-enter-from{opacity:0;transform:translateY(6px)}
-  /* 轻量线性动画 */
-  .stat-card{transition:border-color .25s ease,transform .25s ease}
-  .stat-card:hover{transform:translateY(-2px)}
-  .stat-card .val{transition:color .25s ease}
+  /* 轻量线性动画（stat-card 完整 transition 定义在上方 .stat-card 规则，勿覆盖） */
   .fade-num{animation:numIn .3s ease}
   @keyframes numIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
   .card-in{animation:cardIn .28s ease}
@@ -254,8 +274,6 @@
   :root[data-theme="light"] tbody tr:nth-child(even) td{background:rgba(0,0,0,.015)}
   tbody tr:hover td{background:var(--hover)}
   .menu-item{position:relative}
-  .menu-item.active::after{content:'';position:absolute;left:50%;bottom:3px;width:4px;height:4px;border-radius:50%;
-    background:var(--accent);transform:translateX(-50%);box-shadow:0 0 6px rgba(63,140,255,.9)}
   .empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
     padding:36px 0;color:var(--muted)}
   .empty-state .e-ico{font-size:32px;opacity:.55;filter:drop-shadow(0 2px 6px rgba(0,0,0,.15))}
@@ -288,32 +306,33 @@
     .menubar .strategy-tag{display:none}
   }
 
-  /* ========== 苹果风格交互与动效增强（apple-design / ui-ux-pro-max） ========== */
-  /* 按下即时反馈：按钮按下的瞬间缩放（反馈在 pointer-down，不在释放时） */
-  .mac-btn:active{transform:translateY(0) scale(.97)}
+  /* ========== 苹果风格交互与动效增强（apple-design） ========== */
+  /* 按下即时反馈：反馈在 pointer-down（Apple 要求 ~50ms 内到位），松手回弹稍长 */
+  .mac-btn:active{transform:translateY(0) scale(.97);transition-duration:var(--press-ms)}
   .mac-btn.primary:active,.mac-btn.danger:active{filter:brightness(.9)}
-  /* 键盘导航焦点可见（可访问性） */
-  .mac-btn:focus-visible,.mac-seg-btn:focus-visible,.mac-seg button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  /* 窗口入场动效：v-if 重建时自然播放（阻尼 1.0，无 overshoot，来自当前值） */
-  @keyframes macWinIn{from{opacity:0;transform:translateY(14px) scale(.985)}to{opacity:1;transform:none}}
-  .mac-window{animation:macWinIn .32s cubic-bezier(.25,.6,.35,1) both}
-  /* 卡片 hover 轻微抬升（材质响应，阴影加深） */
-  .mac-card{transition:transform .2s ease,box-shadow .2s ease,border-color .25s ease}
-  .mac-card:hover{transform:translateY(-1px);box-shadow:0 10px 28px rgba(0,0,0,.2)}
-  :root[data-theme="light"] .mac-card:hover{box-shadow:0 10px 24px rgba(0,0,0,.08)}
+  /* 键盘导航焦点可见（可访问性）：覆盖全部可交互控件 */
+  .mac-btn:focus-visible,.mac-seg-btn:focus-visible,.mac-seg button:focus-visible,
+  .menu-item:focus-visible,.settings-item:focus-visible,.bt-step:focus-visible,
+  .mac-toggle:focus-visible,.mac-toggle-input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  /* 窗口入场动效：阻尼 1.0 无 overshoot；位移 8px（曾 14px 偏大） */
+  @keyframes macWinIn{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
+  .mac-window{animation:macWinIn .32s var(--ease-spring) both}
+  /* 卡片 hover：只加深边框/背景，不弹大阴影（曾凭空弹出 .2 透明度大阴影） */
+  .mac-card{transition:transform .2s ease,border-color .25s ease}
+  .mac-card:hover{transform:translateY(-1px);border-color:var(--border2)}
   /* 数字对齐：交易数据用 tabular-nums（价格/盈亏列对齐） */
   body{font-variant-numeric:tabular-nums}
-  /* macOS 风格细滚动条 */
-  ::-webkit-scrollbar{width:9px;height:9px}
+  /* macOS 风格细滚动条（单一实现：曾两套重复定义 8px/9px 并存） */
+  ::-webkit-scrollbar{width:8px;height:8px}
   ::-webkit-scrollbar-thumb{background:rgba(128,128,128,.28);border-radius:5px;border:2px solid transparent;background-clip:content-box}
   ::-webkit-scrollbar-thumb:hover{background:rgba(128,128,128,.45);border:2px solid transparent;background-clip:content-box}
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-corner{background:transparent}
-  /* 减动效偏好：关闭位移/缩放动效（保留透明度与颜色反馈） */
+  /* 减动效偏好：关闭全部位移/缩放/闪烁（保留透明度与颜色反馈） */
   @media (prefers-reduced-motion: reduce){
     .mac-window{animation:none}
-    .mac-card{transition:none}
-    .mac-btn,.mac-seg-btn,.mac-seg button{transition:none}
+    .mac-card,.mac-btn,.mac-seg-btn,.mac-seg button,.menu-item,.settings-item,.bt-step{transition:none}
+    .fade-num,.flash,.skeleton,.toast,.pill.pulse,.bg-ico,.empty-state .e-ico{animation:none !important}
   }
 </style>
 </head>
@@ -2407,12 +2426,15 @@ createApp({
         axis: dark ? '#98989f' : '#6e6e73',
         line: dark ? 'rgba(255,255,255,.12)' : 'rgba(0,0,0,.12)',
         split: dark ? 'rgba(255,255,255,.07)' : 'rgba(0,0,0,.07)',
+        accent: dark ? '#0A84FF' : '#007AFF',   // 与 UI 主色统一（曾图表用 #3f8cff 双色板）
       };
     }
     function initChart(elId) {
       const el = document.getElementById(elId);
       if (!el) return null;
-      if (el._chart) return el._chart;
+      // 主题切换/视图切换 dispose 后 el._chart 仍指向已销毁实例（曾直接返回
+      // 导致图表永久空白）；isDisposed 时重建
+      if (el._chart && !el._chart.isDisposed()) return el._chart;
       const chart = echarts.init(el);
       el._chart = chart;
       return chart;
@@ -2427,11 +2449,12 @@ createApp({
           backgroundColor:'transparent',
           tooltip:{trigger:'axis', backgroundColor:ct.tooltip, borderColor:ct.tooltipBorder, textStyle:{color:ct.text, fontSize:12}},
           grid:{left:60,right:20,top:24,bottom:40},
-          xAxis:{type:'time', axisLine:{lineStyle:{color:ct.line}}, axisLabel:{color:ct.axis, fontSize:11}},
+          // 回测曲线喂 [索引, 权益]（用 category 轴）；仪表盘/战绩喂 [时间戳, 权益]
+          xAxis:{type: key==='bt' ? 'category' : 'time', axisLine:{lineStyle:{color:ct.line}}, axisLabel:{color:ct.axis, fontSize:11}},
           yAxis:{type:'value', scale:true, splitLine:{lineStyle:{color:ct.split}}, axisLabel:{color:ct.axis, fontSize:11}},
-          series:[{type:'line', data, showSymbol:false, lineStyle:{color:'#3f8cff',width:2},
+          series:[{type:'line', data, showSymbol:false, lineStyle:{color:ct.accent,width:2},
                    areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[
-                     {offset:0,color:'rgba(63,140,255,.28)'},{offset:1,color:'rgba(63,140,255,.02)'}]}}}]
+                     {offset:0,color:'rgba(10,132,255,.22)'},{offset:1,color:'rgba(10,132,255,.02)'}]}}}]
         });
       });
       return chart;
@@ -2645,7 +2668,9 @@ createApp({
               btLive.value.position = p.last_item?.position ?? btLive.value.position;
               btLive.value.cash = p.last_item?.cash ?? btLive.value.cash;
               btLive.value.kline_history = p.kline_history || [];
-              if (p.last_trade) {
+              // 去重：p.last_trade 在下一笔成交前持续存在，曾每 500ms 轮询都
+              // prepend 同一笔 → 列表全是同一笔重复
+              if (p.last_trade && p.last_trade.ts !== btLive.value.last_trade?.ts) {
                 btLive.value.recent_trades = [(p.last_trade)].concat(btLive.value.recent_trades).slice(0,20);
                 btLive.value.last_trade = p.last_trade;
               }
@@ -2760,7 +2785,7 @@ createApp({
             {type:'inside', xAxisIndex:[0,1], start:45, end:100},
             {type:'slider', xAxisIndex:[0,1], start:45, end:100, bottom:2, height:18,
               borderColor:ct.line, backgroundColor:theme.value==='dark'?'rgba(255,255,255,.03)':'rgba(0,0,0,.03)',
-              fillerColor:'rgba(63,140,255,.18)', handleStyle:{color:'#3f8cff'},
+              fillerColor:'rgba(10,132,255,.16)', handleStyle:{color:ct.accent},
               textStyle:{color:ct.axis, fontSize:10}, dataBackground:{lineStyle:{color:ct.line}, areaStyle:{color:theme.value==='dark'?'rgba(255,255,255,.04)':'rgba(0,0,0,.04)'}}}
           ],
           series:[

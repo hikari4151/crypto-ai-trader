@@ -9,6 +9,7 @@
 import ast
 import logging
 import math
+from functools import lru_cache
 from typing import Any, Optional
 
 import numpy as np
@@ -64,6 +65,7 @@ def validate_expression(expr: str) -> bool:
     return True
 
 
+@lru_cache(maxsize=256)
 def _parse_expr(expr: str) -> ast.AST:
     try:
         tree = ast.parse(expr, mode="eval")
@@ -231,11 +233,19 @@ def _const(node: ast.AST):
 # ============ 2. 因子合成 ============
 
 def composite_factor(mat: pd.DataFrame, weights: dict[str, float],
-                     method: str = "ic") -> pd.Series:
+                     method: str = "ic", z_mode: str = "full",
+                     z_map: Optional[dict[str, pd.Series]] = None) -> pd.Series:
     """合成组合因子。
 
     mat: 因子矩阵（列=因子）
     weights: {key: 权重}；method="ic" 时若未传权重则用 |rank_ic| 加权
+    z_mode: "full"=全样本标准化（默认，历史行为逐位不变）；
+            "expanding"=只用截至当期 t 的统计量标准化（无前视，与
+            dynamic_composite 的 expanding 口径一致——RL 因子挖掘奖励路径使用，
+            曾全样本 mean/std 让 fitness 携带验证段未来分布信息）
+    z_map: 可选预计算 z（P2-12，仅 z_mode="expanding" 时生效）——调用方在
+           初始化时按同一 expanding 公式一次性算好全部列的 z，避免每步全量重算
+           统计量；为 None 时按 z_mode 现场计算（行为逐位不变）
     """
     # 只用有权重（或 method=ic 时全部）的列
     cols = list(weights.keys()) if weights else [c for c in mat.columns]
@@ -245,7 +255,14 @@ def composite_factor(mat: pd.DataFrame, weights: dict[str, float],
     z = {}
     for c in cols:
         s = mat[c]
-        z[c] = (s - s.mean()) / (s.std() + 1e-12)
+        if z_map is not None and z_mode == "expanding" and c in z_map:
+            z[c] = z_map[c]
+        elif z_mode == "expanding":
+            # 无前视：z 只用截至合成时点 t 的统计量（同 dynamic_composite 口径）；
+            # 早期样本不足（expanding std 为 NaN）按 0（均值）填充
+            z[c] = ((s - s.expanding().mean()) / (s.expanding().std() + 1e-12)).fillna(0.0)
+        else:
+            z[c] = (s - s.mean()) / (s.std() + 1e-12)
     # 权重归一化（按绝对值比例）
     total = sum(abs(weights.get(c, 0.0)) for c in cols)
     w = {c: weights.get(c, 0.0) / total for c in cols} if total else {c: 1.0 / len(cols) for c in cols}
@@ -256,7 +273,7 @@ def composite_factor(mat: pd.DataFrame, weights: dict[str, float],
 
 
 def ic_weighted_composite(mat: pd.DataFrame, close: pd.Series, h: int = 1,
-                          top_n: int = 8, min_abs_ic: float = 0.01) -> dict:
+                          top_n: int = 8, min_abs_ic: float = 0.03) -> dict:
     """IC 加权合成：选 |rank_ic| 最高且方向明确的 top_n 个因子，按 |rank_ic| 加权。
 
     返回 {composite: Series, weights: {key: 权重}, ics: 选中因子的 rank_ic}
@@ -279,7 +296,7 @@ def ic_weighted_composite(mat: pd.DataFrame, close: pd.Series, h: int = 1,
 
 
 def dynamic_composite(mat: pd.DataFrame, close: pd.Series, h: int = 1,
-                      ic_window: int = 120, min_abs_ic: float = 0.01,
+                      ic_window: int = 120, min_abs_ic: float = 0.03,
                       top_n: int = 8) -> dict:
     """动态权重合成组合因子（借鉴 AlphaForge 的时序表现动态调权）。
 
@@ -535,12 +552,17 @@ def parse_ai_factors(data: dict) -> list[dict]:
 
 
 def evaluate_mined_factors(candidates: list[dict], df: pd.DataFrame,
-                           h: int = 1, gates: Optional[dict] = None) -> list[dict]:
+                           h: int = 1, gates: Optional[dict] = None,
+                           cross_validate_data: Optional[dict[str, pd.DataFrame]] = None) -> list[dict]:
     """在历史数据上验证挖掘出的因子：计算序列 + IC 分析 + 安检门槛。
 
     返回每个因子的 {name, title, category, expression, logic, series_keys,
     rank_ic, ic, icir, turnover, fitness, valid}；
     无效因子 valid=False 并说明原因（样本过少 / |rank_ic| / |icir| / 换手 任一不过即无效）。
+
+    cross_validate_data: 可选跨品种验证数据，{symbol: OHLCV DataFrame}，
+        同周期、≥200 根K线。表达式在每只品种上计算 IC/ICIR，方向一致且
+        均值 ≥0.01 才算通过。None 时每项追加 cross_validation="not_configured"。
     """
     out = []
     close = df["close"]
@@ -548,8 +570,12 @@ def evaluate_mined_factors(candidates: list[dict], df: pd.DataFrame,
         try:
             fx = FactorExecutor(cand["expression"])
             s = fx.eval(df).astype(float)
-            gate = factor_quality_gate(s, close, h=h, gates=gates)
-            out.append({
+            # 跨品种验证：传递 fx.eval 作为 cross_factor_fn
+            cross_fn = fx.eval if cross_validate_data else None
+            gate = factor_quality_gate(s, close, h=h, gates=gates,
+                                       cross_validate_data=cross_validate_data,
+                                       cross_factor_fn=cross_fn)
+            result = {
                 **cand, "valid": gate["valid"],
                 "rank_ic": gate["rank_ic"], "ic": gate["ic"], "icir": gate["icir"],
                 "ic_win_rate": gate["ic_win_rate"],
@@ -558,8 +584,15 @@ def evaluate_mined_factors(candidates: list[dict], df: pd.DataFrame,
                 "samples": gate["samples"],
                 "reason": gate["reason"],
                 "series_key": None,
-            })
+            }
+            # 跨品种标记（gate 返回 None 时填充默认值）
+            result["cross_validation"] = gate.get("cross_validation", "not_configured")
+            result["cross_detail"] = gate.get("cross_detail", [])
+            out.append(result)
         except Exception as e:  # noqa: BLE001
             log.warning("[factor] 挖掘因子执行失败 %s: %s", cand.get("expression"), e)
-            out.append({**cand, "valid": False, "reason": str(e)[:80]})
+            result = {**cand, "valid": False, "reason": str(e)[:80]}
+            result["cross_validation"] = "not_configured"
+            result["cross_detail"] = []
+            out.append(result)
     return out

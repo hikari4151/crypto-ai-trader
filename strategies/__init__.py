@@ -6,6 +6,7 @@ from .factor_signal import FactorSignalStrategy
 from .grid import GridStrategy
 from .price_action import PriceActionStrategy
 from .rl_adaptive import RLAdaptiveStrategy
+from .meta import MetaController
 
 _REGISTRY: dict[str, type[Strategy]] = {
     DualMAStrategy.name: DualMAStrategy,
@@ -13,6 +14,7 @@ _REGISTRY: dict[str, type[Strategy]] = {
     PriceActionStrategy.name: PriceActionStrategy,
     RLAdaptiveStrategy.name: RLAdaptiveStrategy,
     FactorSignalStrategy.name: FactorSignalStrategy,
+    MetaController.name: MetaController,
 }
 _DYNAMIC: dict[str, dict] = {}   # AI 设计策略 -> {name, title, description, logic, params, executor}
 
@@ -57,16 +59,20 @@ def get_strategy(name: str) -> Strategy:
         return st
     if name in _REGISTRY:
         return _REGISTRY[name]()
-    raise ValueError(f"未知策略: {name}，可用: {list(_REGISTRY) + list(_DYNAMIC)}")
+    raise ValueError(f"未知策略: {name}，可用: {[s['name'] for s in list_strategies()]}")
 
 
 def list_strategies() -> list[dict]:
-    """列出全部可用策略：内置 + 动态（AI 设计/迭代/DRL/仓库）。"""
+    """列出全部可用策略：内置 + 动态（AI 设计/迭代/DRL/仓库）。
+
+    同名动态策略覆盖内置项（与 get_strategy 的优先级一致），故跳过被覆盖的内置条目
+    ——否则前端下拉会出现两个同名 option、表格出现重复 key、策略对比重复计一次。
+    """
     out = [
         {"name": cls.name, "description": cls.description,
          "default_params": dict(cls.default_params), "param_schema": cls.param_schema,
          "source": "builtin", "builtin": True}
-        for cls in _REGISTRY.values()
+        for cls in _REGISTRY.values() if cls.name not in _DYNAMIC
     ]
     for name, spec in _DYNAMIC.items():
         out.append({

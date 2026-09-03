@@ -79,8 +79,9 @@ class ExchangeManager:
     async def fetch_balance(self) -> dict:
         return await self._require_private().fetch_balance()
 
-    async def create_order(self, symbol: str, otype: str, side: str, amount: float, price: Optional[float] = None) -> dict:
-        return await self._require_private().create_order(symbol, otype, side, amount, price)
+    async def create_order(self, symbol: str, otype: str, side: str, amount: float,
+                           price: Optional[float] = None, params: Optional[dict] = None) -> dict:
+        return await self._require_private().create_order(symbol, otype, side, amount, price, params or {})
 
     async def cancel_order(self, order_id: str, symbol: str) -> dict:
         return await self._require_private().cancel_order(order_id, symbol)
@@ -93,3 +94,20 @@ class ExchangeManager:
 
     async def fetch_positions(self, symbols: Optional[list] = None) -> list:
         return await self._require_private().fetch_positions(symbols)
+
+    # ---------- 市场规格（下单前精度截断 / 最小名义额校验用） ----------
+    def _spec_client(self) -> Any:
+        client = self._private or self._public
+        if client is None:
+            raise RuntimeError("交易所客户端未初始化")
+        return client
+
+    def market(self, symbol: str) -> dict:
+        """ccxt 市场规格（含 precision/limits）；未 load_markets 或未知 symbol 会抛错。"""
+        return self._spec_client().market(symbol)
+
+    def amount_to_precision(self, symbol: str, amount: float) -> str:
+        return self._spec_client().amount_to_precision(symbol, amount)
+
+    def price_to_precision(self, symbol: str, price: float) -> str:
+        return self._spec_client().price_to_precision(symbol, price)

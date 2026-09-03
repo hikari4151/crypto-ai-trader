@@ -45,15 +45,31 @@ def _snapshot_block(snap: dict) -> str:
         f"- %B位置: {ind.get('bb_position')}  带宽: {ind.get('bb_width')}%",
         f"- 波动率 ATR%: {ind.get('atr_pct')}  均线斜率(MA10/ATR): {ind.get('ma_slope')}",
         f"- 最新一根成交量: {ind.get('volume')}  量比: {ind.get('vol_ratio')}",
-        f"- 最近 {len(candles)} 根K线(OHLCV):",
     ]
-    for c in candles[-10:]:
-        # K线时间戳转 ISO（原始毫秒对 LLM 不友好，曾直接打印毫秒）
-        try:
-            ts = datetime.fromtimestamp(c[0] / 1000).strftime("%m-%d %H:%M")
-        except Exception:  # noqa: BLE001
-            ts = str(c[0])
-        lines.append(f"  [{ts}] O={c[1]} H={c[2]} L={c[3]} C={c[4]} V={c[5]}")
+    # 最近10根K线：压缩为单行摘要（趋势/高低点/量能），减少 token 同时保留价格行为关键信息
+    if candles:
+        recent = candles[-10:]
+        closes = [float(c[4]) for c in recent]
+        highs = [float(c[2]) for c in recent]
+        lows = [float(c[3]) for c in recent]
+        vols = [float(c[5]) for c in recent]
+        # 趋势摘要：最近5根收盘方向
+        if len(closes) >= 5:
+            changes = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+            up_n = sum(1 for ch in changes[-5:] if ch > 0)
+            trend_desc = "上涨" if up_n >= 4 else ("下跌" if up_n <= 1 else "震荡")
+        else:
+            trend_desc = "数据不足"
+        lines.append(f"- 最近{len(recent)}根摘要: {trend_desc} | 高={max(highs):.2f} 低={min(lows):.2f} "
+                     f"最新={closes[-1]:.2f} 均量={sum(vols)/len(vols):.0f}")
+        lines.append("- 最近K线(时间 O/C H/L V):")
+        # 单根压缩格式：MM-DD O=.. H=.. L=.. C=.. V=..
+        for c in recent[-6:]:
+            try:
+                ts = datetime.fromtimestamp(c[0] / 1000).strftime("%m-%d %H:%M")
+            except Exception:  # noqa: BLE001
+                ts = str(c[0])
+            lines.append(f"  {ts} O={c[1]} H={c[2]} L={c[3]} C={c[4]} V={c[5]}")
     return "\n".join(lines)
 
 
@@ -69,12 +85,34 @@ def _sr_pa_block(snap: dict) -> str:
             f"突破新高: {pa.get('breakout_high')}, 突破新低: {pa.get('breakout_low')}, 波幅: {pa.get('range_pct')}%")
 
 
+def _trades_block(recent_trades: list, limit: int = 20) -> str:
+    """近期成交 → 单行摘要（P5 上下文精简：默认只保留最近 20 笔、每笔一行，
+    避免堆叠原始 dict 造成 token 膨胀；保留方向/价格/盈亏/原因四个高信号字段）。
+
+    P4-D2：review_messages 此前直接 `trades[:100]` 裸 dict 灌入（一次请求可被
+    灌入数万 token），改走本压缩函数（limit 可调，复盘给 60 条仍单行压缩）。
+    """
+    if not recent_trades:
+        return "暂无"
+    lines = []
+    for t in recent_trades[-limit:]:
+        ts = str(t.get("ts", ""))[5:16] if t.get("ts") else ""
+        lines.append(
+            f"- {ts} {t.get('side')} @{t.get('price')} qty={t.get('qty')} "
+            f"pnl={t.get('pnl')} ({t.get('strategy', '')}: {t.get('reason', '')})"
+        )
+    return "\n".join(lines)
+
+
 def _backtests_block(backtests: list) -> str:
-    """把历史回测结果整理成 AI 可读的参考文本（反思正循环：反馈真实表现）。"""
+    """把历史回测结果整理成 AI 可读的参考文本（反思正循环：反馈真实表现）。
+
+    P5 精简：最多保留最近 5 条，避免回测历史无限堆叠。
+    """
     if not backtests:
         return ""
     lines = ["【历史回测参考（真实跑过的策略表现，供反思迭代用）】"]
-    for b in backtests:
+    for b in backtests[-5:]:
         lines.append(
             f"- 策略[{b.get('strategy')}] {b.get('symbol')} {b.get('timeframe')} "
             f"总收益{b.get('total_return')} 年化{b.get('annual_return')} "
@@ -149,7 +187,11 @@ def market_analysis_messages(snap: dict, position: float, recent_trades: list[di
         ' "bull_strength": 可选 0-100 多头力量评分, "bear_strength": 可选 0-100 空头力量评分\n'
         ' "risk_level": 可选 "low|medium|high" 风险总评（与 warnings 并存）\n'
         ' "outlook_24h": 可选 24小时展望 {"scenario": "情景描述", "probability": 0-1, "trigger": "触发条件"}\n'
-        '  —— bull_strength/bear_strength/risk_level/outlook_24h 均为可选字段，有依据才填，不硬凑}\n'
+        ' "evidence": 可选数组，每条={"name": 指标名, "value": 数值}，列出支撑你结论的关键指标实际值\n'
+        '  —— evidence 的 name 只能引用快照中出现过的指标名（close/ma_fast/ma_slow/macd/macd_signal/macd_hist/\n'
+        '     rsi/bb_upper/bb_mid/bb_lower/volume/vol_ratio/atr_pct/ma_slope/bb_position/bb_width），\n'
+        '     value 必须与该指标在快照中的数值一致（程序会自动核对，不一致=疑似编造）；没有把握就不填\n'
+        '  —— bull_strength/bear_strength/risk_level/outlook_24h/evidence 均为可选字段，有依据才填，不硬凑}\n'
         "【量化规则（不满足会被拒绝）】\n"
         "- bias=long/short 时 confidence 必须 >=0.6\n"
         "- signals 方向必须与 bias 一致（bias=long 不允许建议做空）\n"
@@ -169,42 +211,12 @@ def market_analysis_messages(snap: dict, position: float, recent_trades: list[di
     if cblock:
         blocks.append(cblock)
     blocks.append(f"【当前持仓数量】{position}")
-    blocks.append(f"【近期交易】\n{recent_trades if recent_trades else '暂无'}")
+    blocks.append(f"【近期交易】\n{_trades_block(recent_trades)}")
     user = "\n\n".join(blocks) + "\n\n请先深度思考再输出 JSON。"
     return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
 
 
-# ============ 2. 参数优化（温度 0.2 / token 4096） ============
-def optimize_params_messages(strategy_name: str, schema: dict, current_params: dict,
-                             performance: dict, snap: dict) -> list[dict]:
-    sys = (
-        "你是量化策略参数优化器，只做有证据的微调，反对无依据乱改。\n"
-        "你的输出会被自动校验：参数必须落在 schema 内、不允许改 schema 外的参数。\n\n"
-        "【思考框架（内部推理）】\n"
-        "1. 诊断：近期表现问题（胜率/盈亏比/回撤/交易频率）映射到哪个参数环节\n"
-        "2. 对照：当前市场 regime 与该策略适配度（用价格行为判断）\n"
-        "3. 假设：为什么改这个参数、改多少，给出一句话逻辑\n"
-        "4. 权衡：避免过拟合，一次只调整 1-3 个最有把握的参数；没把握就不改\n\n"
-        "【输出 schema】\n"
-        '{"params": {参数名: 新值}, "reason": "中文理由(120字内，说明证据与预期效果)"}\n'
-        f"参数 schema（type/min/max 约束）: {schema}\n"
-        "【量化规则】\n"
-        "- 只允许改 schema 内存在的参数，新值必须落在范围内\n"
-        "- params 不能为空（若判断不需要改，给出最小的合理调整并说明理由）\n"
-        "- reason 必须引用近期表现或市场数据，禁止无依据修改\n\n"
-        + _NO_HALLUCINATION + "\n"
-        + _OUTPUT_RULE
-    )
-    user = (f"策略: {strategy_name}\n"
-            f"当前参数: {current_params}\n"
-            f"近期表现: {performance}\n"
-            f"市场快照: {_snapshot_block(snap)}\n"
-            f"关键位与价格行为: {_sr_pa_block(snap)}\n\n"
-            "请先深度思考再输出 JSON。")
-    return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
-
-
-# ============ 3. 价格行为全自动优化（温度 0.2 / token 4096） ============
+# ============ 2. 价格行为全自动优化（温度 0.2 / token 4096） ============
 def price_action_optimize_messages(strategy, performance: dict, snap: dict, focus: str,
                                    backtests: Optional[list] = None) -> list[dict]:
     from .price_action_kb import add_price_action_knowledge
@@ -221,7 +233,7 @@ def price_action_optimize_messages(strategy, performance: dict, snap: dict, focu
         f"参数 schema: {strategy.param_schema}\n"
         "【量化规则】\n"
         "- 只改 schema 内的参数，新值必须在范围内；params 不能为空\n"
-        "- take_profit_pct 必须 > stop_loss_pct；rsi_ob 必须 > rsi_os\n"
+        "- take_profit_pct 必须 > stop_loss_pct；rsi_ob 必须 > rsi_os（若 schema 含这些键）\n"
         "- 回测若显示某参数组合失效，必须优先调整而不是维持\n\n"
         + _NO_HALLUCINATION + "\n"
         + _OUTPUT_RULE
@@ -248,35 +260,129 @@ _STRATEGY_TYPE_GUIDE = {
 }
 
 
+def _schema_param_block(param_schema: dict) -> str:
+    """param_schema → prompt 参数清单（键名/类型/范围/可选值）。
+
+    键名不写死：曾因 prompt 里挂着执行器不读的死参数，AI 反复调一个不影响回测的旋钮。
+    """
+    parts = []
+    for key, spec in param_schema.items():
+        t = spec.get("type", "float")
+        choices = spec.get("choices")
+        lo, hi = spec.get("min"), spec.get("max")
+        if choices:
+            rng = "(" + " | ".join(str(c) for c in choices) + ")"
+        elif t == "str" or lo is None or hi is None:
+            rng = f"({t})"          # 自由文本/无界参数：只有类型可说，别编一个范围出来
+        else:
+            rng = f"({t} {lo}~{hi})"
+        label = spec.get("label")
+        parts.append(f"{key}{rng}" + (f"「{label}」" if label else ""))
+    return ", ".join(parts)
+
+
+def _default_executor_catalog() -> dict:
+    from .strategy_designer import design_executor_catalog  # 延迟导入：strategy_designer 反向依赖本模块
+    return design_executor_catalog()
+
+
+def _executor_block(catalog: dict) -> str:
+    names = list(catalog)
+    lines = []
+    if len(names) == 1:
+        lines.append(f"【执行器已固定】本次只能实现 {names[0]} 的逻辑，"
+                     f'executor 字段必须填 "{names[0]}"。')
+    else:
+        lines.append("【执行器目录】executor 只能取下列之一。先判断当前行情与你的逻辑"
+                     "真正属于哪一类，再使用该执行器自己的参数键设计——"
+                     "把趋势/均值回归/网格逻辑硬塞进另一个执行器只会产出假策略：")
+    for name in names:
+        info = catalog[name]
+        lines.append(f"- {name}：{info.get('description', '')}\n"
+                     f"  可用参数：{_schema_param_block(info.get('param_schema') or {})}")
+    return "\n".join(lines) + "\n\n"
+
+
+# 只有 price_action 存在与本地执行器逐参数同源的 Pine 模板，可以要求变量名照抄。
+_PRICE_ACTION_PINE_TEMPLATE = (
+    "【Pine 参数模板（变量名必须照抄）】\n"
+    'mode        = input.string("breakout", "入场模式")\n'
+    'breakoutPct = input.float(0.001, "突破幅度")\n'
+    'volConfirm  = input.float(1.2, "放量倍数")\n'
+    'rsiOB       = input.float(72, "RSI超买")\n'
+    'slPct       = input.float(0.02, "止损")\n'
+    'tpPct       = input.float(0.04, "止盈")\n'
+    'useSRStop   = input.bool(true, "止损参考关键位")\n'
+    "【Pine 不得写成 input 的口径】关键位摆动窗口与最少触碰次数在本地回测/实盘由引擎常量"
+    "固定（窗口 10、触碰 2），改成 input 只会让图表可调而实盘忽略、两端结果分叉。"
+    "需要它们时请直接写常量值（如 ta.pivothigh(high, 10, 10)）。\n")
+
+_NO_PINE_TEMPLATE_RULE = (
+    "【Pine 参数与忠实度】每个 params 键都要有对应的 input.* 声明；实盘以本次 JSON 的 params "
+    "为准，Pine 只用于图表复现，所以代码必须忠实实现所选 executor 的真实信号逻辑。"
+    "若无法用 Pine 忠实复现该执行器，把 pine_code 留空（系统会说明原因），"
+    "绝不套用别的策略模板凑一段假代码。\n")
+
+
+def _pine_param_block(catalog: dict) -> str:
+    names = list(catalog)
+    if names == ["price_action"]:
+        return _PRICE_ACTION_PINE_TEMPLATE
+    if "price_action" in names:
+        return _PRICE_ACTION_PINE_TEMPLATE + (
+            "（上段模板仅当 executor=price_action 时适用；选择其他执行器时改按下条规则办）\n")
+    return _NO_PINE_TEMPLATE_RULE
+
+
 def design_strategy_messages(snap: dict, recent_trades: list[dict],
                              backtests: Optional[list] = None,
                              strategy_type: str = "",
-                             custom_requirement: str = "") -> list[dict]:
+                             custom_requirement: str = "",
+                             executor_catalog: Optional[dict] = None,
+                             feedback: str = "") -> list[dict]:
     from .price_action_kb import add_price_action_knowledge
+    catalog = executor_catalog or _default_executor_catalog()
     sys = (
-        "你是顶级量化策略架构师，优先使用价格行为（Price Action）框架设计策略，"
+        "你是顶级量化策略架构师。你设计的策略最终运行在系统既有执行器之上（不能自创执行器），"
         "参数必须可执行、风控必须完整。\n"
-        "你的输出会被自动校验：参数必须落在 schema 内、止盈>止损、超买>超卖、名称合法。\n\n"
+        "你的输出会被自动校验：executor 必须在目录内、参数必须落在该执行器 schema 内、"
+        "止盈>止损、超买>超卖、名称合法。\n\n"
         "【思考框架（内部推理）】\n"
         "1. 市场判定：当前是突破市/回调市/震荡市？最适合哪种入场模式\n"
-        "2. 关键位：如何识别支撑/阻力，距离、被触及次数多少才有效\n"
-        "3. 入场确认：突破/回调的价量确认标准（幅度、量能倍数、RSI 过滤）\n"
-        "4. 出场与风控：止损止盈与关键位的关系、仓位控制\n"
-        "5. 逻辑优先价格行为：S/R 突破/回调、信号棒确认、趋势过滤；其他策略思路须明确说明\n"
-        "6. 用户指定了策略类型或自定义要求时，必须优先满足用户要求\n\n"
+        "2. 执行器选择：这个想法该由哪个执行器承载（关键位突破→price_action、"
+        "均线趋势→dual_ma、因子/超买超卖→factor_signal、区间网格→grid）\n"
+        "3. 入场确认：该执行器真实的入场条件与参数（幅度、量能倍数、周期、阈值）\n"
+        "4. 出场与风控：止损止盈与仓位控制\n"
+        "5. 只在执行器边界内设计：logic 描述的必须是你所选 executor 真正会做的事，"
+        "不要给它它不会做的条件\n"
+        "6. 信号密度是硬约束：注册前系统会在最近 1000 根K线上回测你的设计，"
+        "成交笔数 < 5 直接拒绝（策略不出信号等于没有策略）。条件层层 AND 叠加是最常见的死因，"
+        "能用一层过滤解决就不要加第二层\n"
+        "7. 用户指定了策略类型或自定义要求时，必须优先满足用户要求\n\n"
         "【输出 schema】\n"
         '{"name": "英文小写下划线策略名(如 sr_breakout)", "title": "中文标题(<=15字)",\n'
         ' "description": "中文描述(60字内)", "logic": "入场出场逻辑中文说明",\n'
-        ' "params": {参数名: 值}, "risk_tips": ["中文风控提示数组"]}\n'
-        "params 只能使用以下键(值必须落在标注范围内)：\n"
-        "mode(\"breakout\"或\"pullback\"), sr_window(int 5-60), min_touches(int 1-8), "
-        "breakout_pct(float 0.0001-0.02), volume_confirm(float 0.5-3.0), "
-        "rsi_ob(float 60-90), rsi_os(float 10-40), stop_loss_pct(float 0.001-0.1), "
-        "take_profit_pct(float 0.001-0.3), use_sr_stop(bool), size_pct(float 0.05-1.0)。\n"
+        ' "executor": "所选执行器名", "params": {参数名: 值}, '
+        '"risk_tips": ["中文风控提示数组"],\n'
+        ' "pine_code": "完整可运行的 Pine Script v5 策略代码"}\n\n'
+        + _executor_block(catalog) +
+        "【pine_code 规则（必须遵守）】\n"
+        "- 必须是完整的 Pine Script v5 代码：//@version=5 开头 + strategy() 声明\n"
+        "- 参数必须用 input.int/input.float/input.bool/input.string 声明，"
+          "软件会解析这些 input 值用于实盘执行\n"
+        "- strategy() 必须含 default_qty_type=strategy.percent_of_equity, "
+        "default_qty_value=<size_pct*100 取整>, commission_type=strategy.commission.percent, commission_value=0.1\n"
+        "- 逻辑必须完整可运行（支持/阻力、入场出场的 Pine 实现），与 params/logic 一致\n"
+        "- 【硬性要求】代码贴到图表上必须标出每一笔买入与卖出位置：用 plotshape 按"
+        "持仓变化（strategy.position_size 与上一根的比较）标记，覆盖入场/加仓/减仓/"
+        "止损止盈全部路径。只有下单语句、图上零标记的代码视为不合格，也不能只标入场信号：\n"
+        '  aiPosPrev = nz(strategy.position_size[1])\n'
+        '  plotshape(strategy.position_size > aiPosPrev, "买入", style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small)\n'
+        '  plotshape(strategy.position_size < aiPosPrev, "卖出", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small)\n'
+        + _pine_param_block(catalog) +
         "【量化规则】\n"
-        "- take_profit_pct 必须 > stop_loss_pct；rsi_ob 必须 > rsi_os\n"
-        "- logic 必须引用输入中的 S/R/量能 等真实特征，禁止凭空编造\n"
-        "- 优先设计价格行为策略；若采用其他思路须在 logic 里写明\n\n"
+        "- take_profit_pct 必须 > stop_loss_pct\n"
+        "- logic 必须引用输入中的真实特征（S/R/量能/指标读数），禁止凭空编造\n\n"
         + _NO_HALLUCINATION
     )
     sys = add_price_action_knowledge(sys, compact=True) + "\n" + _OUTPUT_RULE
@@ -289,21 +395,48 @@ def design_strategy_messages(snap: dict, recent_trades: list[dict],
         req_lines.append(f"【用户自定义要求（必须严格执行）】{custom_requirement.strip()}")
     req_block = "\n".join(req_lines) + "\n\n" if req_lines else ""
 
-    user = (f"{req_block}【当前市场快照】\n{_snapshot_block(snap)}\n\n"
+    feedback_block = ""
+    if feedback and feedback.strip():
+        feedback_block = (
+            "【上一版未通过注册前校验（必须针对性修正后重新设计）】\n"
+            f"{feedback.strip()}\n"
+            "注意：上一版被系统拒绝、没有进入策略库，也不是可用策略。"
+            "本次必须按上面的原因逐条修正（信号密度或过拟合指标都要达标），"
+            "不要沿用同一组参数，也不要只改名字和文案。\n\n")
+
+    user = (f"{feedback_block}{req_block}【当前市场快照】\n{_snapshot_block(snap)}\n\n"
             f"【关键位与价格行为】\n{_sr_pa_block(snap)}\n\n"
             f"{_backtests_block(backtests or [])}"
-            f"【近期交易】\n{recent_trades if recent_trades else '暂无'}\n\n"
+            f"【近期交易】\n{_trades_block(recent_trades)}\n\n"
             "请先深度思考再设计策略并输出 JSON。")
     return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
 
 
 # ============ 5. AI 策略迭代（温度 0.6 / token 8192） ============
 def _previous_block(previous: Optional[list]) -> str:
-    """前代迭代记录块：让 AI 看到历史迭代的 critique/改进点与回测指标，形成正循环。"""
+    """前代迭代记录块：让 AI 看到历史迭代的 critique/改进点与回测指标，形成正循环。
+
+    P4-D1：此前对 previous 全量拼接，策略每迭代一代 prompt 就多一整段记录、
+    无界增长（token 成本单调上涨、模型注意力被稀释、返答延迟上升）。
+    现在只保留最近 3 代完整记录；更早的代次只留单行摘要（版本号 + 最终指标），
+    既保留"演化轨迹"又控制体积。
+    """
     if not previous:
         return ""
     lines = ["【前代迭代记录（上一代说了什么/改了什么，请先对照其回测指标检验效果）】"]
-    for p in previous:
+    recent = previous[-3:]
+    older = previous[:-3]
+    # 更早代次：单行压缩摘要（版本号 + 注册回测最终指标），避免无界膨胀
+    for p in older:
+        bt = p.get("backtest") or {}
+        nm = bt.get("new") or {}
+        summary = str(p.get("summary", ""))[:60]
+        lines.append(
+            f"- 版本 {p.get('version', '?')} [{p.get('name', '')}] "
+            f"回测收益 {nm.get('total_return')} 回撤 {nm.get('max_drawdown')} "
+            f"· {summary}")
+    # 最近 3 代：完整记录（critique/improvements/summary + 回测指标）
+    for p in recent:
         bt = p.get("backtest") or {}
         bt_txt = ""
         if bt:
@@ -325,7 +458,8 @@ def _previous_block(previous: Optional[list]) -> str:
 def iteration_messages(strategy, performance: dict, snap: dict,
                        backtests: Optional[list] = None,
                        previous: Optional[list] = None,
-                       goal: str = "") -> list[dict]:
+                       goal: str = "",
+                       overfit_feedback: str = "") -> list[dict]:
     from .price_action_kb import add_price_action_knowledge
     sys = (
         "你是顶级量化策略评审与迭代专家，对现有策略做批判性深度反思并给出改进版。\n"
@@ -354,7 +488,14 @@ def iteration_messages(strategy, performance: dict, snap: dict,
     )
     sys = add_price_action_knowledge(sys, compact=True) + "\n" + _OUTPUT_RULE
     goal_txt = f"\n【本次迭代目标（用户指定，请优先围绕它改进）】{goal}\n" if goal else ""
-    user = (f"【当前策略】名称: {strategy.name}\n"
+    ofb = ""
+    if overfit_feedback and overfit_feedback.strip():
+        ofb = ("【上一版迭代未通过过拟合检测（必须针对性修正后重新迭代）】\n"
+               f"{overfit_feedback.strip()}\n"
+               "注意：上一版迭代被标记严重过拟合、未注册为可用策略。"
+               "本次必须按上面的原因逐条修正（降低参数自由度/收敛范围/简化逻辑，"
+               "以样本外稳健性优先），不要沿用同一组参数，也不要只改名字和文案。\n\n")
+    user = (f"{ofb}【当前策略】名称: {strategy.name}\n"
             f"描述: {strategy.description}\n"
             f"参数schema: {strategy.param_schema}\n"
             f"当前参数: {strategy.params}\n"
@@ -391,6 +532,28 @@ def review_messages(trades: list[dict], summary: dict) -> list[dict]:
     user = (f"交易总数: {summary.get('total_trades', 0)}\n"
             f"胜率: {summary.get('win_rate')}\n"
             f"总盈亏: {summary.get('total_pnl')}\n"
-            f"交易记录(最多100条): {trades[:100]}\n\n"
+            f"交易记录(最多60条,单行压缩):\n{_trades_block(trades, limit=60)}\n\n"
             "请先深度思考再输出 JSON。")
+    return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
+
+
+# ============ 7. Pine Script 导入校验（温度 0.2 / token 2048） ============
+def validate_pine_messages(pine_code: str, params: dict) -> list[dict]:
+    """Pine 导入前的 AI 合理性校验：只提 warning，不阻塞导入（本地 schema 校验已兜底）。"""
+    sys = (
+        "你是 Pine Script 与量化参数审查员。用户从 TradingView 导入一段 Pine 策略代码，"
+        "程序已把 input.* 参数映射到本地执行器。你的任务是检查参数组合的交易合理性。\n\n"
+        "【输出 schema】\n"
+        '{"ok": true/false, "warnings": ["中文警告数组，无问题则空数组"]}\n'
+        "【检查点（只报告有问题的项）】\n"
+        "- 止盈/止损比例是否失衡（止盈<=止损 且非刻意设计时警告）\n"
+        "- RSI 阈值是否极端（超买<65 或 超卖>35 时趋势策略易失效）\n"
+        "- 仓位/突破幅度/量能倍数是否极端（size_pct>0.8、breakout_pct>0.01 等）\n"
+        "- 信号是否过少（breakout_pct 偏大叠加 volConfirm>2 且 rsiOB 偏紧时，"
+        "多层 AND 过滤会让策略几乎不出信号）\n\n"
+        + _NO_HALLUCINATION + "\n"
+        + _OUTPUT_RULE
+    )
+    user = (f"【Pine 代码】\n{pine_code[:4000]}\n\n【已解析映射的参数】\n{params}\n\n"
+            "请逐项检查并输出 JSON。")
     return [{"role": "system", "content": sys}, {"role": "user", "content": user}]

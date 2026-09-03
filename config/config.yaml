@@ -1,24 +1,32 @@
-# 非敏感运行参数（敏感信息一律走 .env 或 Web 界面加密存储）
-# 键名与 config/settings.py 的 Settings 字段同名（扁平结构，大小写不敏感）。
-# 优先级：环境变量 > .env > 本文件 > 代码默认值。
-# 注：风控规则与回测默认参数请直接在 Web 界面配置（数据库持久化），
-# 本文件仅提供启动级默认值。
-
-# 默认交易参数
 default_exchange: binance
 default_symbol: BTC/USDT
 default_timeframe: 1h
 default_start_cash: 10000.0
 default_strategy: dual_ma
-
-# 启动 Web 时是否自动开始交易循环
 trading_auto_start: false
-
-# AI 定时任务（秒）
-ai_market_analysis_interval: 600      # 每 10 分钟市场状态理解
-ai_optimize_interval: 86400           # 每天策略参数优化
-ai_review_interval: 604800            # 每周反思复盘
-
-# 网络代理（用于访问 OKX / Bitget / Bybit 等受限交易所）
-# 留空自动探测本机 Clash/V2Ray 端口；也可显式指定如 http://127.0.0.1:7890
-proxy_url: ""
+ai_market_analysis_interval: 600
+ai_optimize_interval: 86400
+ai_review_interval: 604800
+ai_optimize_validate: true
+ai_optimize_validation_bars: 800
+paper_slippage: 0.0005
+trade_on_open: false
+protective_stop_enabled: true
+protective_stop_default_pct: 0.07
+protective_stop_buffer_pct: 0.02
+proxy_url: ''
+evolve_enabled: true
+evolve_factor_miner_interval: 60
+evolve_strategy_drl_interval: 60
+evolve_rolling_window: 5000
+evolve_factor_miner_episodes: 8
+evolve_strategy_drl_episodes: 8
+evolve_strategy_drl_state_window: 4
+evolve_strategy_drl_hidden:
+- 16
+- 16
+evolve_rollback_threshold: 0.95
+evolve_max_versions: 10
+evolve_symbols:
+- ETH/USDT
+evolve_timeframe: 5m

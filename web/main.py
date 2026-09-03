@@ -57,7 +57,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         import hmac
         path = request.url.path
-        if path.startswith("/api/") and path != "/api/health":
+        # CORS 预检请求（OPTIONS）直接放行，否则浏览器预检会被 401 拦截
+        if request.method == "OPTIONS":
+            response = await call_next(request)
+            response.set_cookie(TOKEN_COOKIE, API_TOKEN, path="/", samesite="lax", httponly=False)
+            return response
+        if path.startswith("/api/") and path.rstrip("/") != "/api/health":
             # 恒定时间比较（防时序侧信道）；header 缺失时直接拒绝
             if not hmac.compare_digest(request.headers.get("X-API-Token", ""), API_TOKEN):
                 return JSONResponse(status_code=401, content={"detail": "未授权：缺少或错误的 X-API-Token"})
@@ -74,7 +79,26 @@ async def lifespan(app: FastAPI):
     await db.init()
     app.state.db = db
     app.state.bus = EventBus()
+    # 动态策略必须在 TradingEngine 构造前恢复：引擎 __init__ 会 get_strategy(default_strategy)，
+    # 而默认策略可能是 AI 动态策略；未恢复则冷启动后回测/实盘看不到任何 AI 策略
+    from strategies.dynamic_store import restore_from_db
+    restored = await restore_from_db(db)
+    if restored:
+        log.info("[main] 已恢复 %d 个动态策略（回测/实盘/AI 页共用同一注册表）", restored)
     app.state.engine = TradingEngine(db, app.state.bus)
+    # 持续进化引擎独立启动（不依赖交易引擎状态）：即使交易引擎未启动，
+    # 因子挖掘和策略训练仍可用演示数据运行，用户可随时查看训练进度
+    try:
+        await app.state.engine.evolve.start()
+        log.info("[main] 持续进化引擎已启动（后台训练循环，因子挖掘15s后开始，策略DRL 30s后开始）")
+    except Exception as e:  # noqa: BLE001
+        log.warning("[main] 持续进化引擎启动失败（不影响主服务）: %s", e)
+    # P2-4：代理探测异步预热（阻塞 socket 探测放线程池，启动即缓存，
+    # 首个行情请求不再在事件循环上同步阻塞数秒）
+    try:
+        await settings.prewarm_proxy()
+    except Exception as e:  # noqa: BLE001
+        log.warning("[main] 代理预热失败: %s", e)
     if settings.trading_auto_start:
         # 自动启动失败（实盘密钥错误/网络不可达等）仅告警降级：
         # 曾直接抛异常使整个 Web UI 起不来，连修复配置的页面都不可用
@@ -92,8 +116,14 @@ async def lifespan(app: FastAPI):
     # 释放 AI 长连接（loop-keyed HTTP 客户端）
     try:
         await app.state.engine.ai_client.close()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        log.warning("[main] 关闭 AI 客户端失败: %s", e, exc_info=True)
+    # 关闭行情全局 HTTP 客户端（模块 C 独占此接线，幂等）
+    try:
+        from web.api.market import close_client as _close_market
+        await _close_market()
+    except Exception as e:  # noqa: BLE001
+        log.warning("[main] 关闭行情客户端失败: %s", e, exc_info=True)
     await db.close()
 
 
@@ -103,14 +133,15 @@ app = FastAPI(title="Crypto AI Trader", version="1.0.0", lifespan=lifespan)
 app.add_middleware(AuthMiddleware)
 
 from web.api import (  # noqa: E402
-    ai_router, backtest_router, drl_router, exchanges_router, factors_router, live_router,
-    market_router, performance_router, portfolio_router, risk_router, strategy_repo_router,
-    trading_router,
+    ai_router, backtest_router, data_router, drl_router, evolve_router, exchanges_router,
+    factors_router, live_router, market_router, notify_router, performance_router,
+    portfolio_router, risk_router, strategy_repo_router, trading_router,
 )
 
 for r in (ai_router, exchanges_router, trading_router, backtest_router,
           portfolio_router, performance_router, risk_router, market_router, live_router,
-          strategy_repo_router, factors_router, drl_router):
+          strategy_repo_router, factors_router, drl_router, evolve_router, data_router,
+          notify_router):
     app.include_router(r)
 
 
@@ -121,7 +152,10 @@ async def health():
 
 @app.get("/")
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # no-cache：浏览器每次 revalidate（etag/304，代价极低），确保前端页面始终是最新版——
+    # 曾因浏览器沿用旧缓存页面，出现"新功能不生效/点击无反应"的用户环境问题
+    return FileResponse(STATIC_DIR / "index.html",
+                        headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

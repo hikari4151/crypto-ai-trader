@@ -35,7 +35,10 @@ class ParamOptimizer:
             return None
 
         new_params = result.get("params") or {}
-        applied = strategy.update_params(new_params) if apply else dict(strategy.params)
+        # apply=True：直接热更新策略参数（旧行为）；apply=False：只返回 AI 建议参数，
+        # 由调用方持策略锁应用（曾错误返回 dict(strategy.params) 旧参数快照，
+        # 导致 AI 优化建议从不生效——仅写 OptimizationLog）
+        applied = strategy.update_params(new_params) if apply else new_params
         async with self._db.session() as s:
             from core.database import OptimizationLog
             s.add(OptimizationLog(
@@ -46,4 +49,8 @@ class ParamOptimizer:
             ))
             await s.commit()
         log.info("[ai] 策略 %s 已按关键位/价格行为优化: %s", strategy.name, applied)
-        return {"params": applied, "reason": result.get("reason", ""), "focus": result.get("focus", "")}
+        out = {"params": applied, "reason": result.get("reason", ""),
+               "focus": result.get("focus", "")}
+        if not apply:
+            out["grid_center"] = dict(new_params)   # AI 建议参数即网格扫描中心
+        return out

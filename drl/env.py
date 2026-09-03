@@ -27,6 +27,7 @@ class TradingEnv:
                  fee_rate: float = 0.001,
                  vol_penalty: float = 0.5,
                  cost_scale: float = 1.0,
+                 slippage: float = 0.0,
                  min_trade_zone: float = 0.05,
                  warmup: int = 60,
                  backend: str = "numpy",
@@ -35,16 +36,36 @@ class TradingEnv:
                  # 可选奖励塑形（系数=0 即关闭，默认关；A/B 验证后开启）
                  reward_dd_penalty: float = 0.0,      # 回撤加深惩罚（含 dd>12% 硬约束）
                  reward_losing_penalty: float = 0.0,  # 连亏惩罚（3 连亏起二次斜坡）
-                 reward_trend_align: float = 0.0) -> None:  # 趋势一致性奖励（低波动趋势持仓同向加分）
+                 reward_trend_align: float = 0.0,     # 趋势一致性奖励（低波动趋势持仓同向加分）
+                 tail_risk_penalty: float = 0.0,      # 尾部风险惩罚（单根超大幅回撤额外罚）
+                 # ---- P2-12 成交/成本约束（与回测/纸面同口径，默认关保持旧行为） ----
+                 participation_rate: float = 0.0,     # 调仓数量上限 = 该K线成交量×参与率（0=不限）
+                 funding_rate: float = 0.0,           # 每根K线按持仓价值收取的资金费率（0=关闭）
+                 precomputed_features: Optional[np.ndarray] = None,  # 预计算特征，避免并行 worker 重复计算
+                 ) -> None:
         self.df = df
         self.start_cash = start_cash
         self.fee_rate = fee_rate
         self.vol_penalty = vol_penalty      # 波动率惩罚系数
         self.cost_scale = cost_scale        # 交易成本缩放
+        # D2：滑点（比例）。默认 0 向后兼容；train_drl 按 cfg.slippage（默认 0.0005，
+        # 与回测/纸面 paper_slippage 同口径）传入，消除"训练能赚、实盘亏在摩擦"偏差。
+        self.slippage = float(slippage)
         self.min_trade_zone = min_trade_zone  # 调仓死区：与目标仓位差异小于此比例则不调仓
+        # P2-12：成交量参与率上限与资金费率（0=关闭，向后兼容）
+        self.participation_rate = float(participation_rate or 0.0)
+        self.funding_rate = float(funding_rate or 0.0)
         self.reward_dd_penalty = reward_dd_penalty
         self.reward_losing_penalty = reward_losing_penalty
         self.reward_trend_align = reward_trend_align
+        self.tail_risk_penalty = tail_risk_penalty
+        # 奖励塑形启用日志（观测点，不改变塑形计算逻辑或训练结果）：
+        # 任一塑形系数 >0 时打印启用信息，供部署排查"奖励分布为何变了"
+        if reward_dd_penalty > 0 or reward_losing_penalty > 0 or reward_trend_align > 0 or tail_risk_penalty > 0:
+            import logging
+            logging.getLogger(__name__).info(
+                "[drl] 奖励塑形已启用: dd=%s losing=%s trend=%s",
+                reward_dd_penalty, reward_losing_penalty, reward_trend_align)
         self.warmup = warmup
         self.backend = backend
         # 状态窗口：堆叠最近 N 根K线的特征，给 MLP 时序记忆（单点特征看不到形态变化）。
@@ -53,7 +74,16 @@ class TradingEnv:
         closes = df["close"].to_numpy(float)
         self.n = len(closes)
         self._closes = closes
-        self._features = _precompute_features(df, backend=backend)  # (n, feat_dim)
+        # P2-12：成交量序列（参与率约束用；缺 volume 列则视为无限流动性）
+        if "volume" in df.columns:
+            self._volumes = df["volume"].to_numpy(float)
+        else:
+            self._volumes = np.full(self.n, 1e12)
+        # 使用预计算特征（避免在并行 worker 中重复计算 _precompute_features）
+        if precomputed_features is not None:
+            self._features = precomputed_features
+        else:
+            self._features = _precompute_features(df, backend=backend)  # (n, feat_dim)
         # 外部因子信号列（如模型因子/自定义表达式因子），追加到状态末端：
         # 训练与部署使用同一表达式计算（见 train_drl / rl_adaptive），保证状态口径一致
         if extra_factors is not None:
@@ -90,6 +120,16 @@ class TradingEnv:
         self._entry_price = None
         self._prev_equity = self.start_cash
         self._done = False
+        # P0-5：奖励塑形状态必须随 episode 重置——曾遗留上一段的峰值权益/回撤/
+        # 连亏计数，新 episode 首根K线就带上旧分布 → 塑形奖励失真（首步被多罚/漏罚）
+        self._peak_equity = self.start_cash
+        self._last_dd = 0.0
+        self._losing_streak = 0
+        # P4-E1：最终权益/仓位快照（episode 收尾后由 step 写入最后一次 equity_next）。
+        # 曾直接读 _closes[_t]，而 done 分支把 _t 钳回 n-2——最后一根K线的收益
+        # 计入 total_ret 却不在 final_equity 里（两指标互相矛盾的 off-by-one）。
+        self._final_equity = self.start_cash
+        self._final_position_ratio = 0.0
         return self._build_state()
 
     def _state_feats(self) -> np.ndarray:
@@ -158,13 +198,25 @@ class TradingEnv:
         # 调仓死区：与目标仓位差异过小则不交易，减少摩擦损耗
         if abs(diff) > self.min_trade_zone and equity > 0:
             qty_delta = (diff * equity) / price_now
-            cost = abs(diff * equity) * self.fee_rate * self.cost_scale
+            # P2-12：成交量参与率约束——单根K线调仓数量不得超过该K线成交量×参与率
+            # （流动性限制，与回测 P0-2 participation_rate 同口径；0=不限，向后兼容）
+            if self.participation_rate > 0:
+                vol_cap = self._volumes[self._t] * self.participation_rate
+                if vol_cap > 0:
+                    max_delta = (abs(diff) * equity) / price_now
+                    if qty_delta > 0:
+                        qty_delta = min(qty_delta, max_delta, vol_cap)
+                    else:
+                        qty_delta = max(qty_delta, -max_delta, -vol_cap)
+            # D2：成本 = 手续费 + 滑点（与回测/纸面 paper_slippage 同口径）。
+            # 滑点按成交额比例计（买卖对称，近似实际滑点成本），默认 0 向后兼容。
+            cost = abs(qty_delta) * price_now * (self.fee_rate * self.cost_scale + self.slippage)
             self._cash -= cost
             if diff > 0:  # 买入
-                self._cash -= abs(diff * equity)
+                self._cash -= qty_delta * price_now
                 self._qty += qty_delta
             else:         # 卖出
-                self._cash += abs(diff * equity)
+                self._cash += abs(qty_delta) * price_now
                 self._qty += qty_delta
             if self._qty <= 1e-12:
                 self._qty = 0.0
@@ -181,6 +233,10 @@ class TradingEnv:
         if self._t >= self.n - 1:
             self._t = self.n - 2
             self._done = True
+        # P2-12：资金费率（永续合约持仓成本，可选）——按穿过的下一根K线持仓价值收取。
+        # 与回测 P0-3 funding_rate 同口径（每根K线按持仓价值×费率），0=关闭
+        if self.funding_rate != 0.0 and abs(self._qty) > 1e-12:
+            self._cash -= abs(self._qty) * price_next * self.funding_rate
         equity_next = self._equity(price_next)
         ret = (equity_next / max(self._prev_equity, 1e-9)) - 1.0
 
@@ -196,12 +252,17 @@ class TradingEnv:
         vol_ref = 1.0  # 正常波动率基准（%）
         pos = self._pos_ratio()
         risk_penalty = self.vol_penalty * ((pos * vol / vol_ref) ** 2)
-        reward_bp = float(np.clip(ret * 10000.0, -150.0, 150.0))
+        # P0-3 优化：奖励软裁剪（原为 clip ±150 硬截断）。tanh 压缩保留极端行情的
+        # 方向梯度（硬截断在边界饱和，智能体学不到"越极端越该调整"），
+        # 且 |tanh|<=1 天然有界（无需 clip，数值更稳）。
+        # 标定：ret*10000=±150bp 时 tanh(±1)=±0.7619，即软裁剪略缩中间值，
+        # 但尾部仍保留 0.76~1.0 的梯度信号（原实现尾部直接饱和为 1）。
+        reward_bp = float(150.0 * np.tanh(ret * 10000.0 / 150.0))
         reward = reward_bp - risk_penalty
 
         # ---- 4. 可选奖励塑形（系数=0 即关闭；回撤惩罚对齐真实目标、连亏抑制
         #      "抄底死扛"、趋势一致性强化"趋势加仓"方向） ----
-        if self.reward_dd_penalty > 0 or self.reward_losing_penalty > 0 or self.reward_trend_align > 0:
+        if self.reward_dd_penalty > 0 or self.reward_losing_penalty > 0 or self.reward_trend_align > 0 or self.tail_risk_penalty > 0:
             self._peak_equity = max(self._peak_equity, equity_next)
             dd_t = (self._peak_equity - equity_next) / max(self._peak_equity, 1e-9)
             if self.reward_dd_penalty > 0:
@@ -220,6 +281,11 @@ class TradingEnv:
                 ret20 = (self._closes[self._t] / self._closes[self._t - 20]) - 1.0
                 vol_factor = max(0.0, 1.0 - min(1.0, vol / 3.0))
                 reward += self.reward_trend_align * pos * (1.0 if ret20 > 0 else -1.0) * vol_factor
+            if self.tail_risk_penalty > 0:
+                # 尾部风险惩罚：单根超大幅回撤（<-2%）额外加重罚（CVaR 思想），
+                # 训练时抑制"高波动满仓赌单根大K线"的极端行为。
+                if ret < -0.02:
+                    reward -= self.tail_risk_penalty * (abs(ret) * 100.0) * pos
 
         info = {
             "equity": equity_next, "ret_pct": ret * 100.0,
@@ -227,6 +293,11 @@ class TradingEnv:
             "price": price_next, "action": ACTION_NAMES[action],
         }
         self._prev_equity = equity_next
+        # P4-E1：记录最终权益/仓位快照（step 用 price_next=最后一根K线收盘价，
+        # 而 _t 在 done 分支被钳回 n-2——若 run_episode 事后读 _closes[_t] 会
+        # 漏掉最后一根K线的 PnL）。由 run_episode/collect_episode 直接取快照。
+        self._final_equity = equity_next
+        self._final_position_ratio = (self._qty * price_next) / max(equity_next, 1e-9)
         return self._build_state(), reward, self._done, info
 
 
@@ -264,12 +335,18 @@ def _precompute_features(df: pd.DataFrame, backend: str = "numpy") -> np.ndarray
         # GPU 后端：核心窗口特征在 GPU 上向量化计算（cumsum 技巧），
         # 完成后转回 numpy 供训练循环无缝使用（env.step 逐K线有状态依赖，无法 GPU）。
         return _precompute_features_cupy(c.to_numpy(float), v.to_numpy(float), xp)
+    # P4-B4：ret/vol 列用 tanh 压缩到 (-1,1) 有界——此前 ret_N 是原始百分比
+    # （异常行情可达 ±20+）、vol_5 是原始 0~15+，与已归一化的 RSI/MACD/regime 混拼
+    # 入网，大数值主导 MLP 输入、ReLU 激活分布不稳。tanh 单调且有界，方向信息
+    # 保留、极端值收敛；训练/部署共用本函数，口径天然一致。
+    _TANH_RET = 5.0    # ret ±5% → ±0.76（常见 ±2% → ±0.38）
+    _TANH_VOL = 3.0    # vol 3% → 0.76（高波动 10%+ 收敛到 ~1）
     feat = pd.DataFrame({
-        "ret_1": ret,
-        "ret_3": c.pct_change(3) * 100.0,
-        "ret_5": c.pct_change(5) * 100.0,
-        "ret_10": c.pct_change(10) * 100.0,
-        "vol_5": ret.rolling(5).std(),
+        "ret_1": np.tanh(ret / _TANH_RET),
+        "ret_3": np.tanh(c.pct_change(3) * 100.0 / _TANH_RET),
+        "ret_5": np.tanh(c.pct_change(5) * 100.0 / _TANH_RET),
+        "ret_10": np.tanh(c.pct_change(10) * 100.0 / _TANH_RET),
+        "vol_5": np.tanh(ret.rolling(5).std() / _TANH_VOL),
         "rsi": (_rsi(c, 14) / 100.0).clip(0, 1),
         "macd": (_macd_hist(c) / c * 100.0).clip(-10, 10) / 10.0,
         "vol_ratio": (v / (v.rolling(5).mean() + 1e-12)).clip(0, 5) / 5.0,
@@ -277,7 +354,10 @@ def _precompute_features(df: pd.DataFrame, backend: str = "numpy") -> np.ndarray
         "ma_dist30": (c / c.rolling(30).mean() - 1.0) * 100.0 / 10.0,
         "bb_pos": _bb_pos(c),
         "trend_regime": np.sign(c.pct_change(60)),
-        "risk_regime": ret.rolling(20).std().rolling(40).rank(pct=True),
+        # P0-2（前视修复）：risk_regime 改为滚动分位——rolling(40).rank(pct=True)
+        # 会用到整列全序列排名（含未来值），部署端 ta.percentrank 只能看到历史，
+        # 训练/部署口径不一致。改为逐窗口分位：每根K线用最近 40 个样本算当前值的百分位。
+        "risk_regime": _rolling_percentile(ret.rolling(20).std(), 40),
     }).fillna(0.0)
     return feat.to_numpy(float)
 
@@ -298,12 +378,32 @@ def _precompute_features_cupy(closes: np.ndarray, volumes: np.ndarray, xp) -> np
         out[period - 1:] = (cs[period:] - cs[:-period]) / period
         return out
 
+    # M2-T3：cupyx.scipy.signal.lfilter 用于向量化 EMA（见 ema()）；
+    # 该子模块并非所有 cupy 安装都包含，缺失时回退 for 循环版本
+    try:
+        from cupyx.scipy.signal import lfilter as _lfilter
+    except ImportError:
+        _lfilter = None
+
     def ema(a, period):
-        out = xp.empty_like(a)
+        """cupy 向量化 EMA：优先用 lfilter（GPU 原生扫描），不可用时回退 Python for 循环。
+
+        lfilter 通过 y[n] = k*x[n] + (1-k)*y[n-1] 一步算出全量序列，
+        初始条件 zi=a[0] 使 y[0]=a[0]（与原始 for 循环 y[0]=a[0] 逐位一致）。
+        """
         k = 2.0 / (period + 1)
+        if _lfilter is not None:
+            b = xp.array([k], dtype=xp.float64)
+            a_coeff = xp.array([1.0, -(1.0 - k)], dtype=xp.float64)
+            zi = xp.array([a[0]], dtype=xp.float64)
+            out, _ = _lfilter(b, a_coeff, a, zi=zi)
+            return out
+        # 回退：Python for 循环（与 RSI 循环的处理方式一致，非热点路径）
+        out = xp.empty_like(a)
         out[0] = a[0]
+        km1 = 1.0 - k
         for i in range(1, n):
-            out[i] = a[i] * k + out[i - 1] * (1 - k)
+            out[i] = a[i] * k + out[i - 1] * km1
         return out
 
     def pct_chg(a, period):
@@ -349,6 +449,10 @@ def _precompute_features_cupy(closes: np.ndarray, volumes: np.ndarray, xp) -> np
     sd20 = roll_std(c, 20)
     # RSI(14) ewm：与 pandas ewm(alpha, adjust=False).mean() 语义一致——
     # 从第一个有效值开始累积，NaN 跳过。前 14 根 warmup 期近似（不影响训练）。
+    # M2-T3：此循环本质也是线性递推（ag[i]=ag[i-1]*(1-alpha)+gain[i]*alpha），
+    # 理论上可用 lfilter 向量化，但初始条件 ag[1]=gain[1] 而非 ag[0]=gain[0]，
+    # 需特殊处理 diff 数组的偏移（gain[0]=NaN）。保持现状：_precompute_features_cupy
+    # 仅训练开始时调用一次，非热点路径；numpy 版已用 pd.ewm 向量化最优。
     diff_arr = xp.diff(c)
     delta = xp.empty(n, dtype=xp.float64)
     delta[0] = xp.nan
@@ -379,8 +483,16 @@ def _precompute_features_cupy(closes: np.ndarray, volumes: np.ndarray, xp) -> np
     bb_pos = xp.clip((c - (mid20 - 2 * sd20)) / (4 * sd20 + 1e-12), 0, 1)
     trend_regime = xp.sign(pct_chg(c, 60))
 
+    # P4-B4：与 numpy 版一致的 tanh 压缩（ret/vol 列），保证 GPU/CPU 训练与
+    # 部署特征严格同口径
+    _TANH_RET = 5.0
+    _TANH_VOL = 3.0
     feat = xp.column_stack([
-        ret, pct_chg(c, 3), pct_chg(c, 5), pct_chg(c, 10), vol5,
+        xp.tanh(ret / _TANH_RET),
+        xp.tanh(pct_chg(c, 3) / _TANH_RET),
+        xp.tanh(pct_chg(c, 5) / _TANH_RET),
+        xp.tanh(pct_chg(c, 10) / _TANH_RET),
+        xp.tanh(vol5 / _TANH_VOL),
         rsi, macd, vol_ratio, ma_dist10, ma_dist30, bb_pos,
         trend_regime, risk_regime,
     ])
@@ -403,12 +515,23 @@ _GPU_STATE: Optional[bool] = None
 
 
 def gpu_available() -> bool:
-    """是否真正可用 GPU 后端（import 成功 + 实际能跑一次运算）。与回测引擎对齐。"""
+    """是否真正可用 GPU 后端（import 成功 + CUDA 设备存在 + 实际能跑一次运算）。与回测引擎对齐。
+
+    Bug 修复：曾只测 import cupy + 一次 cumsum 运算——CPU-only 环境装了 cupy 时
+    cumsum 也能跑（慢+告警），误报 True。用户勾选 GPU 后训练实际走 CPU 且每次
+    运算都尝试加载 CUDA（慢/告警），表现为"GPU 训练坏掉"。现在显式检查
+    cupy.cuda.runtime 是否有可用设备（无 CUDA 时抛错→回退 numpy）。
+    """
     global _GPU_STATE
     if _GPU_STATE is not None:
         return _GPU_STATE
     try:
         import cupy  # type: ignore
+        # 关键：确认真实 CUDA 设备存在（CPU-only cupy 安装 import 成功但无设备）
+        dev = cupy.cuda.runtime.getDeviceCount()
+        if dev <= 0:
+            _GPU_STATE = False
+            return False
         a = cupy.array([1.0, 2.0, 3.0], dtype=cupy.float64)
         _ = cupy.asnumpy(cupy.cumsum(a))  # 触发编译，缺头文件会抛错
         _GPU_STATE = True
@@ -440,6 +563,19 @@ def _bb_pos(c: pd.Series, n: int = 20) -> pd.Series:
     return ((c - (mid - 2 * sd)) / (4 * sd + 1e-12)).clip(0, 1)
 
 
+def _rolling_percentile(s: pd.Series, window: int = 40) -> pd.Series:
+    """滚动百分位：每根K线用最近 window 个样本计算当前值的百分位（0~1），
+    与 Pine ta.percentrank 同口径（无前视）。
+
+    P0-1 优化：从 rolling.apply(逐窗口 Python 回调) 改为 rolling.rank(pct=True)
+    （pandas C 实现）。rolling.rank(pct=True) 输出窗口内每个元素的百分位，
+    最后一行即当前值的百分位，与旧实现 (x <= x[-1]).mean() 逐位一致。
+    """
+    r = s.rolling(window).rank(pct=True)
+    # 预热区（窗口不足）+ NaN 归零（滚动 rank 在窗口前为 NaN）
+    return r.fillna(0.0)
+
+
 # ============ 完整 episode 采样（供训练） ============
 
 def run_episode(env: TradingEnv, act_fn, max_steps: Optional[int] = None,
@@ -465,9 +601,11 @@ def run_episode(env: TradingEnv, act_fn, max_steps: Optional[int] = None,
             break
     out = {
         "total_ret": total_ret - 1.0,
-        "final_equity": env._equity(env._closes[env._t]),
+        # P4-E1：用 env 保存的最终快照（含最后一根K线收益），不再读 _closes[_t]
+        #（done 分支把 _t 钳回 n-2，直接读会漏最后一段 PnL，两指标互相矛盾）
+        "final_equity": env._final_equity,
         "steps": len(rewards),
-        "final_position_ratio": env._pos_ratio(),
+        "final_position_ratio": env._final_position_ratio,
     }
     if return_trajectory:
         out.update({

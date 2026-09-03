@@ -4,6 +4,24 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 
+def strategy_ma_periods(strategy) -> tuple[int, int]:
+    """从策略参数推导 MA 快/慢线周期（回测引擎与实时行情中枢共用，保证同口径）。
+
+    仅对声明了 fast_period/slow_period 参数的策略（目前为 dual_ma）生效；
+    其余策略（factor_signal/grid/price_action 等）读 ma_fast/ma_slow 时保持
+    默认 10/30 —— 与 factor 库中 bias_10/bias_30 的口径一致。
+    """
+    p = getattr(strategy, "params", None) or {}
+    fast = p.get("fast_period")
+    slow = p.get("slow_period")
+    if fast is None or slow is None:
+        return 10, 30
+    try:
+        return max(1, int(float(fast))), max(1, int(float(slow)))
+    except (TypeError, ValueError):
+        return 10, 30
+
+
 @dataclass
 class Signal:
     symbol: str
@@ -14,6 +32,9 @@ class Signal:
     limit_price: Optional[float] = None
     reason: str = ""
     strategy: str = ""
+    # 信号置信度（0.0~1.0，默认 1.0 兼容旧策略）。DRL 策略用策略分布熵倒数/方差
+    # 填充，供元策略/多策略合成加权使用。旧策略不设置则视为满置信。
+    confidence: float = 1.0
 
 
 class Strategy(ABC):
@@ -68,3 +89,13 @@ class Strategy(ABC):
 
     def on_fill(self, symbol: str, side: str, price: float) -> None:
         """成交回调（用于记录入场价等状态）。"""
+
+    def protective_levels(self, ctx: dict[str, Any]) -> Optional[dict]:
+        """返回当前持仓的触价保护位：{"stop": 价格, "take_profit": 价格} 或 None。
+
+        P0-1 intrabar 止损/止盈建模：回测撮合内核拿到该保护位后，会用K线的
+        high/low 判断盘中是否触及并在触价位成交（而非仅收盘价判断），
+        使回测/纸面/实盘的止损口径一致（实盘 protective stop 本就是触价单）。
+        默认返回 None（策略内部自行处理止损止盈，回测维持旧行为）。
+        """
+        return None

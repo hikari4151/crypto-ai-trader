@@ -1,6 +1,6 @@
 """历史战绩与绩效看板。"""
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from core.database import Database, EquitySnapshot, Trade
 from web.deps import get_db
@@ -13,11 +13,10 @@ async def summary(db: Database = Depends(get_db)):
     async with db.session() as s:
         # 用 SQL 聚合替代全表加载，交易量大时大幅提速
         total_row = (await s.execute(
-            select(func.count(Trade.id), func.count().filter(Trade.side == "sell")))).one()
+            select(func.count(Trade.id), func.coalesce(func.sum(case((Trade.side == "sell", 1), else_=0)), 0)))).one()
         total_trades, closed_trades = total_row[0], total_row[1] or 0
 
         # 平仓盈亏聚合（CASE WHEN 兼容 SQLite/PostgreSQL）
-        from sqlalchemy import case
         win_sum = func.coalesce(func.sum(case((Trade.pnl > 0, Trade.pnl), else_=0.0)), 0.0)
         loss_sum = func.coalesce(func.sum(case((Trade.pnl < 0, -Trade.pnl), else_=0.0)), 0.0)
         win_cnt = func.coalesce(func.sum(case((Trade.pnl > 0, 1), else_=0)), 0)
@@ -58,6 +57,7 @@ async def trades(limit: int = 200, db: Database = Depends(get_db)):
 async def equity(limit: int = 500, db: Database = Depends(get_db)):
     async with db.session() as s:
         # 先取最新的 N 条（降序），再升序返回，保证图表显示最新数据
+        # 注意：ORDER BY ts ASC LIMIT 会取最旧的 N 条，此处用子查询方式取最新 N 条升序
         rows = (await s.execute(
             select(EquitySnapshot).order_by(EquitySnapshot.ts.desc()).limit(limit))).scalars().all()
         rows.reverse()

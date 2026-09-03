@@ -1,5 +1,9 @@
-"""钱包余额与持仓：定时快照，以最新价折算 USDT 展示，含浮动盈亏。"""
+"""钱包余额与持仓：定时快照，以最新价折算 USDT 展示，含浮动盈亏。
+
+公共方法 fetch_live_balance() 供引擎侧每日对账与 API 侧复用。
+"""
 import logging
+import time
 from typing import Any, Optional
 
 from core.bus import EventBus
@@ -20,6 +24,29 @@ class PortfolioManager:
         self.paper_account = paper_account
         self.exchange = exchange
         self._last_prices: dict[str, float] = {}
+        self._live_balance_cache: dict = {}
+        self._live_balance_ts: float = 0.0
+
+    async def fetch_live_balance(self, api_key: str, secret: str, password: str) -> dict:
+        """拉取交易所真实钱包余额（供每日对账与 API 复用；close 由调用方负责）。
+
+        引擎侧：self.exchange 已连接，直接 fetch_balance（30s TTL 缓存，
+        异常保留旧缓存——交易所限流时口径不丢失）。
+        self.exchange 为 None（API 轮询路径动态创建 manager 的场景）时返回空 dict。
+
+        Returns:
+            {"total": {asset: qty}, "free": {...}, "used": {...}} 原样余额结构。
+            无 exchange 时返回 {"total": {}}。
+        """
+        if self.exchange is None:
+            return {"total": {}}
+        now = time.time()
+        if now - self._live_balance_ts < 30 and self._live_balance_cache:
+            return self._live_balance_cache
+        bal = await self.exchange.fetch_balance()
+        self._live_balance_cache = bal
+        self._live_balance_ts = now
+        return bal
 
     def update_prices(self, prices: dict[str, float]) -> None:
         self._last_prices.update(prices)
@@ -33,12 +60,15 @@ class PortfolioManager:
         if self.paper and self.paper_account:
             positions = []
             for sym, p in self.paper_account.positions.items():
-                price = self._last_prices.get(sym, p["avg_price"])
+                # M1：成本基准为 FIFO 剩余 lots 的加权平均成本（展示口径），
+                # 与回测引擎 lots 逐笔记账一致，不再用单点 avg_price
+                cost = self.paper_account.avg_price(sym)
+                price = self._last_prices.get(sym, cost)
                 positions.append({
-                    "symbol": sym, "qty": round(p["qty"], 8), "avg_price": round(p["avg_price"], 6),
+                    "symbol": sym, "qty": round(p["qty"], 8), "avg_price": round(cost, 6),
                     "last_price": round(price, 6),
                     "value": round(p["qty"] * price, 4),
-                    "unrealized_pnl": round((price - p["avg_price"]) * p["qty"], 4),
+                    "unrealized_pnl": round((price - cost) * p["qty"], 4),
                 })
             positions_value = sum(x["value"] for x in positions)
             equity = self.paper_account.cash + positions_value

@@ -12,16 +12,30 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/live", tags=["live"])
 
 
+def _finite(v, default: float) -> float:
+    """KV 历史残留 NaN/Inf 防御：非有限值回退默认（与 trading_engine
+    _load_live_config 的 isfinite 口径一致），避免 JSONResponse 序列化
+    非有限值 → 500/非法 JSON。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
+
 class LiveConfigIn(BaseModel):
     exchange: str = "binance"
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
     start_cash: float = Field(default=10000.0, ge=1, allow_inf_nan=False)
+    strategy: str = ""   # 启动策略名；为空 = 保持引擎当前策略
 
 
 class PaperConfigIn(BaseModel):
     start_cash: float = Field(default=10000.0, ge=1, allow_inf_nan=False)
     fee_rate: float = Field(default=0.001, ge=0, le=0.1, allow_inf_nan=False)
+    slippage: float = Field(default=0.0005, ge=0, le=0.1, allow_inf_nan=False)
+    trade_on_open: bool = False   # True=信号在下一根K线开盘成交（与回测一致）
 
 
 class ModeIn(BaseModel):
@@ -38,7 +52,9 @@ async def get_live_config(db: Database = Depends(get_db)):
         "exchange": cfg.get("exchange", "binance"),
         "symbol": cfg.get("symbol", "BTC/USDT"),
         "timeframe": cfg.get("timeframe", "1h"),
-        "start_cash": float(cfg.get("start_cash", 10000.0)),
+        # P2-5：KV 历史残留 NaN/Inf 回退默认（曾 float(nan) 序列化 500/非法 JSON）
+        "start_cash": _finite(cfg.get("start_cash", 10000.0), 10000.0),
+        "strategy": cfg.get("strategy", ""),
     }
 
 
@@ -53,11 +69,14 @@ async def save_live_config(body: LiveConfigIn, db: Database = Depends(get_db)):
 
 @router.get("/paper-config")
 async def get_paper_config(db: Database = Depends(get_db)):
-    """读取模拟模式配置（初始资金 + 手续费率）。"""
+    """读取模拟模式配置（初始资金 + 手续费率 + 滑点 + 成交时点）。"""
     cfg = await db.kv_json_get("paper_trading_config") or {}
+    # P2-5：KV 历史残留 NaN/Inf 回退默认（曾 float(nan) 序列化 500/非法 JSON）
     return {
-        "start_cash": float(cfg.get("start_cash", 10000.0)),
-        "fee_rate": float(cfg.get("fee_rate", 0.001)),
+        "start_cash": _finite(cfg.get("start_cash", 10000.0), 10000.0),
+        "fee_rate": _finite(cfg.get("fee_rate", 0.001), 0.001),
+        "slippage": _finite(cfg.get("slippage", 0.0005), 0.0005),
+        "trade_on_open": bool(cfg.get("trade_on_open", False)),
     }
 
 
@@ -71,10 +90,14 @@ async def set_paper_config(body: PaperConfigIn, db: Database = Depends(get_db), 
         raise HTTPException(status_code=400, detail="初始资金必须大于 0")
     if not math.isfinite(body.fee_rate) or body.fee_rate < 0 or body.fee_rate > 0.1:
         raise HTTPException(status_code=400, detail="手续费率需在 0 ~ 0.1 之间")
+    if not math.isfinite(body.slippage) or body.slippage < 0 or body.slippage > 0.1:
+        raise HTTPException(status_code=400, detail="滑点需在 0 ~ 0.1 之间")
     await db.kv_json_set("paper_trading_config", body.model_dump())
     # 同步到引擎，下次启动生效
     engine.start_cash = body.start_cash
     engine.paper_fee_rate = body.fee_rate
+    engine.paper_slippage = body.slippage
+    engine.trade_on_open = body.trade_on_open
     return {"ok": True, "message": "模拟配置已保存"}
 
 
@@ -109,7 +132,9 @@ async def live_status(db: Database = Depends(get_db), engine=Depends(get_engine)
     paper_cfg = await db.kv_json_get("paper_trading_config") or {}
     # 初始资金按模式取对应配置源（与引擎 _load_live_config 口径一致）：
     # live/simulated 用实盘配置（模拟实盘=验证实盘参数），paper 用模拟配置
-    start_cash = float((cfg if mode != "paper" else paper_cfg).get("start_cash", engine.start_cash))
+    # P2-5：KV 历史残留 NaN/Inf 回退默认（曾 float(nan) 序列化 500/非法 JSON）
+    start_cash = _finite((cfg if mode != "paper" else paper_cfg).get("start_cash", engine.start_cash),
+                         float(engine.start_cash))
     return {
         "mode": mode,
         "running": engine.running,

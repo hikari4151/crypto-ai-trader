@@ -42,6 +42,7 @@ class FactorMineIn(BaseModel):
     horizon: int = 1
     use_gpu: bool = False
     auto_register: bool = True   # 自动把有效因子注册进因子库
+    cross_symbols: str = ""      # 逗号分隔的跨品种验证交易对，如 "ETH/USDT,BNB/USDT"
 
 
 class FactorSynthIn(BaseModel):
@@ -61,7 +62,7 @@ class FactorSynthIn(BaseModel):
 
 async def _load_df(body):
     """按数据源加载 OHLCV DataFrame（async：exchange 源直接 await；demo/csv 的 pandas 解析放后台线程）。"""
-    from backtest.data_loader import generate_demo, load_csv, load_from_exchange
+    from backtest.data_loader import generate_demo, load_csv, load_klines_cached
     if body.data_source == "demo":
         return await asyncio.to_thread(generate_demo, timeframe=body.timeframe)
     if body.data_source == "csv":
@@ -70,16 +71,43 @@ async def _load_df(body):
         from web.deps import resolve_data_path
         return await asyncio.to_thread(load_csv, str(resolve_data_path(body.csv_path)))
     if body.data_source == "exchange":
-        return await load_from_exchange(body.exchange, body.symbol,
+        return await load_klines_cached(body.exchange, body.symbol,
                                         body.timeframe, limit=body.limit)
     raise HTTPException(status_code=400, detail="未知数据源")
 
 
 @router.get("/library")
 async def factor_library():
-    """内置因子库列表（含类别/说明/参数）。"""
-    from factors.library import list_factors
-    return {"factors": [f.meta() for f in list_factors()]}
+    """内置因子库列表（含类别/说明/参数/活跃状态/IC衰变）。"""
+    from factors.library import list_factors, get_factor_status
+    factors = []
+    for f in list_factors():
+        meta = f.meta()
+        status = get_factor_status(f.key)
+        meta["alive"] = status.get("alive", True)
+        meta["ic_decay"] = status.get("ic_decay", {})
+        factors.append(meta)
+    return {"factors": factors}
+
+
+@router.get("/ic-history")
+async def factor_ic_history():
+    """所有已注册因子的滚动 IC 历史队列（IC 衰变监控用）。"""
+    from factors.library import list_factors, get_factor_status
+    rows = []
+    for f in list_factors():
+        status = get_factor_status(f.key)
+        rows.append({
+            "key": f.key,
+            "name": f.name,
+            "alive": status.get("alive", True),
+            "rolling_ic": status.get("ic_decay", {}).get("rolling_ic", []),
+            "rolling_icir": status.get("ic_decay", {}).get("rolling_icir", 0.0),
+            "last_updated": status.get("ic_decay", {}).get("last_updated", None),
+            "auto_offline": status.get("ic_decay", {}).get("auto_offline", False),
+            "auto_online": status.get("ic_decay", {}).get("auto_online", False),
+        })
+    return {"factors": rows}
 
 
 @router.get("/custom")
@@ -274,9 +302,24 @@ async def mine_factors(body: FactorMineIn, engine=Depends(get_engine),
     if not candidates:
         raise HTTPException(status_code=400, detail="AI 未生成合法因子表达式，请重试")
 
+    # 加载跨品种数据（仅 exchange 源支持）
+    cross_data = None
+    cross_symbols_used = []
+    if body.cross_symbols.strip() and body.data_source == "exchange":
+        from backtest.data_loader import load_klines_cached
+        cross_data = {}
+        for sym in [s.strip() for s in body.cross_symbols.split(",") if s.strip()]:
+            try:
+                df_c = await load_klines_cached(body.exchange, sym, body.timeframe, limit=body.limit)
+                if len(df_c) >= 200:
+                    cross_data[sym] = df_c
+                    cross_symbols_used.append(sym)
+            except Exception as e:
+                log.warning("[factors] 跨品种 %s 拉取失败: %s", sym, e)
+
     # AI 验证 + 程序进化变异（纯计算，放后台线程避免冻结事件循环）
     def _mine_pipeline():
-        results = evaluate_mined_factors(candidates, df, h=body.horizon)
+        results = evaluate_mined_factors(candidates, df, h=body.horizon, cross_validate_data=cross_data)
         valid = [r for r in results if r.get("valid")]
         # 程序进化变异：对有效因子做窗口参数扰动，挖掘 IC 提升的变体（纯计算，无额外 AI 调用）
         evolved = evolve_factors(valid, df, h=body.horizon)
@@ -301,12 +344,14 @@ async def mine_factors(body: FactorMineIn, engine=Depends(get_engine),
                 "icir": r.get("icir"),
                 "source": "ai_mined",
                 "evolved_from": r.get("evolved_from", ""),
+                "cross_validation": r.get("cross_validation", "not_configured"),
                 "created_at": _now(),
             }
         await db.kv_json_set("factor_custom", custom)
 
     return {"ok": True, "candidates": evolved, "valid": evolved,
             "n_evolved": n_evolved, "n_ai": len(valid),
+            "cross_validate_symbols": cross_symbols_used,
             "auto_registered": body.auto_register}
 
 
@@ -435,6 +480,90 @@ async def train_model_factor(body: ModelFactorIn, db: Database = Depends(get_db)
     return {"ok": True, "valid": report["valid"], "reason": report["reason"],
             "segments": report["segments"], "decay": report["decay"],
             "meta": result["meta"], "registered": registered}
+
+
+class CrossSectionIn(BaseModel):
+    data_source: str = "local"      # local=本地K线库（推荐，离线） / demo=合成品种池 / exchange=逐品种拉取
+    exchange: str = "binance"
+    symbols: list[str] = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    timeframe: str = "1h"
+    limit: int = Field(default=1500, ge=100, le=_LIMIT_CAP)
+    lookback: int = Field(default=24, ge=5, le=200)   # 因子回看窗口
+    horizon: int = Field(default=1, ge=1, le=30)      # 未来 h 期收益
+
+
+@router.post("/cross-section")
+async def cross_section(body: CrossSectionIn):
+    """横截面因子分析：跨品种相对强弱排名（动量/波动/量能/反转/振幅）。
+
+    数据源：local=本地K线库（数据管理页下载的品种），demo=合成品种池。
+    返回：每因子截面 IC/多空价差/最新排名快照 + 多空累计曲线。
+    """
+    from factors.cross_section import cross_section_report
+
+    symbols = [s.strip() for s in body.symbols if s.strip()]
+    if not 3 <= len(symbols) <= 12:
+        raise HTTPException(status_code=400, detail="品种数须在 3-12 之间（横截面至少 3 个）")
+    if len(set(symbols)) != len(symbols):
+        raise HTTPException(status_code=400, detail="品种列表存在重复")
+
+    if body.data_source == "demo":
+        from backtest.data_loader import generate_demo
+        # 每品种独立 seed/起点：同 seed 会生成完全相同的序列，横截面无差异
+        dfs = {s: await asyncio.to_thread(
+            generate_demo, timeframe=body.timeframe,
+            seed=42 + i, start_price=100.0 + 10.0 * i)
+            for i, s in enumerate(symbols)}
+    elif body.data_source == "exchange":
+        from backtest.data_loader import load_klines_cached
+        dfs = {}
+        missing = []
+        for s in symbols:
+            try:
+                dfs[s] = await load_klines_cached(body.exchange, s, body.timeframe,
+                                                  limit=body.limit)
+            except Exception as e:  # noqa: BLE001
+                log.warning("[cross-section] %s 拉取失败: %s", s, e)
+                missing.append(s)
+        if missing:
+            raise HTTPException(status_code=400,
+                                detail=f"以下品种拉取失败: {', '.join(missing)}")
+    elif body.data_source == "local":
+        from backtest import kline_store
+        dfs, missing = {}, []
+        for s in symbols:
+            df = await asyncio.to_thread(kline_store.load_df, body.exchange, s,
+                                         body.timeframe, limit=body.limit)
+            if len(df) >= 30:
+                dfs[s] = df
+            else:
+                missing.append(s)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"本地K线库无以下品种的 {body.timeframe} 数据: {', '.join(missing)}。"
+                       "请先在「数据管理」页下载（data.binance.vision 批量下载或交易所拉取）")
+    else:
+        raise HTTPException(status_code=400, detail="未知数据源（local/demo/exchange）")
+
+    try:
+        report = await asyncio.to_thread(
+            cross_section_report, dfs, lookback=body.lookback, horizon=body.horizon)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    report["data_source"] = body.data_source
+    report["lookback"] = body.lookback
+    report["horizon"] = body.horizon
+    # demo 模式下时间戳无意义，去掉耗时字符串
+    if body.data_source == "demo":
+        report.pop("spread_curves", None)
+        for f in report["factors"]:
+            f.pop("latest", None)
+        # 合成序列各品种独立同分布，多空数字纯噪声：不加提示会被当成真 alpha
+        report["warning"] = ("演示数据为各品种独立同分布的合成随机游走，不存在真实横截面差异——"
+                             "IC 与多空收益仅用于演示界面，请切「本地K线库」分析真实品种")
+    return report
 
 
 def _ic_of(series, close, h):

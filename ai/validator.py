@@ -16,6 +16,7 @@
 重试时把错误反馈给 AI 要求修正，最多 N 次；仍失败则该输出作废。
 """
 import logging
+import math
 from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
@@ -39,7 +40,9 @@ class ValidationError(Exception):
 # ============ 基础工具 ============
 
 def _is_number(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    # math.isfinite：json.loads 接受 NaN/Infinity 字面量 → 非有限值必须拦截
+    # （NaN 是 float，若放行则范围比较恒 False，NaN 参数绕过 min/max 校验污染策略参数）
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def _require(data: dict, field: str, types: tuple, reason: str) -> list[dict]:
@@ -55,6 +58,8 @@ def _within_range(v: Any, spec: dict) -> Optional[str]:
     t = spec.get("type")
     lo, hi = spec.get("min"), spec.get("max")
     if t == "float" or t == "int":
+        # NaN/Inf 拦截点（P1-7）：_is_number 对非有限值返回 False → 直接走
+        # "应为数值"错误分支，不再进入下方 min/max 比较（NaN 比较恒 False 的漏洞）
         if not _is_number(v):
             return f"应为 {t} 数值，实际 {v!r}"
         if lo is not None and v < lo:
@@ -96,18 +101,23 @@ def _validate_market_analysis(data: dict, snap: dict, ctx: dict = {}) -> list[di
         return errors
 
     regime, bias = data["regime"], data["bias"]
-    conf = float(data["confidence"])
     # 量化规则
     if regime not in ("趋势", "震荡", "拐点", "未知"):
         errors.append({"field": "regime", "reason": f"regime 非法: {regime}"})
     if bias not in ("long", "short", "neutral"):
         errors.append({"field": "bias", "reason": f"bias 非法: {bias}"})
-    if not 0 <= conf <= 1:
-        errors.append({"field": "confidence", "reason": "confidence 必须在 0-1"})
-    if bias == "long" and conf < 0.6:
-        errors.append({"field": "confidence", "reason": "bias=long 要求 confidence>=0.6（趋势确立门槛）"})
-    if bias == "short" and conf < 0.6:
-        errors.append({"field": "confidence", "reason": "bias=short 要求 confidence>=0.6"})
+    conf_raw = data["confidence"]
+    if not _is_number(conf_raw):
+        # bool 是 int 子类且 float(True)=1.0，_is_number 一并拦截（NaN/Inf/布尔）
+        errors.append({"field": "confidence", "reason": "confidence 必须为有限数值（NaN/Infinity/布尔无效）"})
+    else:
+        conf = float(conf_raw)
+        if not 0 <= conf <= 1:
+            errors.append({"field": "confidence", "reason": "confidence 必须在 0-1"})
+        elif bias == "long" and conf < 0.6:
+            errors.append({"field": "confidence", "reason": "bias=long 要求 confidence>=0.6（趋势确立门槛）"})
+        elif bias == "short" and conf < 0.6:
+            errors.append({"field": "confidence", "reason": "bias=short 要求 confidence>=0.6"})
 
     # ---- 方向一致性：程序复算方向（强确认时）与 AI bias 矛盾 → 打回 ----
     program_dir = snap.get("program_direction")
@@ -196,6 +206,38 @@ def _validate_market_analysis(data: dict, snap: dict, ctx: dict = {}) -> list[di
         for msg in validate_trade_plan(trade_plan, bias, ref):
             errors.append({"field": "trade_plan", "reason": msg})
 
+    # ---- 证据结构化（可选，P2）：引用的指标值必须与快照一致 ----
+    # 把"反幻觉"从自由文本启发式升级为可验证：AI 给出 evidence 数组时，
+    # 对引用快照指标名的条目核对数值（2% 相对容差）。缺失证据项不拒绝
+    # （兼容旧模型），引用未知名称不拦截（可能为推导位）。
+    ind = snap.get("indicators") or {}
+    evidence = data.get("evidence")
+    if evidence is not None:
+        if not isinstance(evidence, list):
+            errors.append({"field": "evidence", "reason": "evidence 必须是数组"})
+        elif evidence:
+            for i, ev in enumerate(evidence[:10]):
+                if not isinstance(ev, dict):
+                    errors.append({"field": f"evidence[{i}]", "reason": "证据项必须是对象"})
+                    continue
+                name = ev.get("name")
+                val = ev.get("value")
+                if not isinstance(name, str) or not name:
+                    errors.append({"field": f"evidence[{i}].name", "reason": "证据项缺少 name 字符串"})
+                    continue
+                if not _is_number(val):
+                    errors.append({"field": f"evidence[{i}].value",
+                                   "reason": "evidence 的 value 必须为有限数值（NaN/Infinity/布尔无效）"})
+                    continue
+                # 仅当引用的是快照中真实存在的指标名时核对数值一致
+                if isinstance(ind.get(name), (int, float)) and not isinstance(ind.get(name), bool):
+                    snap_v = float(ind[name])
+                    fv = float(val)
+                    tol = max(abs(snap_v) * 0.02, 1e-6)  # 2% 相对容差 + 绝对下限
+                    if abs(fv - snap_v) > tol:
+                        errors.append({"field": f"evidence[{i}]",
+                                       "reason": f"证据 {name}={fv} 与快照值 {snap_v} 不一致（偏差 {abs(fv-snap_v):.4g}），疑似编造"})
+
     # ---- 可选增强字段（存在即校验、缺失不拒绝——兼容旧模型/旧输出） ----
     for f in ("bull_strength", "bear_strength"):
         v = data.get(f)
@@ -209,18 +251,41 @@ def _validate_market_analysis(data: dict, snap: dict, ctx: dict = {}) -> list[di
         if not isinstance(ol, dict) or not isinstance(ol.get("scenario"), str):
             errors.append({"field": "outlook_24h", "reason": "outlook_24h 需包含 scenario 字符串"})
         if isinstance(ol, dict) and "probability" in ol:
-            try:
-                if not 0 <= float(ol["probability"]) <= 1:
+            p_raw = ol["probability"]
+            if not _is_number(p_raw):
+                # bool 是 int 子类且 float(True)=1.0，一并拦截（NaN/Inf/布尔）
+                errors.append({"field": "outlook_24h", "reason": "outlook_24h.probability 必须为有限数值（NaN/Infinity/布尔无效）"})
+            else:
+                p = float(p_raw)
+                if not 0 <= p <= 1:
                     errors.append({"field": "outlook_24h", "reason": "outlook_24h.probability 必须在 0-1"})
-            except (TypeError, ValueError):
-                errors.append({"field": "outlook_24h", "reason": "outlook_24h.probability 必须为数值"})
     return errors
 
 
-def _validate_strategy(data: dict, param_schema: dict, feature: str) -> list[dict]:
+def _validate_strategy(data: dict, param_schema: dict, feature: str,
+                       ctx: Optional[dict] = None) -> list[dict]:
     errors = []
     for f in ("name", "title", "description", "logic", "params"):
         errors += _require(data, f, (str,) if f != "params" else (dict,), f"缺少 {f}")
+    if errors:
+        return errors
+    # 执行器目录（AI 设计通道）：executor 必须在目录内，且 params 按所选执行器校验。
+    # 不固定单一 schema 是因为"趋势/均值回归"想法此前只能填关键位参数，
+    # 结果全被压成 price_action 一种打法。
+    ctx = ctx or {}
+    allowed = ctx.get("allowed_executors")
+    if allowed:
+        schemas = ctx.get("executor_schemas") or {}
+        executor = data.get("executor")
+        if len(allowed) == 1:
+            # 执行器已由用户指定的策略类型固定：AI 回声写错也不改用户的选择，
+            # 更不该为此烧掉一轮重试、让整次设计失败
+            param_schema = schemas.get(allowed[0]) or param_schema
+        elif not isinstance(executor, str) or executor not in allowed:
+            errors.append({"field": "executor",
+                           "reason": f"executor 必须是 {list(allowed)} 之一，实际 {executor!r}"})
+        else:
+            param_schema = schemas.get(executor) or param_schema
     if errors:
         return errors
     # 参数范围
@@ -282,7 +347,7 @@ def _validate_factor_mine(data: dict) -> list[dict]:
 _VALIDATORS: dict[str, Callable] = {
     "market_analysis": lambda d, ctx: _validate_market_analysis(d, (ctx or {}).get("snap", {}), ctx or {}),
     "param_optimize": lambda d, ctx: _validate_strategy_params_optimize(d, ctx),
-    "strategy_design": lambda d, ctx: _validate_strategy(d, ctx["param_schema"], "strategy_design"),
+    "strategy_design": lambda d, ctx: _validate_strategy(d, ctx["param_schema"], "strategy_design", ctx),
     "strategy_iterate": lambda d, ctx: _validate_strategy(d, ctx["param_schema"], "strategy_iterate"),
     "trade_review": lambda d, ctx: _validate_review(d, ctx.get("summary", {})),
     "factor_mine": lambda d, ctx: _validate_factor_mine(d),

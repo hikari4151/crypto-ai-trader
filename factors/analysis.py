@@ -10,7 +10,7 @@
 """
 import logging
 import math
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -45,6 +45,42 @@ def _pearson(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.corrcoef(a[mask], b[mask])[0, 1])
 
 
+def _newey_west_std(series: np.ndarray, max_lags: int = None) -> float:
+    """Newey-West 异方差自相关一致性标准差估计（Bartlett 核）。
+
+    HAC 估计量：Var_longrun = gamma_0 + 2 * sum_{j=1}^{L} w_j * gamma_j
+    - gamma_j = j 阶自协方差（除 n），w_j = 1 - j/(L+1)（Bartlett 核）
+    - L = max_lags，默认取 N^(1/4) 经验法则
+
+    IC 序列存在正自相关时，样本 std 低估真实波动 → ICIR 被高估。
+    本函数返回自相关修正后的长程标准差：白噪声退化为 ≈ np.std(ddof=1)，
+    正自相关时 > np.std(ddof=1)（对应 Lo 2002 风格的 AC 修正波动率）。
+    """
+    n = len(series)
+    if n <= 1:
+        return 0.0
+    if n < 10:
+        return float(np.std(series, ddof=1))
+    if max_lags is None:
+        max_lags = max(1, int(n ** 0.25))  # N^(1/4) 经验法则
+    demeaned = series - series.mean()
+    # gamma_0 = 方差（除 n）
+    gamma_0 = float(np.sum(demeaned ** 2) / n)
+    if gamma_0 <= 0:
+        return 0.0
+    # 自协方差 + Bartlett 核
+    var_hac = gamma_0
+    n_max_lag = min(max_lags, n - 2)
+    for j in range(1, n_max_lag + 1):
+        gamma_j = float(np.sum(demeaned[j:] * demeaned[:-j]) / n)
+        w = 1.0 - j / (max_lags + 1)  # Bartlett 核
+        var_hac += 2 * w * gamma_j
+    if var_hac <= 0:  # 数值兜底：HAC 方差不可能为负（理论），样本下层正保护
+        var_hac = gamma_0
+    # 无偏调整（n-1），等价白噪声退化为 np.std(ddof=1)
+    return float(np.sqrt(var_hac * n / (n - 1)))
+
+
 def factor_ic(factor_series: pd.Series, close: pd.Series, h: int = 1,
               method: str = "rank") -> dict:
     """单个因子的 IC 分析。
@@ -56,16 +92,27 @@ def factor_ic(factor_series: pd.Series, close: pd.Series, h: int = 1,
     ic = _pearson(f, fwd)
     rank_ic = _spearman(f, fwd)
 
-    # 滑动 IC 序列（滚动 30 期）算 ICIR
+# 滑动 IC 序列（滚动 30 期）算 ICIR
     ic_series = _rolling_ic(factor_series, close, h=h, method=method, window=30)
     ics = ic_series[ic_series.notna()]
-    icir = float(ics.mean() / (ics.std() + 1e-12)) if len(ics) > 5 else 0.0
+    ic_std = float(ics.std()) if len(ics) else 0.0
+    # Newey-West 修正：IC 序列自相关导致样本 std 低估波动 → ICIR 高估。
+    # ICIR 改用 HAC 长程标准差；原始 ic_std 保留用于对比。
+    if len(ics):
+        nw_std = _newey_west_std(ics.to_numpy(dtype=float))
+        ic_std_nw = float(nw_std)
+    else:
+        nw_std = 0.0
+        ic_std_nw = 0.0
+    icir = float(ics.mean() / (ic_std_nw + 1e-12)) if len(ics) > 5 else 0.0
     ic_win = float((ics > 0).mean()) if len(ics) > 0 else 0.0
 
     return {
         "ic": round(ic, 6), "rank_ic": round(rank_ic, 6),
         "icir": round(icir, 6), "ic_mean": round(float(ics.mean()), 6) if len(ics) else 0.0,
-        "ic_std": round(float(ics.std()), 6) if len(ics) else 0.0,
+        "ic_std": round(ic_std, 6) if len(ics) else 0.0,
+        # 新增：Newey-West 修正标准差（自相关调整，白噪声退化为 ≈ ic_std）
+        "ic_std_nw": round(ic_std_nw, 6) if len(ics) else 0.0,
         "ic_win_rate": round(ic_win, 4), "n": int(len(ics)),
     }
 
@@ -106,7 +153,7 @@ def factor_ic_table(mat: pd.DataFrame, close: pd.Series, h: int = 1,
             r = factor_ic(s, close, h=h, method=method)
             r["key"] = col
             rows.append(r)
-        except Exception:  # noqa: BLE001
+        except (ValueError, TypeError):  # IC 分析：值/类型错误属于已知异常类型
             log.warning("[factor] IC 分析失败 %s", col, exc_info=True)
     rows.sort(key=lambda x: abs(x.get("rank_ic", 0.0)), reverse=True)
     return rows
@@ -136,7 +183,7 @@ def factor_group_returns(mat: pd.DataFrame, close: pd.Series, h: int = 1,
             spread = round(float(rets[-1] - rets[0]), 6)
             out[col] = {"groups": groups, "monotonic": monotonic,
                         "spread": spread, "top_minus_bottom": spread}
-        except Exception:  # noqa: BLE001
+        except (ValueError, TypeError):  # 分组收益：值/类型错误属于已知异常类型
             continue
     return out
 
@@ -191,7 +238,7 @@ def find_redundant(mat: pd.DataFrame, threshold: float = 0.85) -> list[dict]:
 
 # 因子安检门槛默认值（AI 挖掘、进化变体、模型因子共用同一套质检标准）
 DEFAULT_GATES = {
-    "min_abs_ic": 0.01,    # |rank_ic| 最低门槛（与 ic_weighted_composite 的 min_abs_ic 同口径）
+    "min_abs_ic": 0.03,    # |rank_ic| 最低门槛（与 ic_weighted_composite 的 min_abs_ic 同口径）
     "min_abs_icir": 0.1,   # |icir| 稳定性门槛：IC 时高时低的因子不可信
     "max_turnover": 0.5,   # 换手上限（信号方向翻转率 0-1，高换手=高交易成本）
     "min_samples": 20,     # 有效样本下限
@@ -226,14 +273,24 @@ def factor_fitness(rank_ic: float, turnover: float, min_turnover: float = 0.125)
 
 def factor_quality_gate(series: pd.Series, close: pd.Series, h: int = 1,
                         gates: Optional[dict] = None,
-                        method: str = "rank") -> dict:
+                        method: str = "rank",
+                        cross_validate_data: Optional[dict] = None,
+                        cross_factor_fn: Optional = None) -> dict:
     """因子安检门：一次性计算 IC/RankIC/ICIR/换手/fitness/分层单调性，并给出 valid 判定。
 
     用途：AI 挖掘因子、进化变体、模型因子上线前的统一质检关卡
     （借鉴 WorldQuant BRAIN 的 IS 检查 + Alphalens 因子评估）。
 
+    cross_validate_data: 可选跨品种验证数据 dict[symbol -> pd.DataFrame] (OHLCV)。
+         需配合 cross_factor_fn (callable(df)->pd.Series) 使用，计算各品种因子序列后
+         做 IC/ICIR 方向一致性检查。
+    cross_factor_fn: 可调用对象，接收一个 OHLCV DataFrame 返回因子 Series。
+         当 cross_validate_data 不为 None 且 cross_factor_fn 不为 None 时启用跨品种验证。
+         当 cross_validate_data 为 None 时行为与旧版完全一致（不新增返回键）。
+
     返回 {valid, reason, ic, rank_ic, icir, ic_win_rate, turnover, fitness,
           spread, monotonic, samples, n_ic}
+          当 cross_validate_data 提供时追加 cross_validation, cross_detail。
     """
     g = {**DEFAULT_GATES, **(gates or {})}
     icr = factor_ic(series, close, h=h, method=method)
@@ -259,7 +316,7 @@ def factor_quality_gate(series: pd.Series, close: pd.Series, h: int = 1,
     if turnover > g["max_turnover"]:
         reason.append(f"换手过高({turnover:.2f}>{g['max_turnover']})")
 
-    return {
+    result = {
         "valid": not reason,
         "reason": "；".join(reason),
         "ic": icr["ic"], "rank_ic": icr["rank_ic"], "icir": icr["icir"],
@@ -269,3 +326,105 @@ def factor_quality_gate(series: pd.Series, close: pd.Series, h: int = 1,
         "spread": spread, "monotonic": monotonic,
         "samples": samples, "n_ic": icr["n"],
     }
+
+    # 跨品种验证（仅当 cross_validate_data 和 cross_factor_fn 均提供时启用）
+    if cross_validate_data is not None and cross_factor_fn is not None:
+        main_ic = icr.get("rank_ic", 0.0)
+        sv_cross = []
+        for sym, cdf in cross_validate_data.items():
+            if len(cdf) < 200:
+                continue
+            try:
+                s_c = cross_factor_fn(cdf).astype(float)
+                g_c = factor_quality_gate(s_c, cdf["close"], h=h, gates=gates, method=method)
+                if g_c["samples"] >= 20:
+                    sv_cross.append({"symbol": sym, "rank_ic": g_c["rank_ic"],
+                                     "icir": g_c["icir"], "samples": g_c["samples"]})
+            except Exception:
+                continue
+        if not sv_cross:
+            result["cross_validation"] = "not_configured"
+            result["cross_detail"] = []
+        else:
+            aligned = [x for x in sv_cross if np.sign(x["rank_ic"]) == np.sign(main_ic) or main_ic == 0.0]
+            if len(aligned) == len(sv_cross) and len(aligned) > 0 and np.mean([x["rank_ic"] for x in aligned]) >= 0.01:
+                result["cross_validation"] = "passed"
+            else:
+                result["cross_validation"] = "failed"
+            result["cross_detail"] = sv_cross
+
+    return result
+
+
+def _consecutive_same_sign(roll: list, negative: bool = True) -> int:
+    """统计序列末尾连续同符号段长度（用于 IC 衰变连续判定）。"""
+    count = 0
+    for v in reversed(roll):
+        if (negative and v < 0) or (not negative and v > 0):
+            count += 1
+        else:
+            break
+    return count
+
+
+def periodic_ic_refresh(data_by_symbol: dict[str, pd.DataFrame],
+                        horizon: int = 1) -> dict:
+    """用各品种最新行情计算所有已注册因子的滚动 IC，按衰变规则自动上线/下线。
+
+    data_by_symbol: {symbol: OHLCV DataFrame}，每只品种须 ≥200 根K线。
+    horizon: 预测期数（默认 1）。
+
+    返回 {"updated": [key,...], "offlined": [key,...], "onlined": [key,...]}
+    """
+    from .library import _BY_KEY, _ALIVE, _IC_DECAY
+
+    offlined, onlined = [], []
+    for key, f in _BY_KEY.items():
+        roll = _IC_DECAY.get(key, {"rolling_ic": []})["rolling_ic"]
+        valid_ics = []
+        for sym, df in data_by_symbol.items():
+            if len(df) < 200:
+                continue
+            try:
+                s = f.series(df).astype(float)
+                if s.notna().sum() < 30:
+                    continue
+                r = factor_ic(s, df["close"], h=horizon, method="rank")
+                valid_ics.append(r["rank_ic"])
+            except Exception as e:
+                log.debug("[factor] IC 刷新 %s 跳过 %s: %s", key, sym, e)
+                continue
+        if not valid_ics:
+            continue
+        roll.append(float(np.mean(valid_ics)))
+        if len(roll) > 30:
+            roll.pop(0)
+        mean_ic = float(np.mean(roll))
+        # icir = 滚动 IC 序列 mean / std（与 factor_ic 同口径：用 Newey-West
+        # 修正标准差，自相关下样本 std 低估波动 → ICIR 高估；短序列退化为
+        # np.std(ddof=1)；样本不足时 icir 置 0.0 阻止无意下线）
+        if len(roll) >= 3:
+            icir = float(np.mean(roll) / (_newey_west_std(np.asarray(roll, dtype=float)) + 1e-12))
+        else:
+            icir = 0.0
+        default_decay = {"rolling_ic": [], "rolling_icir": 0.0, "last_updated": None,
+                         "auto_offline": False, "auto_online": False}
+        decay = _IC_DECAY.get(key, dict(default_decay))
+        decay["rolling_ic"] = roll
+        decay["rolling_icir"] = round(icir, 4)
+        decay["last_updated"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+        _IC_DECAY[key] = decay
+
+        alive = _ALIVE.get(key, True)
+        if alive and mean_ic < -0.01 and icir < -0.1 and _consecutive_same_sign(roll, negative=True) >= 3:
+            _ALIVE[key] = False
+            decay["auto_offline"] = True
+            offlined.append(key)
+            log.warning("[factor] 因子 %s IC 衰变（mean_ic=%.4f icir=%.4f）→ 自动下线", key, mean_ic, icir)
+        elif not alive and mean_ic > 0.01 and _consecutive_same_sign(roll, negative=False) >= 3:
+            _ALIVE[key] = True
+            decay["auto_online"] = True
+            onlined.append(key)
+            log.info("[factor] 因子 %s IC 恢复（mean_ic=%.4f）→ 自动上线", key, mean_ic)
+
+    return {"updated": list(_BY_KEY.keys()), "offlined": offlined, "onlined": onlined}

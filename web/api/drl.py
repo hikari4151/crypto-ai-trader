@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -25,6 +27,10 @@ router = APIRouter(prefix="/api/drl", tags=["drl"])
 MODEL_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "models"
 PROGRESS_LOCK = threading.Lock()
 _TRAINING: dict[int, dict] = {}
+
+# P2-3：DRL 训练类后台任务（/train 线程 + /mine-factor to_thread 共用）并发上限，
+# 超限 429（CPU 密集训练，无上限可无限叠加拖垮服务器）
+_DRL_SEM = threading.Semaphore(2)
 
 
 def _now() -> str:
@@ -58,7 +64,7 @@ class TrainIn(BaseModel):
     vol_penalty: float = 20.0
     cost_scale: float = 1.0
     min_trade_zone: float = 0.05
-    entropy_coef: float = 0.03
+    entropy_coef: float = 0.05
     start_cash: float = 10000.0
     fee_rate: float = 0.001
     seed: int = 42
@@ -74,10 +80,12 @@ class TrainIn(BaseModel):
     state_window: int = 1         # 状态窗口：堆叠最近 N 根K线特征（时序记忆，1=单点）
     factor_expression: str = ""   # 可选：注入因子信号列（因子表达式，如 close/ma(close,30)-1），
                                   # 部署时 rl_adaptive 必须配置同一表达式
-    # ---- 可选奖励塑形（0=关闭；回撤/连亏/趋势一致性，A/B 验证后开启） ----
-    reward_dd_penalty: float = 0.0       # 回撤加深惩罚系数（含 dd>12% 硬约束）
-    reward_losing_penalty: float = 0.0   # 连亏惩罚（3 连亏起二次斜坡）
-    reward_trend_align: float = 0.0      # 趋势一致性奖励（低波动趋势持仓同向加分）
+    # ---- 可选奖励塑形（0=关闭；回撤/连亏/趋势一致性。QUANT_ADVICE 推荐默认开启，
+    #     显式传 0 可关闭） ----
+    reward_dd_penalty: float = 0.5       # 回撤加深惩罚系数（含 dd>12% 硬约束）
+    reward_losing_penalty: float = 0.2   # 连亏惩罚（3 连亏起二次斜坡）
+    reward_trend_align: float = 0.1      # 趋势一致性奖励（低波动趋势持仓同向加分）
+    reward_val_gap_penalty: float = 0.5  # 过拟合衰减：训练收益>验证收益时衰减优势权重
 
 
 def _validate_train(body: TrainIn) -> None:
@@ -151,6 +159,9 @@ async def mine_factor_by_rl(body: FactorMineTrainIn, db: Database = Depends(get_
     df = await _load_df(body)  # async 版：exchange 源直接 await（曾用同步版嵌套 asyncio.run 必崩）
     if len(df) < 500:
         raise HTTPException(status_code=400, detail="RL 因子挖掘需要至少 500 根K线")
+    # P2-3：DRL 训练类任务并发上限 2，超限 429（前端 toast 可读）
+    if not _DRL_SEM.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="DRL 训练任务繁忙：最多 2 个并发训练，请稍后再试")
     try:
         mat = await asyncio.to_thread(compute_factor_matrix, df)
         cfg = {
@@ -164,6 +175,8 @@ async def mine_factor_by_rl(body: FactorMineTrainIn, db: Database = Depends(get_
         result = await asyncio.to_thread(train_factor_miner, df, mat, cfg)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        _DRL_SEM.release()
 
     report = result["report"]
     # 通过 OOS 安检后注册到自定义因子库（source=rl_mined）
@@ -199,15 +212,15 @@ async def mine_factor_by_rl(body: FactorMineTrainIn, db: Database = Depends(get_
 
 async def _load_df(body: TrainIn):
     """按数据源加载 OHLCV DataFrame（async：exchange 源直接 await，避免在事件循环中嵌套 asyncio.run）。"""
-    from backtest.data_loader import generate_demo, load_csv, load_from_exchange
+    from backtest.data_loader import generate_demo, load_csv, load_klines_cached
     if body.data_source == "demo":
-        return generate_demo(timeframe=body.timeframe)
+        return generate_demo(n=body.limit, timeframe=body.timeframe)
     if body.data_source == "csv":
         if not body.csv_path:
             raise HTTPException(status_code=400, detail="CSV 数据源需要 csv_path")
         return load_csv(str(resolve_data_path(body.csv_path)))
     if body.data_source == "exchange":
-        return await load_from_exchange(body.exchange, body.symbol,
+        return await load_klines_cached(body.exchange, body.symbol,
                                         body.timeframe, limit=body.limit)
     raise HTTPException(status_code=400, detail="未知数据源")
 
@@ -226,155 +239,186 @@ def _default_name(body: TrainIn) -> str:
 
 
 @router.post("/train")
-async def start_training(body: TrainIn, db=Depends(get_db)):
+async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_engine)):
     """启动后台 DRL 训练，立即返回 task_id。"""
     _validate_train(body)
+    # P2-3：DRL 训练类任务并发上限 2，超限 429（前端 toast 可读）
+    if not _DRL_SEM.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="DRL 训练任务繁忙：最多 2 个并发训练，请稍后再试")
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     task_id = _next_task_id()
 
     def _worker(db=db):
-        try:
-            # worker 线程无运行中的事件循环，async 版 _load_df 用 asyncio.run 执行
-            df = asyncio.run(_load_df(body))
-            cfg = body.model_dump()
-            cfg["hidden"] = tuple(body.hidden)
-            # 奖励塑形参数（默认 0=关闭，A/B 验证后可调）
-            cfg["reward_dd_penalty"] = body.reward_dd_penalty
-            cfg["reward_losing_penalty"] = body.reward_losing_penalty
-            cfg["reward_trend_align"] = body.reward_trend_align
+        async def _run():
+            try:
+                # worker 自建事件循环（ai.py/backtest.py 同模式）：
+                # 数据加载直接 await；DB 写入经 engine._loop 调度回主循环
+                df = await _load_df(body)
+                cfg = body.model_dump()
+                cfg["hidden"] = tuple(body.hidden)
+                # 奖励塑形参数（QUANT_ADVICE 推荐默认已开启，显式传 0 可关闭）
+                cfg["reward_dd_penalty"] = body.reward_dd_penalty
+                cfg["reward_losing_penalty"] = body.reward_losing_penalty
+                cfg["reward_trend_align"] = body.reward_trend_align
+                cfg["reward_val_gap_penalty"] = body.reward_val_gap_penalty
 
-            def on_progress(info):
-                with PROGRESS_LOCK:
-                    _TRAINING[task_id] = {**_TRAINING.get(task_id, {}), **info,
-                                          "running": True}
-                # 防内存膨胀：任务数超上限时清理过期已完成任务
-                prune_task_cache(_TRAINING, PROGRESS_LOCK)
+                def on_progress(info):
+                    with PROGRESS_LOCK:
+                        _TRAINING[task_id] = {**_TRAINING.get(task_id, {}), **info,
+                                              "running": True}
+                    # 防内存膨胀：任务数超上限时清理过期已完成任务
+                    prune_task_cache(_TRAINING, PROGRESS_LOCK)
 
-            from drl import train_drl
-            result = train_drl(df, cfg, on_progress=on_progress)
+                from drl import train_drl
+                result = train_drl(df, cfg, on_progress=on_progress)
 
-            # 续训模式：保存回原模型路径（覆盖原模型），策略名沿用 rl_{原模型名}
-            # 而非新建模型文件——"在原先模型上改变"。模型名需通过白名单校验。
-            if body.base_model:
-                try:
-                    model_path = _model_path(body.base_model.strip())
-                    if not model_path.exists():
-                        raise FileNotFoundError(f"基础模型不存在: {body.base_model}")
-                    strategy_name = f"rl_{model_path.stem}"
-                except Exception as e:  # noqa: BLE001
-                    log.warning("[drl] 续训基础模型解析失败(%s)，回退新建模型: %s", body.base_model, e)
+                # 续训模式：保存回原模型路径（覆盖原模型），策略名沿用 rl_{原模型名}
+                # 而非新建模型文件——"在原先模型上改变"。模型名需通过白名单校验。
+                if body.base_model:
+                    try:
+                        model_path = _model_path(body.base_model.strip())
+                        if not model_path.exists():
+                            raise FileNotFoundError(f"基础模型不存在: {body.base_model}")
+                        strategy_name = f"rl_{model_path.stem}"
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("[drl] 续训基础模型解析失败(%s)，回退新建模型: %s", body.base_model, e)
+                        model_path = MODEL_DIR / f"{_default_name(body)}.json"
+                        strategy_name = None
+                else:
                     model_path = MODEL_DIR / f"{_default_name(body)}.json"
                     strategy_name = None
-            else:
-                model_path = MODEL_DIR / f"{_default_name(body)}.json"
-                strategy_name = None
 
-            # 记录实际使用的后端（GPU 不可用时自动回退 numpy）
-            used_backend = result.get("backend", "numpy")
-            with PROGRESS_LOCK:
-                _TRAINING[task_id] = {**_TRAINING.get(task_id, {}),
-                                      "backend": used_backend}
-            result["agent"].save(str(model_path))
+                # 记录实际使用的后端（GPU 不可用时自动回退 numpy）
+                used_backend = result.get("backend", "numpy")
+                with PROGRESS_LOCK:
+                    _TRAINING[task_id] = {**_TRAINING.get(task_id, {}),
+                                          "backend": used_backend}
+                result["agent"].save(str(model_path))
 
-            # 附加训练元数据（OOS报告/数据范围），供后续跨行情评估对比泛化
-            try:
-                with open(model_path, "r", encoding="utf-8") as f:
-                    _md = json.load(f)
-                _md["train_meta"] = {
-                    "data_source": body.data_source,
-                    "symbol": body.symbol,
-                    "timeframe": body.timeframe,
-                    "limit": body.limit,
+                # 附加训练元数据（OOS报告/数据范围），供后续跨行情评估对比泛化
+                try:
+                    with open(model_path, "r", encoding="utf-8") as f:
+                        _md = json.load(f)
+                    _md["train_meta"] = {
+                        "data_source": body.data_source,
+                        "symbol": body.symbol,
+                        "timeframe": body.timeframe,
+                        "limit": body.limit,
+                        "episodes": body.episodes,
+                        "best_ret": result["best_ret"],
+                        "best_val_ret": result.get("best_val_ret"),
+                        "oos_report": result.get("oos_report"),
+                    }
+                    # 因子列标准化统计量（训练段拟合）——部署端 rl_adaptive 用同一
+                    # mu/sd 标准化，否则喂原始因子值给模型，状态分布与训练完全不同
+                    _md["factor_expression"] = result.get("factor_expression", "")
+                    _md["factor_mu"] = float(result.get("factor_mu", 0.0))
+                    _md["factor_sd"] = float(result.get("factor_sd", 1.0))
+                    # 训练死区（min_trade_zone）写入模型：部署端调仓死区与训练严格一致
+                    # （曾注册策略固定 buy_zone=0.02，与训练 0.05 不一致 → 部署更激进交易）
+                    _md["min_trade_zone"] = float(getattr(body, "min_trade_zone", 0.05) or 0.05)
+                    with open(model_path, "w", encoding="utf-8") as f:
+                        json.dump(_md, f, ensure_ascii=False)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("[drl] 模型元数据写入失败: %s", e)
+
+                # 注册为可用策略（按 name 注册，engine 可切换）并持久化到 DB
+                from strategies.rl_adaptive import RLAdaptiveStrategy
+                from strategies import register_dynamic
+                if strategy_name is None:
+                    strategy_name = f"rl_{model_path.stem}"
+                _risk_tips = ["训练数据分布外可能失效", "建议定期用新数据重训"]
+                if result.get("deployment_blocked"):
+                    _oos_reason = (result.get("oos_report") or {}).get("reason") or "OOS 硬门拦截"
+                    _risk_tips = [f"疑似过拟合（{_oos_reason}），不建议实盘"] + _risk_tips
+                spec = {
+                    "name": strategy_name,
+                    "title": f"RL自适应·{body.symbol}",
+                    "description": f"深度强化学习训练的策略（{body.episodes}轮，{body.data_source}数据）"
+                                   + ("（续训增强）" if body.base_model else ""),
+                    "logic": "MDP建模+策略梯度训练，按价量/波动率/趋势状态动态调整目标仓位",
+                    "executor": "rl_adaptive",
+                    "param_schema": RLAdaptiveStrategy.param_schema,
+                    "params": {"model_path": str(model_path), "buy_zone": 0.02},
+                    "risk_tips": _risk_tips,
+                    "created_by": "drl_train",
+                    "version": "",
+                    "base_symbol": body.symbol,
+                    "base_timeframe": body.timeframe,
                     "episodes": body.episodes,
-                    "best_ret": result["best_ret"],
-                    "best_val_ret": result.get("best_val_ret"),
-                    "oos_report": result.get("oos_report"),
-                }
-                # 因子列标准化统计量（训练段拟合）——部署端 rl_adaptive 用同一
-                # mu/sd 标准化，否则喂原始因子值给模型，状态分布与训练完全不同
-                _md["factor_expression"] = result.get("factor_expression", "")
-                _md["factor_mu"] = float(result.get("factor_mu", 0.0))
-                _md["factor_sd"] = float(result.get("factor_sd", 1.0))
-                # 训练死区（min_trade_zone）写入模型：部署端调仓死区与训练严格一致
-                # （曾注册策略固定 buy_zone=0.02，与训练 0.05 不一致 → 部署更激进交易）
-                _md["min_trade_zone"] = float(getattr(body, "min_trade_zone", 0.05) or 0.05)
-                with open(model_path, "w", encoding="utf-8") as f:
-                    json.dump(_md, f, ensure_ascii=False)
-            except Exception as e:  # noqa: BLE001
-                log.warning("[drl] 模型元数据写入失败: %s", e)
-
-            # 注册为可用策略（按 name 注册，engine 可切换）并持久化到 DB
-            from strategies.rl_adaptive import RLAdaptiveStrategy
-            from strategies import register_dynamic
-            if strategy_name is None:
-                strategy_name = f"rl_{model_path.stem}"
-            spec = {
-                "name": strategy_name,
-                "title": f"RL自适应·{body.symbol}",
-                "description": f"深度强化学习训练的策略（{body.episodes}轮，{body.data_source}数据）"
-                               + ("（续训增强）" if body.base_model else ""),
-                "logic": "MDP建模+策略梯度训练，按价量/波动率/趋势状态动态调整目标仓位",
-                "executor": "rl_adaptive",
-                "param_schema": RLAdaptiveStrategy.param_schema,
-                "params": {"model_path": str(model_path), "buy_zone": 0.02},
-                "risk_tips": ["训练数据分布外可能失效", "建议定期用新数据重训"],
-                "created_by": "drl_train",
-                "version": "",
-                "base_symbol": body.symbol,
-                "base_timeframe": body.timeframe,
-                "episodes": body.episodes,
-                "model_path": str(model_path),
-            }
-            register_dynamic(strategy_name, spec)
-            # 持久化到 AiStrategy 表（重启后 _load_dynamic_strategies 可恢复，全部策略可见）
-            try:
-                import asyncio
-                import json as _json
-                from core.database import AiStrategy
-                from sqlalchemy import select as _sel
-
-                async def _persist():
-                    async with db.session() as s:
-                        row = (await s.execute(_sel(AiStrategy).where(AiStrategy.name == strategy_name))).scalar_one_or_none()
-                        if row:
-                            row.spec_json = _json.dumps(spec, ensure_ascii=False)
-                        else:
-                            s.add(AiStrategy(name=strategy_name, spec_json=_json.dumps(spec, ensure_ascii=False)))
-                        await s.commit()
-                asyncio.run(_persist())
-                log.info("[drl] 策略 %s 已持久化", strategy_name)
-            except Exception as e:  # noqa: BLE001
-                log.warning("[drl] 策略持久化失败: %s", e)
-
-            with PROGRESS_LOCK:
-                # 长训练 history 降采样：几千/万轮压缩到最多 800 点（仅展示数据，不影响模型质量）
-                _hist = result["history"]
-                _max_points = 800
-                if len(_hist) > _max_points:
-                    _step = len(_hist) / _max_points
-                    _hist = [_hist[int(i * _step)] for i in range(_max_points - 1)] + [_hist[-1]]
-                _TRAINING[task_id] = mark_done({
-                    **_TRAINING.get(task_id, {}),
-                    "running": False, "done": True,
-                    "model_name": model_path.stem,
                     "model_path": str(model_path),
-                    "strategy_name": strategy_name,
-                    "best_ret": result["best_ret"],
-                    "best_val_ret": result.get("best_val_ret"),
-                    "history": _hist,
-                    "history_points": len(result["history"]),
-                    "elapsed_sec": result["elapsed_sec"],
-                    "oos_report": result.get("oos_report"),
-                })
-            prune_task_cache(_TRAINING, PROGRESS_LOCK)
-        except Exception as e:  # noqa: BLE001
-            log.exception("[drl] 训练失败")
-            with PROGRESS_LOCK:
-                _TRAINING[task_id] = mark_done({**_TRAINING.get(task_id, {}),
-                                                "running": False, "error": str(e)})
-            prune_task_cache(_TRAINING, PROGRESS_LOCK)
+                    # 神经引擎的真实 Pine（不可导出时带原因）：曾缺失 →
+                    # 前端给 rl_* 策略套通用模板，图上买卖点与模型无关
+                    "pine_code": result.get("pine_code") or "",
+                    "pine_note": result.get("pine_note") or "",
+                }
+                register_dynamic(strategy_name, spec)
+                # 持久化到 AiStrategy 表（重启后 _load_dynamic_strategies 可恢复，全部策略可见）
+                # P1-1：DB 写入调度回主循环执行（连接池绑定主循环；曾 asyncio.run 跨
+                # loop 复用 → 间歇性 RuntimeError，训练完成但持久化静默丢失）
+                try:
+                    await _persist_strategy(db, strategy_name, spec, engine)
+                    log.info("[drl] 策略 %s 已持久化", strategy_name)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("[drl] 策略持久化失败: %s", e)
 
-    threading.Thread(target=_worker, daemon=True).start()
+                with PROGRESS_LOCK:
+                    # 长训练 history 降采样：几千/万轮压缩到最多 800 点（仅展示数据，不影响模型质量）
+                    _hist = result["history"]
+                    _max_points = 800
+                    if len(_hist) > _max_points:
+                        _step = len(_hist) / _max_points
+                        _hist = [_hist[int(i * _step)] for i in range(_max_points - 1)] + [_hist[-1]]
+                    _TRAINING[task_id] = mark_done({
+                        **_TRAINING.get(task_id, {}),
+                        "running": False, "done": True,
+                        "model_name": model_path.stem,
+                        "model_path": str(model_path),
+                        "strategy_name": strategy_name,
+                        "best_ret": result["best_ret"],
+                        "best_val_ret": result.get("best_val_ret"),
+                        "history": _hist,
+                        "history_points": len(result["history"]),
+                        "elapsed_sec": result["elapsed_sec"],
+                        "oos_report": result.get("oos_report"),
+                        # DRL 神经引擎 Pine 自动交易代码（训练产物）
+                        "pine_code": result.get("pine_code") or "",
+                        "pine_note": result.get("pine_note") or "",
+                    })
+                prune_task_cache(_TRAINING, PROGRESS_LOCK)
+            except Exception as e:  # noqa: BLE001
+                log.exception("[drl] 训练失败")
+                with PROGRESS_LOCK:
+                    _TRAINING[task_id] = mark_done({**_TRAINING.get(task_id, {}),
+                                                    "running": False, "error": str(e)})
+                prune_task_cache(_TRAINING, PROGRESS_LOCK)
+
+        # worker 专属事件循环（ai.py/backtest.py 同模式）：
+        # - 数据加载/DB 调度在其上运行
+        # - finally 中关闭本循环上创建的 AIClient http client（防御性清理，P1-4 配套）
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_run())
+        finally:
+            # P2-3：任务结束释放并发名额（无论成败）
+            _DRL_SEM.release()
+            # P1-4 配套（模块 C 在 ai/client.py 提供 AIClient.close_loop(loop)）：
+            # 关闭并移除本 worker 循环上创建的 httpx client（曾 loop.close() 后
+            # client 残留 _http_clients 且连接未关 → 每任务泄漏；训练路径本身不
+            # 直接调用 AIClient，此处为防御性清理）
+            if engine is not None and getattr(engine, "ai_client", None) is not None:
+                try:
+                    loop.run_until_complete(engine.ai_client.close_loop(loop))
+                except Exception:  # noqa: BLE001
+                    pass
+            loop.close()
+
+    try:
+        threading.Thread(target=_worker, daemon=True).start()
+    except Exception:
+        _DRL_SEM.release()  # 线程启动失败不占名额
+        raise
     with PROGRESS_LOCK:
         _TRAINING[task_id] = {"running": True, "episode": 0, "episodes": body.episodes}
     return {"ok": True, "task_id": task_id}
@@ -434,6 +478,8 @@ async def use_model(name: str, engine=Depends(get_engine)):
     try:
         from strategies.rl_adaptive import RLAdaptiveStrategy
         from strategies import register_dynamic, get_strategy
+        from drl.pine_export import export_pine_from_model
+        pine_code, pine_note = export_pine_from_model(path, name)
         register_dynamic(strategy_name, {
             "name": strategy_name, "title": f"RL自适应·{name}",
             "description": "深度强化学习训练的动态自适应策略",
@@ -443,6 +489,7 @@ async def use_model(name: str, engine=Depends(get_engine)):
             "params": {"model_path": str(path), "buy_zone": 0.02},
             "risk_tips": ["训练分布外可能失效"],
             "created_by": "drl_train", "version": "v1.0",
+            "pine_code": pine_code, "pine_note": pine_note,
         })
         await engine.select_strategy(strategy_name)
         return {"ok": True, "strategy": strategy_name, "model": name}
@@ -459,10 +506,79 @@ async def evaluate_model(name: str):
         raise HTTPException(status_code=404, detail=f"模型 {name} 不存在")
     from drl import ACAgent, evaluate_agent
     from backtest.data_loader import generate_demo
-    # 模型加载 + 完整 episode 评估放后台线程，避免冻结事件循环
-    ev = await asyncio.to_thread(
-        lambda: evaluate_agent(ACAgent.load(str(path)), generate_demo(timeframe="1h")))
-    return {"ok": True, **ev}
+    # 从模型文件读取元数据（architecture §2.3 根键；旧模型缺省兼容），
+    # 按 train_drl 同口径重建 env（state_window/因子列/min_trade_zone）——
+    # 曾缺省构造，state_window>1 或含因子列模型必然维度失配 500
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            _data = json.load(f)
+        cfg = _model_eval_cfg(_data)
+        # 模型加载 + 完整 episode 评估放后台线程，避免冻结事件循环
+        ev = await asyncio.to_thread(
+            lambda: evaluate_agent(ACAgent.load(str(path)), generate_demo(timeframe="1h"), cfg))
+        return {"ok": True, **ev}
+    except Exception as e:  # noqa: BLE001
+        log.exception("[drl] 模型评估失败")
+        raise HTTPException(status_code=400, detail=f"评估失败: {e}")
+
+
+def _model_extra_factors(model_data: dict, df) -> Optional[np.ndarray]:
+    """按模型文件因子元数据在评估行情上标准化因子列（P1-9）。
+
+    无因子表达式 → None（无因子列，旧模型兼容）；长度不符由 TradingEnv 抛
+    ValueError（端点层 catch 并转 400 友好错误）。
+    """
+    expr = str(model_data.get("factor_expression", "") or "").strip()
+    if not expr:
+        return None
+    from factors.mining import FactorExecutor
+    vals = FactorExecutor(expr).eval(df).astype(float).to_numpy(float)
+    mu, sd = float(model_data.get("factor_mu", 0.0)), float(model_data.get("factor_sd", 1.0))
+    vals = (vals - mu) / (sd if sd and sd > 0 else 1.0)
+    return np.nan_to_num(vals, nan=0.0).reshape(-1, 1)
+
+
+def _model_eval_cfg(model_data: dict) -> dict:
+    """模型文件根键（architecture.md §2.3）→ evaluate_agent cfg（缺省兼容）。"""
+    return {
+        "factor_expression": model_data.get("factor_expression", ""),
+        "factor_mu": float(model_data.get("factor_mu", 0.0)),
+        "factor_sd": float(model_data.get("factor_sd", 1.0)),
+        "min_trade_zone": float(model_data.get("min_trade_zone", 0.05) or 0.05),
+        "state_window": int(model_data.get("state_window", 1) or 1),
+        "start_cash": 10000.0, "fee_rate": 0.001,
+    }
+
+
+async def _persist_strategy(db, strategy_name: str, spec: dict, engine) -> None:
+    """持久化 AI 策略到 AiStrategy 表（P1-1：跨 loop DB 写入调度回主循环）。
+
+    SQLAlchemy 异步引擎连接池绑定 lifespan 主循环；worker 线程直接跑 session
+    会跨 loop 复用连接池 → 间歇性 RuntimeError（训练完成但持久化静默丢失）。
+    经 run_coroutine_threadsafe 调度回 engine._loop 执行（同 web/api/ai.py
+    apply_strategy_params / backtest.py _run_on_loop 模式），阻塞等待结果。
+    engine._loop 不可用（CLI/单测环境）时降级为当前循环直接执行并 log warning。
+    """
+    import json as _json
+    from core.database import AiStrategy
+    from sqlalchemy import select as _sel
+
+    async def _persist():
+        async with db.session() as s:
+            row = (await s.execute(_sel(AiStrategy).where(AiStrategy.name == strategy_name))).scalar_one_or_none()
+            if row:
+                row.spec_json = _json.dumps(spec, ensure_ascii=False)
+            else:
+                s.add(AiStrategy(name=strategy_name, spec_json=_json.dumps(spec, ensure_ascii=False)))
+            await s.commit()
+
+    if engine is not None and getattr(engine, "_loop", None) is not None:
+        fut = asyncio.run_coroutine_threadsafe(_persist(), engine._loop)
+        fut.result(timeout=30.0)  # 阻塞等待主循环执行完成；超时/异常由调用方处理
+    else:
+        # 兜底：无主循环引用（CLI/单测环境），当前循环直接执行（与 ai.py 降级风格一致）
+        log.warning("[drl] 无主循环引用，策略持久化降级为当前循环执行")
+        await _persist()
 
 
 class OosEvalIn(BaseModel):
@@ -497,19 +613,25 @@ async def evaluate_oos(name: str, body: OosEvalIn):
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"模型 {name} 不存在")
 
-    from drl import ACAgent, evaluate_agent
+    from drl import ACAgent
     from drl.env import run_episode, TradingEnv
-    from backtest.data_loader import generate_demo, load_csv, load_from_exchange
+    from backtest.data_loader import generate_demo, load_csv, load_klines_cached
 
-    agent = ACAgent.load(str(path))
-
-    # 读取训练元数据（训练时的数据范围与 OOS 报告），用于对比
-    train_meta = {}
+    # 读取模型文件根键元数据（architecture §2.3：state_window/factor_expression/
+    # factor_mu/factor_sd/min_trade_zone；旧模型缺省兼容）
+    model_data = {}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            train_meta = (json.load(f).get("train_meta") or {})
-    except Exception:  # noqa: BLE001
-        pass
+            model_data = json.load(f)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"模型解析失败: {e}")
+    try:
+        agent = ACAgent.load(str(path))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"模型解析失败: {e}")
+
+    # 读取训练元数据（训练时的数据范围与 OOS 报告），用于对比
+    train_meta = model_data.get("train_meta") or {}
 
     # 1) 加载评估行情（demo/csv 的 pandas 解析放后台线程；exchange 源 await）
     try:
@@ -525,7 +647,7 @@ async def evaluate_oos(name: str, body: OosEvalIn):
             since = None
             if body.since:
                 since = datetime.fromisoformat(body.since.replace("Z", "+00:00"))
-            df = await load_from_exchange(body.exchange, body.symbol,
+            df = await load_klines_cached(body.exchange, body.symbol,
                                           body.timeframe, since=since, limit=body.limit)
     except HTTPException:
         raise
@@ -537,10 +659,18 @@ async def evaluate_oos(name: str, body: OosEvalIn):
                             detail=f"评估行情数据过少（仅{len(df)}根），请换更长时间段或更大 limit")
 
     # 2) 确定性评估（贪心策略，无探索噪声；完整 episode 放后台线程）
-    cfg = {"start_cash": 10000.0, "fee_rate": 0.001}
-    env = TradingEnv(df, start_cash=10000.0, fee_rate=0.001,
-                     vol_penalty=0.0, cost_scale=1.0)
-    traj = await asyncio.to_thread(run_episode, env, lambda s: agent.greedy_action(s))
+    # P1-9：按模型元数据同口径重建 env（state_window/因子列/min_trade_zone），
+    # 曾缺省构造 → state_window>1 或含因子列模型必然维度失配 500
+    try:
+        env = TradingEnv(df, start_cash=10000.0, fee_rate=0.001,
+                         vol_penalty=0.0, cost_scale=1.0,
+                         min_trade_zone=float(model_data.get("min_trade_zone", 0.05) or 0.05),
+                         extra_factors=_model_extra_factors(model_data, df),
+                         state_window=int(model_data.get("state_window", 1) or 1))
+        traj = await asyncio.to_thread(run_episode, env, lambda s: agent.greedy_action(s))
+    except Exception as e:  # noqa: BLE001
+        log.exception("[drl] OOS 评估失败")
+        raise HTTPException(status_code=400, detail=f"评估失败: {e}")
     eqs = [info.get("equity") for info in traj.get("infos", []) if info.get("equity") is not None]
     stats = _equity_stats(eqs)
 

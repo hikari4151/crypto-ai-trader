@@ -1,4 +1,5 @@
 """市场状态理解：定时/手动将K线+指标+交易打包为提示词，获取 AI 解读。"""
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -40,30 +41,49 @@ class MarketAnalyst:
           - 交易者方程：trade_plan 三价须 RR≥1.0 且胜率×回报>败率×风险
           - 决策连续性：短时反手 → 强制降置信度上限
         """
-        # 程序方向复算（从 K 线独立计算，不依赖 AI）
+        # 并行执行：程序方向复算（CPU）+ 上一轮分析读取（DB），互不依赖
         program = None
+        prev_analysis = None
         candles = snap.get("candles") or []
         if len(candles) >= 8:
-            try:
+            async def _compute_direction():
                 from .direction_engine import compute_direction
-                program = compute_direction(candles)
-            except Exception as e:  # noqa: BLE001
-                log.warning("[ai] 方向复算失败: %s", e)
-        program_bias = (program or {}).get("direction")
+                return compute_direction(candles)
+            async def _load_prev_analysis():
+                from sqlalchemy import select as _sel
+                from core.database import Analysis as _Analysis
+                async with self._db.session() as s:
+                    row = (await s.execute(
+                        _sel(_Analysis).where(_Analysis.symbol == snap.get("symbol", ""))
+                        .order_by(_Analysis.ts.desc()).limit(1))).scalar_one_or_none()
+                return parse_prev_analysis(row.content) if row is not None else None
 
-        # 决策连续性：查同品种上一轮分析（反手判定在 AI 输出后做）
-        prev_analysis = None
-        try:
-            from sqlalchemy import select as _sel
-            from core.database import Analysis as _Analysis
-            async with self._db.session() as s:
-                row = (await s.execute(
-                    _sel(_Analysis).where(_Analysis.symbol == snap.get("symbol", ""))
-                    .order_by(_Analysis.ts.desc()).limit(1))).scalar_one_or_none()
-            if row is not None:
-                prev_analysis = parse_prev_analysis(row.content)
-        except Exception as e:  # noqa: BLE001
-            log.warning("[ai] 上一轮分析读取失败: %s", e)
+            program, prev_analysis = await asyncio.gather(
+                _compute_direction(),
+                _load_prev_analysis(),
+                return_exceptions=True,
+            )
+            # 方向复算异常降级
+            if isinstance(program, Exception):
+                log.warning("[ai] 方向复算失败: %s", program)
+                program = None
+            # 上一轮读取异常降级
+            if isinstance(prev_analysis, Exception):
+                log.warning("[ai] 上一轮分析读取失败: %s", prev_analysis)
+                prev_analysis = None
+        else:
+            try:
+                from sqlalchemy import select as _sel
+                from core.database import Analysis as _Analysis
+                async with self._db.session() as s:
+                    row = (await s.execute(
+                        _sel(_Analysis).where(_Analysis.symbol == snap.get("symbol", ""))
+                        .order_by(_Analysis.ts.desc()).limit(1))).scalar_one_or_none()
+                if row is not None:
+                    prev_analysis = parse_prev_analysis(row.content)
+            except Exception as e:  # noqa: BLE001
+                log.warning("[ai] 上一轮分析读取失败: %s", e)
+        program_bias = (program or {}).get("direction")
 
         # 提示词阶段：仅携带上一轮 bias 供参考（具体反手规则由校验器在输出后强制）
         continuity_hint = None
@@ -113,10 +133,11 @@ class MarketAnalyst:
         await self._bus.publish(Event(EventType.AI_ANALYSIS, {"snapshot": snap, "result": result}, source="ai.market_analyst"))
         return result
 
-    async def safe_analyze(self, snap: dict, position: float = 0.0) -> Optional[dict]:
+    async def safe_analyze(self, snap: dict, position: float = 0.0,
+                           recent_trades: Optional[list] = None) -> Optional[dict]:
         """容错版：AI 未配置或失败时返回 None，由调用方降级处理。"""
         try:
-            return await self.analyze(snap, position, source="auto")
+            return await self.analyze(snap, position, recent_trades, source="auto")
         except AINotConfigured as e:
             log.warning("[ai] %s", e)
             return None

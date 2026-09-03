@@ -1,4 +1,9 @@
-"""关键位 + 价格行为策略：支撑/阻力突破或回调入场，量能与 RSI 过滤，止损止盈参考关键位。"""
+"""关键位 + 价格行为策略：支撑/阻力突破或回调入场，量能与 RSI 过滤，止损止盈参考关键位。
+
+关键位口径（摆动窗口/触碰次数/回看长度）由引擎常量固定
+（indicators.technical.SR_WINDOW / SR_MIN_TOUCHES / SR_LOOKBACK），
+不是策略参数——策略参数表里只保留 on_candle 真正读取的旋钮。
+"""
 from typing import Any, Optional
 
 from .base import Signal, Strategy
@@ -10,12 +15,9 @@ class PriceActionStrategy(Strategy):
                    "量能确认 + RSI 过滤，止损止盈参考关键位")
     default_params = {
         "mode": "breakout",
-        "sr_window": 10,
-        "min_touches": 2,
         "breakout_pct": 0.001,
         "volume_confirm": 1.2,
         "rsi_ob": 72,
-        "rsi_os": 28,
         "stop_loss_pct": 0.02,
         "take_profit_pct": 0.04,
         "use_sr_stop": True,
@@ -23,12 +25,9 @@ class PriceActionStrategy(Strategy):
     }
     param_schema = {
         "mode": {"type": "str", "choices": ["breakout", "pullback"], "label": "入场模式(突破/回调)"},
-        "sr_window": {"type": "int", "min": 5, "max": 60, "label": "摆动高低点窗口"},
-        "min_touches": {"type": "int", "min": 1, "max": 8, "label": "关键位最少触碰次数"},
         "breakout_pct": {"type": "float", "min": 0.0001, "max": 0.02, "label": "突破确认幅度"},
         "volume_confirm": {"type": "float", "min": 0.5, "max": 3.0, "label": "放量确认倍数"},
         "rsi_ob": {"type": "float", "min": 60, "max": 90, "label": "RSI超买阈值"},
-        "rsi_os": {"type": "float", "min": 10, "max": 40, "label": "RSI超卖阈值"},
         "stop_loss_pct": {"type": "float", "min": 0.001, "max": 0.1, "label": "止损比例"},
         "take_profit_pct": {"type": "float", "min": 0.001, "max": 0.3, "label": "止盈比例"},
         "use_sr_stop": {"type": "bool", "label": "止损参考关键位"},
@@ -103,3 +102,28 @@ class PriceActionStrategy(Strategy):
             self._entry = price
         else:
             self._entry = None
+
+    def _stop_level(self, ctx: dict[str, Any]) -> Optional[float]:
+        """当前持仓的止损价位（与 on_candle 的止损计算同口径）。"""
+        p = self.params
+        if not (ctx.get("position", 0) > 0 and self._entry):
+            return None
+        price = ctx["price"]
+        ind = ctx.get("indicators") or {}
+        sr = ind.get("sr") or {}
+        if p.get("use_sr_stop") and sr.get("support"):
+            sr_dist = (price - sr["support"]) / price
+            stop_pct = min(p["stop_loss_pct"], max(0.001, sr_dist * 0.5))
+        else:
+            stop_pct = p["stop_loss_pct"]
+        return self._entry * (1.0 - float(stop_pct))
+
+    def protective_levels(self, ctx: dict[str, Any]) -> Optional[dict]:
+        """持仓中：返回触价止损位（含关键位参考）与止盈位。"""
+        p = self.params
+        if ctx.get("position", 0) > 0 and self._entry:
+            stop = self._stop_level(ctx)
+            if stop is None:
+                return None
+            return {"stop": stop, "take_profit": self._entry * (1.0 + float(p["take_profit_pct"]))}
+        return None

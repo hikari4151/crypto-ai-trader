@@ -1,15 +1,32 @@
-"""风控防线回归测试：NaN/Infinity 拒绝 + 平仓豁免冷却 + 止损放行。
+"""风控防线回归测试：NaN/Infinity 拒绝 + 平仓豁免冷却 + 止损放行 + 每日盈亏跨日。
 
 覆盖 2026-08-13 修复：JSON NaN/Infinity 绕过钳制（风控被拆解）、
 冷却规则拦截平仓/止损（亏损不可控）、单笔亏损检查拦截止损单。
+覆盖 2026-08-28 修复：每日盈亏只在有成交时归档 + 引擎自持副本 → 每日亏损
+熔断触发后跨日不解封（次日仍被昨日亏损拦住，再也开不了仓）。
 """
 import asyncio
 import math
+import time as _time
 
 import pytest
 
+import engine.risk as risk_mod
 from engine.risk import DEFAULT_RULES, RiskManager
 from strategies.base import Signal
+
+
+class FakeClock:
+    """替换 engine.risk 的 time 引用：strftime 可控，time 走真实时钟。"""
+
+    def __init__(self, today: str) -> None:
+        self.today = today
+
+    def strftime(self, fmt: str) -> str:
+        return self.today if fmt == "%Y-%m-%d" else _time.strftime(fmt)
+
+    def time(self) -> float:
+        return _time.time()
 
 
 class FakeDB:
@@ -121,3 +138,58 @@ def test_daily_loss_blocks_open_but_allows_close():
     ok_open, ok_close = asyncio.run(run())
     assert not ok_open
     assert ok_close
+
+
+def test_daily_loss_breaker_clears_on_new_day(monkeypatch):
+    """每日亏损熔断跨日自动解除：get_daily_pnl 必须自己归档归零。
+
+    曾两处失效叠加：归档只发生在 add_daily_pnl（有成交时），且引擎把值复制
+    成 self._daily_pnl 只增不减——隔天后 check() 仍拿昨日亏损，熔断到重启前
+    再也不放行新单。
+    """
+    clock = FakeClock("2026-08-28")
+    monkeypatch.setattr(risk_mod, "time", clock)
+    db = FakeDB()
+    rm = RiskManager(db)
+
+    async def run():
+        await rm.update_rules({"max_daily_loss_usd": 200.0})
+        await rm.record_trade(-250.0, "止损")
+        assert await rm.get_daily_pnl() == pytest.approx(-250.0)
+
+        blocked, why = await rm.check(
+            Signal("BTC/USDT", "buy", qty=0.1), 100.0, 10000.0, 0.0,
+            await rm.get_daily_pnl(), [], None)
+        assert not blocked and "每日最大亏损" in why
+
+        # 日历跨日且当天尚无成交：仍应归零（归档只在 add_daily_pnl 做时此处为 -250）
+        clock.today = "2026-08-29"
+        assert await rm.get_daily_pnl() == 0.0
+        # 昨日累计归档，不丢历史
+        assert db.kv["daily_pnl_2026-08-28"] == "2026-08-28|-250.0000"
+
+        allowed, why2 = await rm.check(
+            Signal("BTC/USDT", "buy", qty=0.1), 100.0, 10000.0, 0.0,
+            await rm.get_daily_pnl(), [], None)
+        return blocked, allowed, why2
+
+    blocked, allowed, why2 = asyncio.run(run())
+    assert not blocked
+    assert allowed, f"跨日后应放行新开仓，实际: {why2}"
+
+
+def test_daily_pnl_accumulates_after_rollover(monkeypatch):
+    """跨日归零后新交易继续按今日累计（归档不吞掉同一笔 pnl）。"""
+    clock = FakeClock("2026-08-28")
+    monkeypatch.setattr(risk_mod, "time", clock)
+    db = FakeDB()
+    rm = RiskManager(db)
+
+    async def run():
+        await rm.record_trade(-30.0, "止损")
+        clock.today = "2026-08-29"
+        await rm.record_trade(-40.0, "止损")
+        return await rm.get_daily_pnl()
+
+    assert asyncio.run(run()) == pytest.approx(-40.0)
+    assert db.kv["daily_pnl_2026-08-29"] == "2026-08-29|-40.0000"

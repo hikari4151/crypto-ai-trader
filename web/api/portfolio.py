@@ -117,9 +117,13 @@ async def _do_fetch(mgr, api_key: str, secret: str, password: str) -> dict:
     """连接交易所并拉取钱包。close 由调用方负责。
 
     跳过 load_markets：钱包拉取不需要完整市场信息，显著减少耗时与失败点。
+    通过 PortfolioManager.fetch_live_balance 复用引擎侧同一余额口径。
     """
+    from engine.portfolio import PortfolioManager
     await mgr.start(api_key, secret, password, load_markets=False)
-    bal = await mgr.fetch_balance()
+    # 用临时 PortfolioManager 包装 mgr，复用 fetch_live_balance 的缓存与异常处理
+    pm = PortfolioManager(None, None, False, None, mgr)
+    bal = await pm.fetch_live_balance(api_key, secret, password)
     positions = []
     cash = 0.0
     positions_value = 0.0
@@ -129,12 +133,9 @@ async def _do_fetch(mgr, api_key: str, secret: str, password: str) -> dict:
             continue
         qty = float(qty)
         if asset == "USDT":
+            # 计价币：只计现金，不进持仓（对齐 engine/portfolio.py:56-59 口径；
+            # 曾同时追加 positions 条目并计入 positions_value → equity 双计虚高一份 USDT）
             cash += qty
-            positions.append({
-                "symbol": "USDT", "qty": round(qty, 8), "avg_price": 1.0,
-                "last_price": 1.0, "value": round(qty, 4), "unrealized_pnl": 0.0,
-            })
-            positions_value += qty
             continue
         symbol = f"{asset}/USDT"
         price = await _safe_price(mgr, symbol)

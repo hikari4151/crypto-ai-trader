@@ -26,6 +26,7 @@ data/models/
 data/*.png
 data/shots/
 data/*.csv
+data/*.json
 data/backtest_*.json
 
 # 开发调试脚本（data/ 下的 check_/test_/shot_/diag_/e2e_ 脚本按需清理后提交）
@@ -44,6 +45,16 @@ data/dom_*.txt
 scripts/dev/
 tests/check_*.py
 tests/e2e_*.py
+
+# 并行开发 worktree 残留（data/_wt* 为完整项目副本，误提交会造成体积污染）
+data/_wt*/
+
+# 测试报告产物
+reports/
+
+# DSH 记忆技能仓库（独立 git 仓库，不随项目提交）
+.dsh-memory-setup/
+dsh-memory-setup/
 
 # 备份文件
 *.bak

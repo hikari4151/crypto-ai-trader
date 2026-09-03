@@ -21,6 +21,10 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
+# 判定所需的最小样本外交易样本数：低于此值认为统计证据不足，
+# 一律判“无法判定”而非“严重过拟合”（避免误拦低频 AI 设计策略）。
+_MIN_TRADES_FOR_VERDICT = 3
+
 
 @dataclass
 class OverfitConfig:
@@ -64,6 +68,12 @@ class OverfitReport:
     oos_win_rate: float = 0.0
     stability: float = 0.0          # 各折 OOS 收益同向比例
     n_folds: int = 0
+    # 统计显著性（多重测试校正，Bailey & López de Prado）
+    dsr: float | None = None        # 缩水夏普比率（0-1，≥0.95 显著）
+    dsr_trials: int = 1             # DSR 校正用的搜索配置数
+    sharpe_ci: list[float] | None = None  # Bootstrap 年化夏普 95% CI [low, high]
+    ret_ci: list[float] | None = None     # Bootstrap 总收益 95% CI
+    p_sharpe_pos: float | None = None     # Bootstrap P(夏普>0)
 
 
 def _run_backtest_on(df: pd.DataFrame, cfg: OverfitConfig,
@@ -75,7 +85,7 @@ def _run_backtest_on(df: pd.DataFrame, cfg: OverfitConfig,
                         strategy_name=strategy_name, strategy_params=strategy_params,
                         start_cash=cfg.start_cash, fee_rate=cfg.fee_rate,
                         slippage=cfg.slippage)
-    result = run_backtest_fast(df, bc)
+    result = run_backtest_fast(df, bc, bootstrap=False)  # P2-13 统计显著性由 detect_overfit 自身计算
     return result["metrics"]
 
 
@@ -152,6 +162,36 @@ def detect_overfit(df: pd.DataFrame, strategy_name: str, strategy_params: dict,
         # 兼容旧路径：walk-forward 邻域法
         report.pbo = round(_estimate_pbo(df, cfg, strategy_name, strategy_params,
                                          neighbor_params, report.folds), 4)
+
+    # ---- 3.5 统计显著性：DSR（多重测试校正）+ Bootstrap 夏普 CI ----
+    # DSR 校正的"试验数"= 本报告评估的参数候选数（当前参数 + PBO 邻域），
+    # 反映"从这么多个候选里挑最优"引入的选择偏差。
+    if neighbor_params:
+        _n_candidates = 1 + len(neighbor_params)
+    elif cfg.cscv_splits >= 4:
+        _n_candidates = 9  # CSCV 内部默认候选 = 当前参数 + 8 邻域
+    else:
+        _n_candidates = 1
+    try:
+        from .fast_engine import run_backtest_fast
+        from .engine import BacktestConfig
+        from .metrics import PERIODS_PER_YEAR, bootstrap_sharpe_ci, deflated_sharpe_ratio, equity_returns
+        bc = BacktestConfig(symbol=cfg.symbol, timeframe=cfg.timeframe,
+                            strategy_name=strategy_name, strategy_params=strategy_params,
+                            start_cash=cfg.start_cash, fee_rate=cfg.fee_rate,
+                            slippage=cfg.slippage)
+        full = run_backtest_fast(df, bc, bootstrap=False)  # P2-13 同 OOS 口径
+        rets = equity_returns(full.get("equity_curve") or [])
+        d = deflated_sharpe_ratio(rets, trials=max(1, _n_candidates))
+        report.dsr = d["dsr"]
+        report.dsr_trials = d["trials"]
+        ppy = PERIODS_PER_YEAR.get(cfg.timeframe, 8760)
+        b = bootstrap_sharpe_ci(rets, n_boot=1000, periods_per_year=ppy)
+        report.sharpe_ci = b["sharpe_ci"]
+        report.ret_ci = b["ret_ci"]
+        report.p_sharpe_pos = b["p_sharpe_pos"]
+    except Exception as e:  # noqa: BLE001
+        log.warning("[overfit] DSR/Bootstrap 计算失败（跳过）: %s", e)
 
     # ---- 4. 综合判定 ----
     report = _score_and_verdict(report)
@@ -339,7 +379,7 @@ def _score_and_verdict(report: OverfitReport) -> OverfitReport:
         flags.append({"level": "high", "msg": f"PBO 过拟合概率 {report.pbo:.0%}，所选参数很可能只在样本内有效"})
 
     # 交易数（低频策略不因此否决；样本外完全无交易 → 无法判定而非过拟合证据）
-    avg_trades = float(np.mean([f.oos_trades for f in report.folds]))
+    avg_trades = float(np.mean([f.oos_trades for f in report.folds])) if report.folds else 0.0
     if avg_trades >= 3:
         score += 10
     elif avg_trades > 0:
@@ -349,10 +389,38 @@ def _score_and_verdict(report: OverfitReport) -> OverfitReport:
         # 无交易：策略可能不适应验证段的数据形态，但不是"过拟合"的直接证据
         flags.append({"level": "info", "msg": "样本外没有产生交易，检测证据不足，请补充不同行情数据后重测"})
 
+    # 统计显著性（DSR + Bootstrap；仅作 ±10 分微调，OOS/PBO 仍主导判定）
+    if report.dsr is not None:
+        if report.dsr >= 0.95:
+            score += 8
+            flags.append({"level": "info",
+                          "msg": f"缩水夏普 DSR={report.dsr:.2f}（{report.dsr_trials} 个候选多重测试校正后仍显著）"})
+        elif report.dsr < 0.5:
+            score -= 6
+            flags.append({"level": "warn",
+                          "msg": f"缩水夏普 DSR={report.dsr:.2f}，扣除 {report.dsr_trials} 次搜索的运气成分后收益不显著"})
+    if report.sharpe_ci is not None:
+        if report.sharpe_ci[0] > 0:
+            score += 2  # Bootstrap 夏普 95% CI 下界为正
+        elif report.sharpe_ci[1] < 0:
+            score -= 4
+            flags.append({"level": "warn",
+                          "msg": f"Bootstrap 夏普 95% CI [{report.sharpe_ci[0]:.2f}, {report.sharpe_ci[1]:.2f}] 全为负"})
+
     report.score = round(max(0.0, min(100.0, score)), 1)
-    if avg_trades == 0 and report.oos_ret == 0.0:
-        # 无交易且 OOS 收益为 0（未发生任何成交）→ 无法判定，不妄下结论
+    # 判定（含证据充足性门）：只有当样本外确实产生足够交易时才谈“过拟合”。
+    # 曾仅当 avg_trades==0 且 oos_ret==0.0 时判“无法判定”；但 AI 设计策略在
+    # 验证段常只产生零星几笔交易，任一折落一笔微小负收益就让 oos_ret 略非 0，
+    # 从而被误判“严重过拟合”→ 拒绝注册 → 无法应用、不入库。
+    # 交易样本不足（< _MIN_TRADES_FOR_VERDICT）时，OOS 收益是噪声而非证据，
+    # 统一降级为“无法判定”。它不拦注册（数据不够不该怪策略），
+    # 但也不等于通过：自动接管实盘的通道把它当作"未证明可用"直接拒绝。
+    # 交易充分且 OOS 转负 / PBO 高 → 仍判“严重过拟合”拦截。
+    if avg_trades < _MIN_TRADES_FOR_VERDICT:
         report.verdict = "无法判定"
+        flags.append({"level": "warn",
+                      "msg": f"样本外平均交易仅 {avg_trades:.1f} 笔，证据不足，判定为无法判定"
+                             "（可注册，但禁止自动接管实盘）"})
     elif report.score >= 60:
         report.verdict = "通过"
     elif report.score >= 40:

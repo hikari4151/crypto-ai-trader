@@ -6,6 +6,7 @@
 - 后端聚合：前端不直连交易所，避免跨域与密钥暴露
 - TTL 缓存：tickers 是全量拉取（请求重），缓存 3 秒让前端可秒级轮询而不触发限频
 """
+import asyncio
 import logging
 import threading
 import time
@@ -89,19 +90,51 @@ def _get_client() -> httpx.AsyncClient:
         return _client
 
 
+async def close_client() -> None:
+    """关闭全局行情 HTTP 客户端（lifespan 退出时调用；幂等）。
+
+    曾遗漏清理：进程生命周期内 _client 从不关闭，优雅退出时连接泄漏/告警。
+    锁内只做取出与置 None（不跨 await 持锁），aclose 在锁外执行——
+    避免 shutdown 时阻塞等待锁的请求线程。
+    """
+    global _client
+    with _client_lock:
+        c, _client = _client, None
+    if c is not None:
+        try:
+            await c.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def _fetch_json(url: str, params: Optional[dict] = None) -> Any:
-    try:
-        client = _get_client()
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        return r.json()
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"数据源 {e.response.status_code}: {e.response.text[:200]}")
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"数据源不可达: {e}")
-    except Exception as e:  # noqa: BLE001
-        log.exception("[market] fetch 失败 %s", url)
-        raise HTTPException(status_code=502, detail=f"行情获取失败: {e}")
+    """拉取 JSON；对 429/5xx 做指数退避重试（原始 1 次 + 重试 2 次，0.5s/1s）。
+
+    P2-6：Binance 等数据源限流/5xx 时不再直接 502——退避后重试；
+    重试耗尽后 raise_for_status 抛错，外部语义（HTTPException 502 + detail）不变。
+    """
+    for attempt in range(3):
+        try:
+            client = _get_client()
+            r = await client.get(url, params=params)
+            if r.status_code in (429,) or r.status_code >= 500:
+                if attempt < 2:
+                    wait = 0.5 * (2 ** attempt)  # 指数退避：0.5s → 1s
+                    log.warning("[market] %s %s 临时错误(第%d/2次)，%.1fs 后重试",
+                                r.status_code, url, attempt + 1, wait)
+                    await asyncio.sleep(wait)
+                    continue
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail=f"数据源 {e.response.status_code}: {e.response.text[:200]}")
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"数据源不可达: {e}")
+        except Exception as e:  # noqa: BLE001
+            log.exception("[market] fetch 失败 %s", url)
+            raise HTTPException(status_code=502, detail=f"行情获取失败: {e}")
+    # 防御性兜底（正常路径由 raise_for_status 抛错转 502，不可达）
+    raise HTTPException(status_code=502, detail=f"数据源重试后仍失败: {url}")
 
 
 def _norm_symbol(exchange: str, symbol: str) -> str:
@@ -168,11 +201,33 @@ async def klines(exchange: str = "binance", symbol: str = "BTC/USDT",
     nsym = _norm_symbol(exchange, symbol)
     cache_key = f"kl|{exchange}|{nsym}|{timeframe}|{limit}"
     rows = _cache_get(cache_key, _TTL_KLINES)
+    fallback_from = None
     if rows is None:
-        rows = await _klines(exchange, nsym, timeframe, limit)
+        try:
+            rows = await _klines(exchange, nsym, timeframe, limit)
+        except HTTPException as e:
+            # 故障切换：主数据源不可达/限流/5xx 时按其余交易所顺序降级
+            # （binance.vision 国内直连，其余走本地代理；symbol/周期已按所归一化）
+            log.warning("[market] %s klines 失败(%s)，尝试降级其他交易所", exchange, e.detail)
+            for alt in SUPPORTED:
+                if alt == exchange:
+                    continue
+                if isinstance(_TIME_MAP[alt], dict) and timeframe not in _TIME_MAP[alt]:
+                    continue
+                try:
+                    alt_sym = _norm_symbol(alt, symbol)
+                    rows = await _klines(alt, alt_sym, timeframe, limit)
+                    fallback_from = f"{exchange}→{alt}"
+                    log.info("[market] klines 已降级: %s %s %s", fallback_from, symbol, timeframe)
+                    break
+                except HTTPException:
+                    continue
+            if rows is None:
+                raise HTTPException(status_code=502, detail=f"全部数据源({', '.join(SUPPORTED)})均不可达")
         _cache_set(cache_key, rows, _TTL_KLINES)
     return {"exchange": exchange, "symbol": symbol, "timeframe": timeframe,
-            "klines": rows, "updated_at": int(time.time() * 1000)}
+            "klines": rows, "updated_at": int(time.time() * 1000),
+            "fallback_from": fallback_from}
 
 
 # ---------- Ticker / 涨跌幅榜 ----------

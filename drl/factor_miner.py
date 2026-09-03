@@ -16,6 +16,7 @@
 - report: OOS 段安检报告（valid/rank_ic/icir/turnover/fitness）
 """
 import logging
+import random
 import time
 from typing import Any, Callable, Optional
 
@@ -63,7 +64,8 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
     ppo_epochs = max(1, int(cfg.get("ppo_epochs", 4)))
     mini_batch_size = max(8, int(cfg.get("mini_batch_size", 64)))
     hidden = tuple(cfg.get("hidden", [64, 64]))
-    seed = int(cfg.get("seed", 42))
+    seed_cfg = cfg.get("seed", 42)
+    seed = int(seed_cfg) if seed_cfg is not None else random.randint(0, 99999)
     corr_threshold = float(cfg.get("corr_threshold", 0.85))
     train_ratio = float(cfg.get("train_ratio", 0.6))
     val_ratio = float(cfg.get("val_ratio", 0.2))
@@ -95,30 +97,55 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
     history: list[dict] = []
     best_fitness = -1e9
     best_agent: Optional[ACAgent] = None
-    for ep in range(1, episodes + 1):
-        trajs = [agent.collect_episode(env) for _ in range(n_episodes)]
-        states = np.concatenate([t["states"] for t in trajs])
-        actions = np.concatenate([t["actions"] for t in trajs])
-        rewards = np.concatenate([t["rewards"] for t in trajs])
-        old_log_probs = np.concatenate([t["old_log_probs"] for t in trajs])
-        stats = agent.train_batch(states, actions, rewards, old_log_probs,
-                                  ppo_epochs=ppo_epochs,
-                                  mini_batch_size=min(mini_batch_size, len(states)))
-        # 本批平均 fitness（从 info 汇总：collect_episode 不返回 info，
-        # 用验证段确定性评估当前策略的选择质量）
-        fit = _greedy_fitness(agent, env)
-        if fit > best_fitness:
-            best_fitness = fit
-            best_agent = ACAgent.from_dict(agent.to_dict())
-        row = {
-            "episode": ep,
-            "fitness": round(fit, 5),
-            "best_fitness": round(max(best_fitness, 0.0), 5),
-            "policy_loss": round(stats["policy_loss"], 6),
-            "value_loss": round(stats["value_loss"], 6),
-            "steps": int(np.mean([t["steps"] for t in trajs])),
-        }
-        history.append(row)
+    # 并行收集：预计算一次 IC/ICIR 矩阵（避免每个 worker 重复 84ms 的 _rolling_ic）
+    from factors.analysis import _rolling_ic
+    _ics = pd.DataFrame({c: _rolling_ic(mat[c], close, h=h, method="rank", window=ic_window)
+                          for c in mat.columns}, index=mat.index).shift(h).ffill()
+    _icir = _ics.rolling(ic_window * 5, min_periods=ic_window * 2).mean() / (
+        _ics.rolling(ic_window * 5, min_periods=ic_window * 2).std() + 1e-12)
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _collect_one(args: tuple) -> dict:
+        ep_i, worker_i = args
+        local_env = FactorMiningEnv(mat, close, h=h, ic_window=ic_window,
+                                    max_steps=max_steps,
+                                    train_ratio=train_ratio, val_ratio=val_ratio,
+                                    corr_threshold=corr_threshold,
+                                    seed=seed + ep_i * 1000 + worker_i,
+                                    precomputed_ics=_ics, precomputed_icir=_icir)
+        # D1：独立 rng 采样（绝不共享 agent._rng，保证多线程可复现）
+        local_rng = np.random.default_rng(seed + ep_i * 2000 + worker_i)
+        return agent.collect_episode(local_env, rng=local_rng)
+
+    with ThreadPoolExecutor(max_workers=min(n_episodes, 4)) as pool:
+        for ep in range(1, episodes + 1):
+            trajs = list(pool.map(_collect_one, [(ep, i) for i in range(n_episodes)]))
+            states = np.concatenate([t["states"] for t in trajs])
+            actions = np.concatenate([t["actions"] for t in trajs])
+            rewards = np.concatenate([t["rewards"] for t in trajs])
+            old_log_probs = np.concatenate([t["old_log_probs"] for t in trajs])
+            stats = agent.train_batch(states, actions, rewards, old_log_probs,
+                                      ppo_epochs=ppo_epochs,
+                                      mini_batch_size=min(mini_batch_size, len(states)),
+                                      # P2-8：GAE 按 episode 分段（段末 next_val=0、gae 归零），
+                                      # 消除拼接轨迹边界处的优势串扰
+                                      segment_lengths=[t["steps"] for t in trajs],
+                                      actor_grad_clip=float(cfg.get("actor_grad_clip", 1.0)))
+            # 本批平均 fitness（从 info 汇总：collect_episode 不返回 info，
+            # 用验证段确定性评估当前策略的选择质量）
+            fit = _greedy_fitness(agent, env)
+            if fit > best_fitness:
+                best_fitness = fit
+                best_agent = ACAgent.from_dict(agent.to_dict())
+            row = {
+                "episode": ep,
+                "fitness": round(fit, 5),
+                "best_fitness": round(max(best_fitness, 0.0), 5),
+                "policy_loss": round(stats["policy_loss"], 6),
+                "value_loss": round(stats["value_loss"], 6),
+                "steps": int(np.mean([t["steps"] for t in trajs])),
+            }
+            history.append(row)
         if on_progress:
             try:
                 on_progress({
@@ -145,7 +172,7 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
         ic = env._ics.iloc[env._t, env.cols.index(i)]
         ic = 0.0 if ic != ic else ic
         weights[i] = ic if abs(ic) > 1e-6 else 0.01
-    combo = composite_factor(mat, weights, method="ic")
+    combo = composite_factor(mat, weights, method="ic", z_mode="expanding")
 
     # ---- OOS 段安检（agent 从未见过，只报告） ----
     report: dict[str, Any] = {"enabled": False}

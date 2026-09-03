@@ -13,6 +13,7 @@
 """
 import json
 import logging
+import math
 import os
 from typing import Any, Optional
 
@@ -39,11 +40,15 @@ class RLAdaptiveStrategy(Strategy):
         "model_path": "",             # 训练好的智能体模型文件（JSON）
         "buy_zone": 0.02,             # 与目标仓位差异>该比例才调仓（减少无效交易）
         "factor_expression": "",      # 训练时注入的因子表达式（部署必须一致，留空=无因子列）
+        "panic_vol_threshold": 0.0,   # 恐慌阈值：近期波动率(5根std%)超过此值强制降仓；0=禁用
+        "panic_target_ratio": 0.25,   # 恐慌触发时的目标仓位（降至轻仓）
     }
     param_schema = {
         "model_path": {"type": "str", "label": "智能体模型路径"},
         "buy_zone": {"type": "float", "min": 0.0, "max": 0.2, "label": "调仓死区比例"},
         "factor_expression": {"type": "str", "label": "因子表达式（须与训练一致）"},
+        "panic_vol_threshold": {"type": "float", "min": 0.0, "max": 100.0, "label": "恐慌波动率阈值(0=禁用)"},
+        "panic_target_ratio": {"type": "float", "min": 0.0, "max": 1.0, "label": "恐慌目标仓位"},
     }
 
     def reset(self) -> None:
@@ -202,11 +207,38 @@ class RLAdaptiveStrategy(Strategy):
                         len(state), self._state_dim)
             return None
 
-        action = self._agent.greedy_action(state)
-        target = float(ACTION_BUCKETS[action])
         # 调仓死区：优先取模型内训练值（部署与训练严格一致），params.buy_zone 兜底
         zone = float(self._trade_zone if self._trade_zone is not None
                      else self.params.get("buy_zone", 0.02))
+
+        # ---- 恐慌风控：近期波动率极端时强制降仓（覆盖策略输出，防止"死扛"） ----
+        # 计算最近 5 根收盘的已实现波动率（%），与训练环境 _recent_vol_5 同口径。
+        # 当波动率超过阈值时，无视策略目标，强制降至恐慌目标仓位。
+        panic_th = float(self.params.get("panic_vol_threshold", 0.0))
+        if panic_th > 0 and len(self._closes) >= 3:
+            arr = np.asarray(self._closes[-5:], dtype=float)
+            rets = np.diff(arr) / arr[:-1]
+            vol5 = float(np.std(rets) * 100.0) if len(rets) >= 2 else 0.0
+            if vol5 > panic_th:
+                panic_target = float(self.params.get("panic_target_ratio", 0.25))
+                # 跳过 DRL 决策，直接按恐慌目标降仓
+                diff_panic = panic_target - pos_ratio
+                if diff_panic < -zone and position > 0:
+                    sell_value = min(abs(diff_panic) * equity, position * price)
+                    qty = max(sell_value / price, 0.0)
+                    return Signal(symbol, "sell", qty=qty, size_pct=1.0,
+                                  strategy=self.name, confidence=0.0,
+                                  reason=f"恐慌降仓至{int(panic_target*100)}%(vol={vol5:.1f}%>阈{panic_th:.1f}%)")
+                return None
+
+        # ---- 策略置信度：基于 softmax 分布的熵倒数 ----
+        # 熵越高（分布越均匀）→ 策略越不确定 → 置信度越低
+        proba = self._agent.actor.predict_proba(state.reshape(1, -1))[0]
+        action = int(np.argmax(proba))
+        target = float(ACTION_BUCKETS[action])
+        ent = float(-np.sum(np.maximum(proba, 1e-12) * np.log(np.maximum(proba, 1e-12))))
+        # 用 n_actions 归一化：max_ent = log(n_actions)，conf = 1 - ent / max_ent ∈ [0, 1]
+        confidence = float(max(0.0, min(1.0, 1.0 - ent / math.log(max(self._n_actions, 2)))))
         diff = target - pos_ratio
 
         if diff > zone and equity > 0 and cash > 0:
@@ -219,13 +251,13 @@ class RLAdaptiveStrategy(Strategy):
             # 显式传 qty：回测引擎卖出忽略 size_pct（恒全平），实盘/纸面按比例——
             # 传 qty 保证回测与实盘部分加/减仓口径一致
             return Signal(symbol, "buy", qty=buy_value / price, size_pct=size,
-                          strategy=self.name,
+                          strategy=self.name, confidence=confidence,
                           reason=f"RL加仓至{int(target*100)}%")
         if diff < -zone and position > 0:
             sell_value = min(abs(diff) * equity, position * price)
             qty = sell_value / price
             return Signal(symbol, "sell", qty=max(qty, 0.0), size_pct=1.0,
-                          strategy=self.name,
+                          strategy=self.name, confidence=confidence,
                           reason=f"RL减仓至{int(target*100)}%")
         return None
 

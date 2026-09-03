@@ -14,20 +14,12 @@
 """
 from typing import Any
 
-# price_action 执行器的参数约束（动态策略复用该执行器）
-_PRICE_ACTION_SCHEMA: dict[str, dict[str, Any]] = {
-    "mode": {"type": "str", "choices": ["breakout", "pullback"], "label": "入场模式(突破/回调)"},
-    "sr_window": {"type": "int", "min": 5, "max": 60, "label": "摆动高低点窗口"},
-    "min_touches": {"type": "int", "min": 1, "max": 8, "label": "关键位最少触碰次数"},
-    "breakout_pct": {"type": "float", "min": 0.0001, "max": 0.02, "label": "突破确认幅度"},
-    "volume_confirm": {"type": "float", "min": 0.5, "max": 3.0, "label": "放量确认倍数"},
-    "rsi_ob": {"type": "float", "min": 60, "max": 90, "label": "RSI超买阈值"},
-    "rsi_os": {"type": "float", "min": 10, "max": 40, "label": "RSI超卖阈值"},
-    "stop_loss_pct": {"type": "float", "min": 0.001, "max": 0.1, "label": "止损比例"},
-    "take_profit_pct": {"type": "float", "min": 0.001, "max": 0.3, "label": "止盈比例"},
-    "use_sr_stop": {"type": "bool", "label": "止损参考关键位"},
-    "size_pct": {"type": "float", "min": 0.05, "max": 1.0, "label": "下单比例"},
-}
+from .price_action import PriceActionStrategy
+
+# price_action 执行器的参数约束（复用该执行器的仓库模板用）。
+# 直接引用执行器类：曾在此手抄一份，抄本与真实执行器漂移（多出三个不被 on_candle
+# 读取的死参数），AI 优化会把这些无效旋钮当可调项。
+_PRICE_ACTION_SCHEMA: dict[str, dict[str, Any]] = PriceActionStrategy.param_schema
 
 CATEGORIES = [
     {"key": "trend", "label": "趋势跟踪", "icon": "📈"},
@@ -66,8 +58,7 @@ REPOSITORY: list[dict[str, Any]] = [
         "suitable": "有明确关键位的震荡后突破行情",
         "risk_tips": ["假突破会带来快速亏损", "震荡中 S/R 频繁失效"],
         "default_params": {
-            "mode": "breakout", "sr_window": 10, "min_touches": 2, "breakout_pct": 0.001,
-            "volume_confirm": 1.2, "rsi_ob": 72, "rsi_os": 28,
+            "mode": "breakout", "breakout_pct": 0.001, "volume_confirm": 1.2, "rsi_ob": 72,
             "stop_loss_pct": 0.02, "take_profit_pct": 0.04, "use_sr_stop": True, "size_pct": 0.5,
         },
         "param_schema": _PRICE_ACTION_SCHEMA,
@@ -100,8 +91,7 @@ REPOSITORY: list[dict[str, Any]] = [
         "suitable": "区间震荡、有界波动行情",
         "risk_tips": ["单边趋势中逆势接飞刀", "布林带扩张时假超买超卖"],
         "default_params": {
-            "mode": "pullback", "sr_window": 20, "min_touches": 2, "breakout_pct": 0.002,
-            "volume_confirm": 0.8, "rsi_ob": 70, "rsi_os": 30,
+            "mode": "pullback", "breakout_pct": 0.002, "volume_confirm": 0.8, "rsi_ob": 70,
             "stop_loss_pct": 0.03, "take_profit_pct": 0.05, "use_sr_stop": True, "size_pct": 0.5,
         },
         "param_schema": _PRICE_ACTION_SCHEMA,
@@ -117,8 +107,7 @@ REPOSITORY: list[dict[str, Any]] = [
         "suitable": "波动率高、反转频繁的行情",
         "risk_tips": ["强趋势中 RSI 会持续钝化", "反转时机难以精准把握"],
         "default_params": {
-            "mode": "pullback", "sr_window": 14, "min_touches": 2, "breakout_pct": 0.001,
-            "volume_confirm": 0.7, "rsi_ob": 70, "rsi_os": 30,
+            "mode": "pullback", "breakout_pct": 0.001, "volume_confirm": 0.7, "rsi_ob": 70,
             "stop_loss_pct": 0.025, "take_profit_pct": 0.04, "use_sr_stop": True, "size_pct": 0.4,
         },
         "param_schema": _PRICE_ACTION_SCHEMA,
@@ -134,8 +123,7 @@ REPOSITORY: list[dict[str, Any]] = [
         "suitable": "波动率放大、即将启动的行情",
         "risk_tips": ["横盘假突破多", "突破失败需快速止损"],
         "default_params": {
-            "mode": "breakout", "sr_window": 20, "min_touches": 1, "breakout_pct": 0.003,
-            "volume_confirm": 1.5, "rsi_ob": 75, "rsi_os": 25,
+            "mode": "breakout", "breakout_pct": 0.003, "volume_confirm": 1.5, "rsi_ob": 75,
             "stop_loss_pct": 0.02, "take_profit_pct": 0.06, "use_sr_stop": True, "size_pct": 0.5,
         },
         "param_schema": _PRICE_ACTION_SCHEMA,

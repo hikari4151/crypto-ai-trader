@@ -41,7 +41,9 @@ class FactorMiningEnv:
                  corr_threshold: float = 0.85,
                  reward_scale: float = 100.0,
                  duplicate_penalty: float = 0.05,
-                 seed: Optional[int] = None) -> None:
+                 seed: Optional[int] = None,
+                 precomputed_ics: Optional[pd.DataFrame] = None,
+                 precomputed_icir: Optional[pd.DataFrame] = None) -> None:
         self.mat = mat
         self.close = close
         self.h = max(1, int(h))
@@ -60,24 +62,44 @@ class FactorMiningEnv:
         self._rng = np.random.default_rng(seed)
 
         # ---- 无前视的因子表现特征（预计算） ----
-        from factors.analysis import _rolling_ic
-        ics = {c: _rolling_ic(mat[c], close, h=self.h, method="rank", window=ic_window)
-               for c in self.cols}
-        self._ics = pd.DataFrame(ics, index=mat.index).shift(self.h).ffill()  # 已实现才可用
-        # ICIR：滚动 IC 的滚动均值/标准差（后 5 个 IC 点）
-        self._icir = self._ics.rolling(ic_window * 5, min_periods=ic_window * 2).mean() / (
-            self._ics.rolling(ic_window * 5, min_periods=ic_window * 2).std() + 1e-12)
+        # 支持传入预计算的 IC/ICIR（避免并行收集时 8 路重复计算 _rolling_ic）
+        if precomputed_ics is not None:
+            self._ics = precomputed_ics.iloc[:n]
+            if precomputed_icir is not None:
+                self._icir = precomputed_icir.iloc[:n]
+            else:
+                # ICIR 需从预计算 ICS 重新算（依赖 self.ic_window）
+                self._icir = self._ics.rolling(ic_window * 5, min_periods=ic_window * 2).mean() / (
+                    self._ics.rolling(ic_window * 5, min_periods=ic_window * 2).std() + 1e-12)
+        else:
+            from factors.analysis import _rolling_ic
+            ics = {c: _rolling_ic(mat[c], close, h=self.h, method="rank", window=ic_window)
+                   for c in self.cols}
+            self._ics = pd.DataFrame(ics, index=mat.index).shift(self.h).ffill()
+            self._icir = self._ics.rolling(ic_window * 5, min_periods=ic_window * 2).mean() / (
+                self._ics.rolling(ic_window * 5, min_periods=ic_window * 2).std() + 1e-12)
         # 换手率（全量，静态）
         from factors.analysis import factor_turnover
         self._turnover = np.asarray([factor_turnover(mat[c]) for c in self.cols])
         # 因子相关矩阵（训练段，冗余惩罚用）
         self._corr = mat.iloc[:self.n_train].corr().to_numpy()
 
+        # P2-12：组合因子 z-score 统计量预计算一次（expanding 口径与 composite_factor
+        # 逐位一致：只用截至当期的 mean/std，无前视）。fitness 每步直接从预计算 z
+        # 加权求和，不再每步全量重算各列 expanding 统计量（O(n×k) → O(k)）。
+        self._z_exp: dict[str, pd.Series] = {}
+        for c in self.cols:
+            s = mat[c]
+            self._z_exp[c] = ((s - s.expanding().mean()) / (s.expanding().std() + 1e-12)).fillna(0.0)
+
         # ---- 账户状态 ----
         self._t = 0            # 决策时点（训练段内的随机位置）
         self._steps = 0        # 已执行步数（重复选择也推进，保证 episode 必终止）
         self._selected: list[int] = []  # 已选因子索引
         self._done = False
+        # P2-12：fitness 缓存 {(t, tuple(sorted(selected))): fitness}——
+        # 同一步内 old/new fitness 与状态构造会重复计算同一集合，直接命中
+        self._fitness_cache: dict[tuple, float] = {}
 
     # ---- 兼容 ACAgent.collect_episode（max_steps 取环境上限） ----
     @property
@@ -117,19 +139,32 @@ class FactorMiningEnv:
         return feats
 
     def _composite_fitness(self) -> float:
-        """当前已选组合在验证段的 fitness（0=未选）。"""
+        """当前已选组合在验证段的 fitness（0=未选）。
+
+        P2-12：结果按 (决策时点 t, 已选因子集合) 缓存——同一 t 内集合单调增长，
+        old/new fitness 与状态构造重复计算同一集合时直接命中（奖励路径只对
+        真正的新集合做一次合成 + 安检门）；z-score 统计量已在 __init__ 预计算
+        （expanding 口径，无前视），合成从 O(n×k) 降到 O(k)。
+        """
         if not self._selected:
             return 0.0
+        key = (self._t, tuple(sorted(self._selected)))
+        cached = self._fitness_cache.get(key)
+        if cached is not None:
+            return cached
         weights = {}
         for i in self._selected:
             ic = self._ics.iloc[self._t, i]
             ic = 0.0 if ic != ic else ic
             weights[self.cols[i]] = ic if abs(ic) > 1e-6 else 0.01  # 未实现 IC 给极小权重
-        combo = composite_factor(self.mat, weights, method="ic")
+        combo = composite_factor(self.mat, weights, method="ic", z_mode="expanding",
+                                 z_map=self._z_exp)
         gate = factor_quality_gate(combo.iloc[self.n_train:self.n_val],
                                    self.close.iloc[self.n_train:self.n_val],
                                    h=self.h)
-        return gate["fitness"]
+        fitness = gate["fitness"]
+        self._fitness_cache[key] = fitness
+        return fitness
 
     def reset(self) -> np.ndarray:
         """回到起点：随机决策时点 + 清空选择，返回初始状态。"""
@@ -140,6 +175,8 @@ class FactorMiningEnv:
         self._steps = 0
         self._selected = []
         self._done = False
+        # P2-12：缓存键含 t，reset 后旧键全部失效，整体清空防内存膨胀
+        self._fitness_cache = {}
         return self._build_state()
 
     def _build_state(self) -> np.ndarray:

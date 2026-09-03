@@ -1,14 +1,41 @@
-"""事件驱动回测引擎：逐K线仿真撮合，计入手续费与滑点。"""
+"""事件驱动回测引擎：逐K线仿真撮合，计入手续费与滑点。
+
+撮合循环（pending_signal / 限价单 / FIFO 记账 / 期末平仓）已抽到
+backtest/_matching.py 共享内核，本引擎与 fast_engine 共用同一实现，
+消除此前双引擎各维护一份相同撮合逻辑导致的分叉风险。
+"""
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from functools import wraps
+from typing import Any, Callable, Optional
 
+import numpy as np
 import pandas as pd
 
-from indicators.technical import compute_latest
-from strategies.base import Signal, Strategy
+from factors.library import ignoring_factor_liveness
+from indicators.technical import SR_MIN_TOUCHES, SR_WINDOW, price_action_features_series, support_resistance_series
+from indicators.vectorized import precompute_indicator_series
+from strategies.base import Strategy, strategy_ma_periods
+
+from ._matching import forced_liquidation, needs_sr, run_matching_loop
+from .metrics import finalize_metrics
 
 log = logging.getLogger(__name__)
+
+
+def research_scope(fn: Callable) -> Callable:
+    """把回测全程包进「忽略因子上下线状态」的研究作用域。
+
+    IC 衰变下线是运维态，只活在进程内存里。回测/参数优化/过拟合检验若读它，
+    同一段历史会因「今天有没有跑过 IC 衰变作业」得出不同结论——不可复现，
+    且与研究口径和实盘口径分叉。
+    """
+    @wraps(fn)
+    def _wrapped(*args, **kwargs):
+        with ignoring_factor_liveness():
+            return fn(*args, **kwargs)
+
+    return _wrapped
 
 
 @dataclass
@@ -22,13 +49,38 @@ class BacktestConfig:
     slippage: float = 0.0005
     start: Optional[str] = None
     end: Optional[str] = None
+    limit_order_model: str = "none"  # "none" | "partial" | "probabilistic"
+    # ---- P0-1/P0-2/P0-3 优化项新增字段（默认保持旧行为，向后兼容） ----
+    # P0-3 成本模型：maker/taker 分离费率（默认 None → 沿用 fee_rate 单一费率）
+    maker_fee_rate: Optional[float] = None
+    taker_fee_rate: Optional[float] = None
+    # P0-3 资金费率（每根K线按持仓价值收取的比例；0=关闭，默认）
+    funding_rate: float = 0.0
+    # P0-2 成交量参与率约束：买单数量上限 = 该K线成交量 × participation_rate
+    # （0=不限，默认，保持旧行为）
+    participation_rate: float = 0.0
+    # P0-1 intrabar 止损/止盈触价建模开关（策略声明 protective_levels 时生效）
+    intrabar_stops: bool = True
+    # P1-9 数据清洗模式："mark"=标记不清洗（默认，保留真实行情）| "replace"=旧行为
+    cleaning_mode: str = "mark"
 
 
-def run_backtest(df: pd.DataFrame, cfg: BacktestConfig) -> dict:
-    """执行回测，返回 {metrics, equity_curve, trades}。"""
+@research_scope
+def run_backtest(df: pd.DataFrame, cfg: BacktestConfig,
+                 bootstrap: bool = True) -> dict:
+    """执行回测，返回 {metrics, equity_curve, trades}。
+
+    bootstrap: 是否计算 block bootstrap 置信区间（P2-13）。扫描路径
+        （overfit/compare 等批量回测）传 False 跳过，只保留基础指标。
+    """
     if df.empty:
         raise ValueError("回测数据为空")
     data = df.copy()
+    # 数据清洗：异常值检测 + 缺失值填充，避免脏数据污染回测/参数优化。
+    # cleaning_mode="mark"（默认）：只做结构完整性修复，不清洗真实行情（P1-9）
+    from .data_loader import OHLCVSanitizer
+    sanitizer = OHLCVSanitizer()
+    data = sanitizer.clean(data, mode=getattr(cfg, "cleaning_mode", "mark"))
     if cfg.start:
         data = data[data.index >= pd.Timestamp(cfg.start, tz="UTC")]
     if cfg.end:
@@ -41,110 +93,50 @@ def run_backtest(df: pd.DataFrame, cfg: BacktestConfig) -> dict:
     strategy.update_params(cfg.strategy_params)
     strategy.reset()
 
-    cash = cfg.start_cash
-    position = 0.0
-    # 持仓成本阵列（FIFO 逐笔记账）：分批建仓/部分平仓时 PnL 准确——
-    # 单点 entry_price 会被最后一次成交价覆盖、部分平仓后丢失成本，导致 pnl 失真
-    lots: list[tuple[float, float]] = []  # [(qty, price)]
-    equity_curve: list[float] = []
-    trades: list[dict] = []
-    # 前视偏差防护：信号在第 i 根K线收盘后产生，必须在下一根（i+1）开盘成交
-    pending_signal: Optional[Signal] = None
+    # ---- 指标一次向量化预计算（O(n)），循环内 O(1) 取快照 ----
+    # MA 周期跟随策略参数（dual_ma 的 fast_period/slow_period 此前被写死 10/30 忽略）
+    ma_fast_p, ma_slow_p = strategy_ma_periods(strategy)
+    closes = data["close"].to_numpy(float)
+    highs = data["high"].to_numpy(float)
+    lows = data["low"].to_numpy(float)
+    opens = data["open"].to_numpy(float)
+    vols = data["volume"].to_numpy(float)
+    series = precompute_indicator_series(closes, opens, highs, lows, vols,
+                                         ma_fast_period=ma_fast_p, ma_slow_period=ma_slow_p)
 
-    for i in range(len(data)):
-        candle = data.iloc[i]
-        price_open, price_close = float(candle["open"]), float(candle["close"])
+    # 是否需要 S/R 与价格行为（有状态策略专用；与 fast_engine 同口径）
+    need_sr = needs_sr(strategy.name, strategy)
+    sr_series: Optional[list] = None
+    pa_series: Optional[list] = None
+    if need_sr:
+        sr_series = support_resistance_series(highs, lows, closes, window=SR_WINDOW, min_touches=SR_MIN_TOUCHES)
+        pa_series = price_action_features_series(highs, lows, closes, opens, vols)
 
-        # 1) 若上一根收盘产生了信号，用当前K线开盘价成交（叠加滑点）
-        if pending_signal is not None:
-            sig = pending_signal
-            pending_signal = None
-            fill_price = price_open * (1 + cfg.slippage) if sig.side == "buy" else price_open * (1 - cfg.slippage)
-            filled = False
-            fee = 0.0
-            if sig.side == "buy" and cash > 0:
-                if sig.qty:
-                    qty = sig.qty
-                else:
-                    qty = cash * sig.size_pct / fill_price
-                qty = min(qty, cash / (fill_price * (1 + cfg.fee_rate)))
-                if qty > 0:
-                    cost = qty * fill_price
-                    fee = cost * cfg.fee_rate
-                    cash -= cost + fee
-                    position += qty
-                    lots.append((qty, fill_price))
-                    filled = True
-            elif sig.side == "sell" and position > 0:
-                qty = sig.qty if sig.qty else position
-                qty = min(qty, position)
-                proceeds = qty * fill_price
-                fee = proceeds * cfg.fee_rate
-                # FIFO 摊销持仓成本（分批建仓的成本序列）
-                remaining = qty
-                cost_basis = 0.0
-                while remaining > 1e-12 and lots:
-                    lot_qty, lot_price = lots[0]
-                    take = min(lot_qty, remaining)
-                    cost_basis += take * lot_price
-                    remaining -= take
-                    if take >= lot_qty - 1e-12:
-                        lots.pop(0)
-                    else:
-                        lots[0] = (lot_qty - take, lot_price)
-                pnl = qty * fill_price - cost_basis - fee
-                cash += proceeds - fee
-                position -= qty
-                trades.append({
-                    "ts": data.index[i].isoformat(), "symbol": cfg.symbol, "side": "sell",
-                    "price": round(fill_price, 6), "qty": round(qty, 8),
-                    "fee": round(fee, 6), "pnl": round(pnl, 6), "reason": sig.reason,
-                })
-                filled = True
-            # 只有实际成交才回调，避免"假成交"污染策略状态
-            if filled:
-                strategy.on_fill(cfg.symbol, sig.side, fill_price)
+    # 共享撮合内核（engine 不记录买入成交，保持原行为）
+    result = run_matching_loop(
+        data=data, cfg=cfg, strategy=strategy,
+        closes=closes, opens=opens, highs=highs, lows=lows,
+        series=series, need_sr=need_sr,
+        sr_series=sr_series, pa_series=pa_series,
+        volumes=vols,
+        record_buy_trades=False,
+    )
+    equity_curve = result["equity_curve"]
+    trades = result["trades"]
+    cash = result["cash"]
+    stats = {"traded_notional": result.get("traded_notional", 0.0),
+             "total_fees": result.get("total_fees", 0.0)}
 
-        # 2) 用截至当前的收盘价序列计算指标（不含未来数据）。
-        # 只取最近 120 根窗口：与 fast_engine 的 S/R 滑动窗口口径一致，
-        # 曾用全量历史使旧枢轴簇干扰 near_sup/near_res/broken_resistance，两引擎交易分叉
-        hist = data.iloc[max(0, i - 119): i + 1]
-        ohlcv = [[int(hist.index[j].timestamp() * 1000), float(hist.iloc[j]["open"]),
-                  float(hist.iloc[j]["high"]), float(hist.iloc[j]["low"]),
-                  float(hist.iloc[j]["close"]), float(hist.iloc[j]["volume"])] for j in range(len(hist))]
-        ind = compute_latest(ohlcv)
-        ctx = {
-            "symbol": cfg.symbol, "price": price_close, "position": position,
-            "cash": cash, "indicators": ind, "timeframe": cfg.timeframe,
-        }
-        signal = strategy.on_candle(ctx)
-        if signal:
-            pending_signal = signal
+    # 末尾强制平仓（共享实现，FIFO 成本摊销）
+    forced_liquidation(data=data, cfg=cfg, closes=closes,
+                       cash=cash, position=result["position"], lots=result["lots"],
+                       trades=trades, equity_curve=equity_curve, stats=stats)
 
-        equity = cash + position * price_close
-        equity_curve.append(round(equity, 4))
-
-    # 末尾强制平仓（与 fast_engine 一致，FIFO 成本摊销）：
-    # 曾缺失此段导致期末持仓按市值计但无平仓交易，两引擎 trades/胜率/盈亏比不一致
-    last_close = float(data.iloc[-1]["close"])
-    if position > 0 and lots:
-        fill_price = last_close * (1 - cfg.slippage)
-        qty = position
-        proceeds = qty * fill_price
-        fee = proceeds * cfg.fee_rate
-        cost_basis = sum(lq * lp for lq, lp in lots)
-        pnl = qty * fill_price - cost_basis - fee
-        cash += proceeds - fee
-        trades.append({
-            "ts": data.index[-1].isoformat(), "symbol": cfg.symbol, "side": "sell",
-            "price": round(fill_price, 6), "qty": round(qty, 8),
-            "fee": round(fee, 6), "pnl": round(pnl, 6), "reason": "期末强制平仓",
-        })
-        if equity_curve:
-            equity_curve[-1] = round(cash, 4)
-
-    from .metrics import compute_metrics
-    metrics = compute_metrics(equity_curve, trades, cfg.timeframe, cfg.start_cash)
+    metrics = finalize_metrics(equity_curve, trades, cfg.timeframe, cfg.start_cash, closes,
+                               traded_notional=stats["traded_notional"],
+                               total_fees=stats["total_fees"],
+                               bootstrap=bootstrap)
     return {"metrics": metrics, "equity_curve": equity_curve,
             "trades": trades, "symbol": cfg.symbol, "timeframe": cfg.timeframe,
-            "strategy": cfg.strategy_name, "params": strategy.params}
+            "strategy": cfg.strategy_name, "params": strategy.params,
+            "benchmark": metrics["benchmark"]}

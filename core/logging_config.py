@@ -46,6 +46,12 @@ def setup_logging(level: str = "INFO", log_dir: str = "./data/logs") -> None:
     )
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    # 幂等：run.py 与 web.main 各调用一次，不去重会让每条日志在 trader.log 落两遍
+    # （排障时会误判为「两个引擎实例在并行跑」）
+    for h in list(root.handlers):
+        if getattr(h, "_trader_handler", False):
+            root.removeHandler(h)
+            h.close()
 
     handler = RotatingFileHandler(
         Path(log_dir) / "trader.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
@@ -54,6 +60,7 @@ def setup_logging(level: str = "INFO", log_dir: str = "./data/logs") -> None:
     console = logging.StreamHandler()
     console.setFormatter(fmt)
     for h in (handler, console):
+        h._trader_handler = True
         h.addFilter(RedactFilter())
         root.addHandler(h)
     root.propagate = False

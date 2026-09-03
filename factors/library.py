@@ -3,6 +3,9 @@
 全部为纯向量化实现（pandas），输入标准 OHLCV DataFrame。
 窗口期内的前部返回 NaN，分析时自动剔除。
 """
+import contextlib
+import contextvars
+
 import numpy as np
 import pandas as pd
 
@@ -11,10 +14,58 @@ from .base import (CATEGORY_MACRO, CATEGORY_MEAN_REV, CATEGORY_MOMENTUM,
 
 _LIB: list[Factor] = []
 
+# 因子活跃状态（IC 衰变自动下线里只标记、不删除；默认全部活跃，现有因子不受影响）
+_ALIVE: dict[str, bool] = {}
+# 因子 IC 衰变状态（滚动 IC 窗口 30 期）
+_IC_DECAY: dict[str, dict] = {}
+# 是否让上下线状态生效。上下线属于运维态、活在进程内存里：回测/训练/参数扫描
+# 若读它，同一段历史会因"今天有没有跑过 IC 衰变作业"得出不同结论（不可复现，
+# 且与实盘口径不一致）。研究路径统一用 ignoring_factor_liveness() 关掉。
+_RESPECT_ALIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "factor_respect_alive", default=True)
+
+
+@contextlib.contextmanager
+def ignoring_factor_liveness():
+    """作用域内忽略因子上下线状态：研究计算只看因子集本身，结果可复现。"""
+    token = _RESPECT_ALIVE.set(False)
+    try:
+        yield
+    finally:
+        _RESPECT_ALIVE.reset(token)
+
+
+def _default_ic_decay() -> dict:
+    """默认 IC 衰变状态。"""
+    return {"rolling_ic": [], "rolling_icir": 0.0, "last_updated": None,
+            "auto_offline": False, "auto_online": False}
+
 
 def _f(*args, **kwargs) -> Factor:
-    _LIB.append(Factor(*args, **kwargs))
-    return _LIB[-1]
+    f = Factor(*args, **kwargs)
+    _LIB.append(f)
+    _ALIVE.setdefault(f.key, True)
+    _IC_DECAY.setdefault(f.key, _default_ic_decay())
+    return f
+
+
+def get_factor_status(key: str) -> dict:
+    """单个因子的活跃状态与 IC 衰变状态。"""
+    if key in _BY_KEY:
+        return {"alive": _ALIVE.get(key, True), "ic_decay": dict(_IC_DECAY.get(key, _default_ic_decay()))}
+    return {"alive": False, "ic_decay": _default_ic_decay()}
+
+
+def factor_is_live(key: str) -> bool:
+    """因子是否活跃（False=已因 IC 衰变下线）。
+
+    研究作用域（`ignoring_factor_liveness()`）内恒为 True：回测不该被
+    进程内的运维态影响，否则同一段历史两次跑出不同结果。
+    """
+    if not _RESPECT_ALIVE.get():
+        return True
+    f = _BY_KEY.get(key)
+    return _ALIVE.get(key, True) if f else False
 
 
 def _roc(v: pd.Series, n: int) -> pd.Series:
@@ -29,6 +80,8 @@ _f("mom_10", "10期动量", CATEGORY_MOMENTUM, "过去10根K线收益率（%）�
    lambda df: _roc(df["close"], 10), {"n": 10})
 _f("mom_20", "20期动量", CATEGORY_MOMENTUM, "过去20根K线收益率（%），较长周期动量。",
    lambda df: _roc(df["close"], 20), {"n": 20})
+_f("mom_7", "7期动量", CATEGORY_MOMENTUM, "过去7根K线收益率（%），1周动量。",
+   lambda df: _roc(df["close"], 7), {"n": 7})
 _f("roc_1", "1期收益率", CATEGORY_MOMENTUM, "相邻K线收益率（%），短线价格变动速度。",
    lambda df: _roc(df["close"], 1), {"n": 1})
 _f("mom_accel", "动量加速度", CATEGORY_MOMENTUM, "10期动量与5期动量之差，动量加速/减速信号。",
@@ -92,6 +145,8 @@ _f("mfi_14", "资金流量MFI", CATEGORY_VOLUME, "14期资金流量指标（0-10
 _f("vwap_dist", "VWAP偏离", CATEGORY_VOLUME, "收盘价相对成交均价(VWAP)偏离（%），正=价格高于平均成交价。",
    lambda df: (df["close"] - (df["close"] * df["volume"]).rolling(20).sum() /
                (df["volume"].rolling(20).sum() + 1e-12)) / df["close"] * 100.0, {"n": 20})
+_f("vol_spike_20", "20期成交量突增", CATEGORY_VOLUME, "成交量相对20期均量之比减1（%），放量突增信号。",
+   lambda df: (df["volume"] / (df["volume"].rolling(20).mean() + 1e-12) - 1.0) * 100.0, {"n": 20})
 
 
 # ============ 趋势 ============
@@ -131,6 +186,9 @@ _f("macd_hist_pct", "MACD柱占比", CATEGORY_TREND, "MACD柱相对价格（%）
    lambda df: _macd_hist(df), {"fast": 12, "slow": 26, "signal": 9})
 _f("adx_14", "ADX趋势强度", CATEGORY_TREND, "14期ADX（0-100），趋势确立/震荡判别。",
    lambda df: _adx(df, 14), {"n": 14})
+_f("price_pos_20", "20期价格位置", CATEGORY_TREND, "收盘价在20期最高/最低间的百分位（Donchian位置，0-1）。",
+   lambda df: (df["close"] - df["low"].rolling(20).min()) /
+              (df["high"].rolling(20).max() - df["low"].rolling(20).min() + 1e-12), {"n": 20})
 
 
 # ============ 均值回归 ============

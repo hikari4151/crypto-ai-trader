@@ -123,10 +123,14 @@ def fit_model_factor(df: pd.DataFrame, h: int = 1,
                      hidden: tuple = (32, 32), epochs: int = 200,
                      lr: float = 2e-3, l2: float = 1e-4, patience: int = 25,
                      train_ratio: float = 0.7, val_ratio: float = 0.15,
-                     seed: int = 42, gates: Optional[dict] = None) -> dict:
+                     seed: int = 42, gates: Optional[dict] = None,
+                     cross_validate_data: Optional[dict[str, pd.DataFrame]] = None) -> dict:
     """训练监督学习因子并做三段式质检。
 
     df: 标准 OHLCV（index=时间戳，列 open/high/low/close/volume）
+    cross_validate_data: 可选跨品种验证数据 {symbol: OHLCV DataFrame}（≥200 根）。
+        用训练段 mu/sd 标准化后经最后一窗模型预测，对各品种算 rank_ic/icir，
+        写入 meta.cross_val_ic（默认 None → 空 dict，行为与旧版一致）。
     返回 {factor: Series(预测值=因子), report: 分段 IC/安检, model: MLP, meta}
     """
     from drl.env import _precompute_features
@@ -174,6 +178,26 @@ def fit_model_factor(df: pd.DataFrame, h: int = 1,
         "trained_bars": int(mask_tr.sum()),
         "best_val_loss": round(best_val_loss, 6),
     }
+
+    # 8) 跨品种验证：用训练段 mu/sd 标准化后经模型预测，算 rank_ic
+    cross_val_ic = {}
+    if cross_validate_data:
+        for sym, cdf in cross_validate_data.items():
+            if len(cdf) < 200:
+                continue
+            try:
+                from drl.env import _precompute_features
+                feats_c = np.asarray(_precompute_features(cdf), dtype=float)
+                X_c = (feats_c - mu) / sd
+                pred_c = model.forward(X_c)[-1].reshape(-1)
+                s_c = pd.Series(pred_c, index=cdf.index)
+                g_c = factor_quality_gate(s_c, cdf["close"], h=h)
+                cross_val_ic[sym] = {"rank_ic": g_c["rank_ic"], "icir": g_c["icir"],
+                                     "samples": g_c["samples"]}
+            except Exception as e:
+                log.warning("[factor] 模型因子跨品种 %s 验证失败: %s", sym, e)
+    meta["cross_val_ic"] = cross_val_ic
+
     return {"factor": factor, "report": report, "model": model, "meta": meta,
             "feature_dim": _FEAT_DIM,
             "feature_desc": "drl.env._precompute_features（13 维价量特征，trailing 无未来信息）"}

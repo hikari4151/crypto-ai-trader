@@ -92,6 +92,28 @@ class OptimizationLog(Base):
     params_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
+class EvolveRound(Base):
+    """持续进化引擎训练轮次落库（P2-13）：每轮训练结果归档，支撑 fitness 曲线回看。
+
+    selected_factors 为因子挖掘选中的因子表达式列表 JSON；status 记录该轮结局
+    （ok / oos_rejected / cross_rejected / rollback / demo_blocked）。
+    """
+    __tablename__ = "evolve_rounds"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=func.now(), index=True)
+    model: Mapped[str] = mapped_column(String(32), index=True)        # factor_miner / strategy_drl / meta_controller
+    symbol: Mapped[str] = mapped_column(String(32), default="")
+    timeframe: Mapped[str] = mapped_column(String(16), default="")
+    data_source: Mapped[str] = mapped_column(String(16), default="exchange")
+    round_no: Mapped[int] = mapped_column(Integer, default=0)
+    fitness: Mapped[float] = mapped_column(Float, default=0.0)
+    oos_ret: Mapped[float] = mapped_column(Float, default=0.0)
+    decay: Mapped[float] = mapped_column(Float, default=0.0)
+    position_ratio: Mapped[float] = mapped_column(Float, default=0.0)
+    selected_factors: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(32), default="ok")
+
+
 class Database:
     def __init__(self, url: str) -> None:
         # 仅 SQLite 需要 busy timeout（aiosqlite 的 PRAGMA）；PG/其他方言忽略

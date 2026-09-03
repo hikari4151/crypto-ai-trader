@@ -11,6 +11,7 @@
 - 本引擎（预计算）：指标数组一次预计算 → O(n)，循环内 O(1) 取索引
 - 实时引擎（增量）：每根K线 O(1) 增量更新
 """
+from collections import deque
 from typing import Any, Optional
 
 import numpy as np
@@ -114,10 +115,14 @@ def _bollinger_vec(v, period: int = 20, num_std: float = 2.0):
     return mid + num_std * std, mid, mid - num_std * std
 
 
-def precompute_indicator_series(closes, opens, highs, lows, volumes, backend: str = "numpy") -> dict[str, Any]:
+def precompute_indicator_series(closes, opens, highs, lows, volumes, backend: str = "numpy",
+                                ma_fast_period: int = 10, ma_slow_period: int = 30) -> dict[str, Any]:
     """一次性预计算所有指标序列，返回各指标的完整数组（与输入等长）。
 
     backend: "numpy" | "cupy"（GPU，需已安装 cupy）
+    ma_fast_period / ma_slow_period: MA 快/慢线周期。默认 10/30；双均线策略
+    由引擎按其 fast_period/slow_period 参数传入（此前写死 10/30，导致
+    dual_ma 的 fast_period/slow_period 参数对信号无任何影响）。
     """
     xp = _get_xp(backend)
     closes = xp.asarray(closes, dtype=xp.float64)
@@ -126,14 +131,16 @@ def precompute_indicator_series(closes, opens, highs, lows, volumes, backend: st
     lows = xp.asarray(lows, dtype=xp.float64)
     volumes = xp.asarray(volumes, dtype=xp.float64)
 
-    ma_fast = _sma_vec(closes, 10)
-    ma_slow = _sma_vec(closes, 30)
+    ma_fast = _sma_vec(closes, int(ma_fast_period))
+    ma_slow = _sma_vec(closes, int(ma_slow_period))
     macd_dif = _ema_vec(closes, 12) - _ema_vec(closes, 26)
     macd_dea = _ema_vec(xp.nan_to_num(macd_dif, nan=0.0), 9)
     macd_hist = 2 * (macd_dif - macd_dea)
     rsi = _rsi_vec(closes, 14)
     bb_up, bb_mid, bb_low = _bollinger_vec(closes, 20, 2.0)
     vol_ma5 = _sma_vec(volumes, 5)
+    # ATR（Wilder 平滑，周期 14）与 ATR 百分比——P1-5 风险预算仓位用
+    atr = _atr_vec(highs, lows, closes, 14)
     # 暖机期 vol_ma5 为 NaN：量比置 1.0（无量比信息视为正常），
     # 曾用 nan_to_num(0)+1e-12 导致前 4 根量比爆炸到 ~1e14，污染 vol_break 类信号
     vol_ratio_series = volumes / vol_ma5
@@ -145,39 +152,54 @@ def precompute_indicator_series(closes, opens, highs, lows, volumes, backend: st
         "macd": macd_dif, "macd_signal": macd_dea, "macd_hist": macd_hist,
         "rsi": rsi, "bb_upper": bb_up, "bb_mid": bb_mid, "bb_lower": bb_low,
         "vol_ma5": vol_ma5, "vol_ratio": vol_ratio_series,
+        "atr": atr,
     }
+
+
+def _atr_vec(highs, lows, closes, period: int = 14):
+    """向量化 ATR（Wilder 平滑）。返回与输入等长数组，暖机期为 NaN。"""
+    xp = _arr_module(highs)
+    highs = xp.asarray(highs, dtype=xp.float64)
+    lows = xp.asarray(lows, dtype=xp.float64)
+    closes = xp.asarray(closes, dtype=xp.float64)
+    prev_close = xp.empty_like(closes)
+    prev_close[0] = closes[0]
+    prev_close[1:] = closes[:-1]
+    tr = xp.maximum(highs - lows,
+                    xp.maximum(xp.abs(highs - prev_close), xp.abs(lows - prev_close)))
+    out = xp.full_like(closes, xp.nan)
+    if len(closes) < period:
+        return out
+    first = float(xp.nanmean(tr[1:period + 1]))
+    out[period - 1] = first
+    for i in range(period, len(closes)):
+        out[i] = (out[i - 1] * (period - 1) + float(tr[i])) / period
+    return out
 
 
 def snapshot_at(series: dict[str, Any], i: int) -> dict[str, Any]:
-    """从预计算序列中取第 i 根K线的指标快照（替代 compute_latest 的逐K线重算）。"""
-    def _val(arr):
-        # numpy / cupy 数组都支持 item() 或 [i] 取标量
-        v = arr[i]
-        return float(v) if hasattr(v, "__float__") else float(v)
-    def _n(v):
-        try:
-            f = float(v)
-            return 0.0 if f != f else f  # NaN -> 0
-        except (TypeError, ValueError):
-            return 0.0
-    return {
-        "close": _n(_val(series["close"])),
-        "open": _n(_val(series["open"])),
-        "high": _n(_val(series["high"])),
-        "low": _n(_val(series["low"])),
-        "ma_fast": _n(_val(series["ma_fast"])),
-        "ma_slow": _n(_val(series["ma_slow"])),
-        "macd": _n(_val(series["macd"])),
-        "macd_signal": _n(_val(series["macd_signal"])),
-        "macd_hist": _n(_val(series["macd_hist"])),
-        "rsi": _n(_val(series["rsi"])),
-        "bb_upper": _n(_val(series["bb_upper"])),
-        "bb_mid": _n(_val(series["bb_mid"])),
-        "bb_lower": _n(_val(series["bb_lower"])),
-        "volume": _n(_val(series["volume"])),
-        "vol_ratio": _n(_val(series["vol_ratio"])),
-        "candles_count": i + 1,
-    }
+    """从预计算序列中取第 i 根K线的指标快照（替代 compute_latest 的逐K线重算）。
+
+    性能（P2-13）：原实现对每个字段调用 _val/_n 两层函数（float 转换 + NaN
+    检查），5000 根 × 19 字段 ≈ 19 万次调用。现改为惰性把指标数组一次性
+    tolist() 成 Python list 并缓存到 series["_tol"]（NaN→0 与 _n 语义一致），
+    快照 O(1) 索引 list[i]，字段取值零函数调用。
+    """
+    tol = series.get("_tol")
+    if tol is None:
+        tol = {}
+        for k, v in series.items():
+            if hasattr(v, "tolist"):
+                # numpy/cupy 数组：NaN→0 与 _n 语义一致；cupy 用 get() 转回主机
+                arr = v.get() if hasattr(v, "get") else v
+                tol[k] = np.nan_to_num(np.asarray(arr, dtype=float), nan=0.0).tolist()
+        series["_tol"] = tol
+    ind = {k: tol[k][i] for k in tol if k != "atr_pct" and k != "vol_ma5"}
+    ind["candles_count"] = i + 1
+    close = ind.get("close", 0.0)
+    atr = ind.get("atr", 0.0)
+    ind["atr_pct"] = (atr / close * 100.0) if close else 0.0
+    return ind
 
 
 _GPU_STATE: Optional[bool] = None
@@ -240,8 +262,8 @@ class IncrIndicators:
         self._macd_hist: Optional[float] = None
 
         # SMA 状态（滑动窗口缓冲）
-        self._buf_fast: list[float] = []
-        self._buf_slow: list[float] = []
+        self._buf_fast: deque = deque()
+        self._buf_slow: deque = deque()
         self._ma_fast: float = 0.0
         self._ma_slow: float = 0.0
 
@@ -253,7 +275,7 @@ class IncrIndicators:
         self._last_close: Optional[float] = None
 
         # 布林带 状态（增量 mean + std）
-        self._bb_buf: list[float] = []
+        self._bb_buf: deque = deque()
         self._bb_sum: float = 0.0
         self._bb_sum_sq: float = 0.0
         self._bb_upper: float = 0.0
@@ -261,7 +283,7 @@ class IncrIndicators:
         self._bb_lower: float = 0.0
 
         # 成交量均线
-        self._vol_buf: list[float] = []
+        self._vol_buf: deque = deque()
         self._vol_ma: float = 0.0
 
     def update(self, close: float, volume: float) -> dict[str, Any]:
@@ -284,12 +306,12 @@ class IncrIndicators:
         # ---- SMA 更新（MA10 / MA30）----
         self._buf_fast.append(close)
         if len(self._buf_fast) > self.period_ma_fast:
-            self._buf_fast.pop(0)
+            self._buf_fast.popleft()
         self._ma_fast = sum(self._buf_fast) / len(self._buf_fast)
 
         self._buf_slow.append(close)
         if len(self._buf_slow) > self.period_ma_slow:
-            self._buf_slow.pop(0)
+            self._buf_slow.popleft()
         self._ma_slow = sum(self._buf_slow) / len(self._buf_slow)
 
         # ---- RSI 更新 ----
@@ -317,7 +339,7 @@ class IncrIndicators:
         # ---- 布林带 更新（增量 mean + std）----
         self._bb_buf.append(close)
         if len(self._bb_buf) > self.period_bb:
-            old = self._bb_buf.pop(0)
+            old = self._bb_buf.popleft()
             self._bb_sum -= old          # 均值累加器减旧值本身（曾误减 old² 导致均线漂移）
             self._bb_sum_sq -= old * old
         self._bb_sum += close
@@ -336,7 +358,7 @@ class IncrIndicators:
         # ---- 成交量均线 ----
         self._vol_buf.append(volume)
         if len(self._vol_buf) > self.period_vol_ma:
-            self._vol_buf.pop(0)
+            self._vol_buf.popleft()
         self._vol_ma = sum(self._vol_buf) / len(self._vol_buf)
 
         return {

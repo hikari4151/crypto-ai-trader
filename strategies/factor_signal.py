@@ -22,7 +22,11 @@
 """
 from typing import Any, Optional
 
+import logging
+
 from .base import Signal, Strategy
+
+log = logging.getLogger(__name__)
 
 # 滚动缓冲上限（与 rl_adaptive 一致；表达式窗口最大 200，留足余量）
 _BUFFER_MAX = 300
@@ -130,6 +134,14 @@ class FactorSignalStrategy(Strategy):
             f = get_factor(str(key))
             if f is None:
                 continue
+            # 跳过已下线因子（IC 衰变自动下线）
+            try:
+                from factors.library import factor_is_live
+                if not factor_is_live(str(key)):
+                    log.debug("[factor_signal] 组合因子 %s 已下线，跳过", key)
+                    continue
+            except Exception:
+                pass
             try:
                 s = f.series(df).astype(float)
                 v = s.iloc[-1]
@@ -184,6 +196,17 @@ class FactorSignalStrategy(Strategy):
         # 否则 RSI=0 等在最初 30 根内产生大量假信号
         if int(ind.get("candles_count", 999)) < 30:
             return None
+        # 因子下线隔离：库内注册因子因 IC 衰变下线时跳过该策略（仅调试日志，不抛异常）
+        # 仅对因果子库 key 生效（bb_pos 在库内，mom_ma10/macd_hist 等不在库内不受影响）
+        f_name = p.get("factor", "")
+        if f_name not in ("custom", "combo"):
+            try:
+                from factors.library import factor_is_live, get_factor
+                if get_factor(f_name) is not None and not factor_is_live(f_name):
+                    log.debug("[factor_signal] 因子 %s 已下线，跳过信号生成", f_name)
+                    return None
+            except Exception:
+                pass
         self._push_ohlcv(ctx)
         f = self._factor_value(ind)
         mode = p.get("mode", "trend")

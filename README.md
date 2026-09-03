@@ -9,6 +9,9 @@
 - **本地代理支持**：`PROXY_URL` 显式配置或自动探测 Clash/V2Ray 端口（7890/1080 等），OKX/Bitget/Bybit 等受限交易所连接自动注入代理
 - **策略引擎**：可插拔框架，内置双均线、网格示例策略，支持自定义
 - **AI 持续优化**：市场状态理解、策略参数动态优化（热更新）、每日/每周反思复盘
+- **AI 参数验证门**：AI 建议参数在应用前先回测 + 过拟合校验（walk-forward/PBO），未通过则保留当前参数
+- **成交口径一致性**：纸面/模拟成交叠加可配置滑点（默认与回测一致 0.0005），可选"信号在下一根K线开盘成交"以与回测完全同口径
+- **策略参数真实生效**：双均线 `fast_period`/`slow_period` 现在真正驱动 MA 快/慢线（回测与实时同口径），此前被写死为 10/30 而忽略
 - **历史回测**：事件驱动引擎，计入手续费+滑点，输出收益/年化/回撤/夏普/胜率/盈亏比/权益曲线，前端图表展示
 - **实时行情指标**：ccxt.pro WebSocket 订阅 + MA/MACD/RSI/布林带指标
 - **AI 行情解读**：一键或定时把实时指标快照发给你的 AI API
@@ -122,7 +125,16 @@ pip install pytest
 pytest
 ```
 
-核心回归覆盖：双回测引擎逐笔一致性（`test_backtest_engine_consistency.py`）、风控防线（NaN/Infinity 拒绝、平仓豁免冷却、止损放行，`test_risk_guards.py`）。
+提交前建议跑完整验证链（见 `docs/REDEV_GUIDE.md` §4——再开发必读：当前基线、模块地图与禁止回退清单）：
+
+```bat
+.venv\Scripts\python -m compileall -q ai backtest core drl engine exchange factors indicators strategies web config scripts run.py
+.venv\Scripts\python -m pytest -q
+.venv\Scripts\python scripts\check_js.py                      :: 前端内联 JS 语法（esprima，无需 node）
+.venv\Scripts\python run.py backtest --source demo --strategy dual_ma   :: 双引擎一致性基线与基线对比
+```
+
+核心回归覆盖：双回测引擎逐笔一致性（`test_backtest_engine_consistency.py`）、风控防线（NaN/Infinity 拒绝、平仓豁免冷却、止损放行，`test_risk_guards.py`）、AI 校验（NaN/Inf/布尔拦截）、跨 loop DB 调度、实盘限价单对账、引擎失败复位等。
 
 ## 安全说明
 

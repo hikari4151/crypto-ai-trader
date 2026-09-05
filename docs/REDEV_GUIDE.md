@@ -25,7 +25,7 @@
 | 验证项 | 命令 | 当前锚定值 |
 |---|---|---|
 | 编译检查 | `.venv\Scripts\python -m compileall -q ai backtest core drl engine exchange factors indicators strategies web config scripts run.py` | ✅ |
-| 测试 | `.venv\Scripts\python -m pytest -q` | ✅ **434 passed**（数量随测试增长，以"全绿"为准） |
+| 测试 | `.venv\Scripts\python -m pytest -q` | ✅ **579 passed**（2026-09-05：回退基线全链路任务后 579 passed / 2 skipped，数量以"全绿"为准） |
 | 前端 JS 语法 | `.venv\Scripts\python scripts\check_js.py` | ✅（esprima，本机无 node） |
 | 双引擎一致性 | `.venv\Scripts\python run.py backtest --source demo --strategy dual_ma` | **ret=-0.206239 / trades=37 / final_equity=7937.6077** |
 
@@ -129,6 +129,8 @@
 | D9 | ModelZoo 破坏 flat 兼容 | 版本化 `data/models/<name>/`（vN.json.gz）+ **保留兼容平铺 `<name>.json`** 双路径互通 | web/api/drl.py ACAgent 只认 flat 格式，砍一半=旧模型全 404 | `/api/drl/models` 能列出且能加载 |
 | D10 | pine_export 放宽约束 | state_window>1 拒绝导出、bb_pos clip、min_trade_zone 死区、bar_index>60 门控 | 放宽=导出的 Pine 代码与模型行为不一致 | `test_pine_export*` |
 | D11 | 训练周期重新绑定实盘周期 | `evolve_timeframe`（空=跟随 default_timeframe）+ `evolve_symbols` 可单元素；固定品种时跨标 OOS 自动降级同标评估（**预期行为，不是 bug**） | 解耦是 2026-08 特性；"降级"曾差点被当 bug 修回 | `docs/EVOLVE_SPEC_SYMBOL_TIMEFRAME.md` |
+| D13 | 回退只更新 ModelZoo 文件就宣称成功 | 回退成功 = ModelZoo 快照 + flat 兼容文件 + 动态注册表 + 当前运行实例四者一致；自动/手动回退统一走 `EvolveEngine.deploy_model`，任一恢复失败不伪报成功 | 回退后 best/flat/注册/runtime 实例同版本，`runtime_reload` 状态可见 |
+| D14 | 跨符号/周期/配置比较回退基线 | 锚点带 `training_identity`（symbol/timeframe/state_window/config_fingerprint），身份不一致跳过回退比较；因子 OOS 不合格只存档、不设 best | `tests/test_evolve_identity.py`；`_identity_mismatch` 阻断跨种类 |
 | D12 | 删 reward_val_gap_penalty | 训练奖励含 val-gap 衰减扣分项 | 删了=DRL 过拟合回升（2026-08 调优成果） | 训练日志 val_gap 项存在 |
 
 ### E. 前端（index.html 单体）

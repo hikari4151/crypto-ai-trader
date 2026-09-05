@@ -23,6 +23,7 @@ import random
 import threading
 import time
 from datetime import datetime, timezone
+from collections.abc import Awaitable
 from typing import Any, Callable, Optional
 
 from backtest.data_loader import generate_demo
@@ -249,6 +250,27 @@ class EvolveEngine:
         self._training_done.set()
         # 拉数串行锁：三管线 + 跨标 OOS 并发打交易所会放大 429，统一串行化
         self._fetch_lock = asyncio.Lock()
+        # 部署编排：可选的运行时 reload 回调（由 TradingEngine 注入）。
+        # 未配置时部署仍完成文件与注册表层，runtime_reload 标记 skipped。
+        self._deployment_reload: Optional[Callable[[str, int, dict], Awaitable[Optional[dict]]]] = None
+        # 部署/候选状态：candidate 是本轮训练结果，deployed 是当前 best 快照。
+        # 回退轮 candidate_fitness 与 deployed_fitness 分离后，UI 不再误把
+        # 被回退的候选值当成"当前模型收益"。
+        self._deploy_status: dict[str, dict] = {
+            m: {
+                "candidate_fitness": None, "deployed_fitness": None,
+                "deployed_version": None, "deployed_source": "",
+                "last_outcome": "", "anchor_mismatch": "",
+                "runtime_reload": "skipped",
+            } for m in ("factor_miner", "strategy_drl", "meta_controller")
+        }
+
+    def set_deployment_reload(
+        self,
+        callback: Optional[Callable[[str, int, dict], Awaitable[Optional[dict]]]],
+    ) -> None:
+        """注入运行时模型热加载回调（TradingEngine 在构造完成后调用）。"""
+        self._deployment_reload = callback
 
     async def start(self) -> None:
         """启动后台训练循环。"""
@@ -570,6 +592,15 @@ class EvolveEngine:
         out["anchor_locked"] = bool(stalled and anchor.get("fitness") is not None
                                     and not anchor.get("comparable"))
         out["stall_reason"] = ""
+        # 部署/候选画像：candidate vs deployed 分离（Task 2 契约）
+        _ds = self._deploy_status.get(model, {})
+        out["candidate_fitness"] = _ds.get("candidate_fitness")
+        out["deployed_fitness"] = _ds.get("deployed_fitness")
+        out["deployed_version"] = _ds.get("deployed_version")
+        out["deployed_source"] = _ds.get("deployed_source") or ""
+        out["last_outcome"] = _ds.get("last_outcome") or ""
+        out["anchor_mismatch"] = _ds.get("anchor_mismatch") or ""
+        out["runtime_reload"] = _ds.get("runtime_reload") or "skipped"
         if stalled:
             _anchor_txt = ("无锚点" if anchor.get("fitness") is None
                            else f"fitness={anchor['fitness']}"
@@ -585,6 +616,138 @@ class EvolveEngine:
                 out["stall_reason"] = (f"连续 {streak} 轮无模型被接受，均低于当前锚点"
                                        f"（{_anchor_txt}）或被 OOS 硬门拦截")
         return out
+
+    def _mark_deployment_status(self, model: str, *, outcome: str = "",
+                                candidate_fitness: Optional[float] = None,
+                                runtime_reload: str = "skipped",
+                                anchor_mismatch: str = "") -> None:
+        """同步管线部署画像：deployed_* 一律取自 best 快照（zoo 为准），
+        candidate_fitness 由训练轮单独写入，二者分离防止回退轮状态污染。"""
+        status = self._deploy_status.setdefault(model, {
+            "candidate_fitness": None, "deployed_fitness": None,
+            "deployed_version": None, "deployed_source": "",
+            "last_outcome": "", "anchor_mismatch": "",
+            "runtime_reload": "skipped",
+        })
+        if outcome:
+            status["last_outcome"] = outcome
+        if candidate_fitness is not None:
+            status["candidate_fitness"] = candidate_fitness
+        if runtime_reload != "skipped":
+            status["runtime_reload"] = runtime_reload
+        if anchor_mismatch:
+            status["anchor_mismatch"] = anchor_mismatch
+        info = self.zoo.best_info(model)
+        status["deployed_version"] = info.get("version")
+        status["deployed_fitness"] = info.get("fitness")
+        status["deployed_source"] = info.get("data_source") or ""
+
+    async def _register_deployed_model(self, name: str) -> None:
+        """注册当前部署模型为动态策略（与部署快照同源）。"""
+        if name == "strategy_drl":
+            await self._register_rl_evolve()
+        elif name == "meta_controller":
+            from strategies import get_dynamic
+            sub_strategies = resolve_meta_sub_strategies(
+                (get_dynamic("meta_controller") or {}).get("params"))
+            from strategies.meta import MetaControllerStrategy
+            spec = {
+                "name": "meta_controller",
+                "title": "元策略控制器",
+                "description": "DRL 元控制器：在子策略间按学习到的置信度动态选择",
+                "logic": "元级 PPO，状态含子策略信号+置信度+历史胜率",
+                "executor": "meta_controller",
+                "param_schema": MetaControllerStrategy.param_schema,
+                "params": {
+                    "sub_strategies": sub_strategies,
+                    "mode": ((get_dynamic("meta_controller") or {})
+                             .get("params") or {}).get("mode") or "drl",
+                    "model_path": str(self.zoo._flat_path("meta_controller")),
+                },
+                "risk_tips": ["元策略依赖子策略质量，建议定期重训"],
+                "created_by": "evolve_engine",
+                "version": f"v{self.zoo.best_version('meta_controller') or 0}",
+                "base_symbol": self._effective_symbol() if hasattr(self, "_effective_symbol") else "",
+                "base_timeframe": self._effective_timeframe(),
+                "pine_code": "",
+                "pine_note": ("元策略控制器在子策略间动态切换，无等价 Pine 模板；"
+                              "如需图上买卖点请对单个子策略导出 Pine"),
+            }
+            register_dynamic("meta_controller", spec)
+            await self._upsert_ai_strategy("meta_controller", spec)
+
+    async def deploy_model(self, name: str, version: int, *,
+                           outcome: str, symbol: str = "",
+                           timeframe: str = "", reason: str = "") -> dict:
+        """统一部署入口：磁盘快照恢复 → 动态策略注册 → 运行时 reload。
+
+        自动接受、自动回退、手动回退共用本入口。任何一层失败都不伪报成功：
+        reload 失败时尝试恢复部署前的 best 快照，仍失败则保留现场并返回错误。
+        _train_lock 由调用方在必要时持有；本方法不重复加锁。
+        """
+        if name not in self._models:
+            return {"ok": False, "error": f"未知模型 {name}，可选：{'/'.join(self._models)}",
+                    "version": version, "meta": {}, "runtime_reload": {},
+                    "registered": False}
+        zoo = self.zoo
+        old_best = zoo.best_version(name)
+        try:
+            restored = await asyncio.to_thread(
+                zoo.restore_deployment, name, version,
+                reason=reason or outcome, outcome=outcome)
+        except Exception as e:  # noqa: BLE001
+            self._mark_deployment_status(name, outcome="failed", runtime_reload="failed")
+            log.warning("[evolve] 部署快照恢复失败(%s v%d): %s", name, version, e)
+            return {"ok": False, "version": version, "meta": {},
+                    "runtime_reload": {"status": "failed", "error": str(e)},
+                    "registered": False, "error": str(e)}
+        deployed_meta = restored.get("meta") or {}
+        registered = True
+        try:
+            await self._register_deployed_model(name)
+        except Exception as e:  # noqa: BLE001
+            registered = False
+            log.warning("[evolve] 部署后策略注册失败(%s): %s", name, e)
+
+        if self._deployment_reload is None:
+            self._mark_deployment_status(name, outcome=outcome,
+                                         runtime_reload="skipped")
+            log.info("[evolve] 部署完成(%s v%d, 无运行时回调, outcome=%s)",
+                     name, version, outcome)
+            return {"ok": True, "version": version, "meta": deployed_meta,
+                    "runtime_reload": {"status": "skipped"},
+                    "registered": registered, "error": None}
+        try:
+            result = await self._deployment_reload(name, version, deployed_meta)
+        except Exception as e:  # noqa: BLE001
+            result = {"status": "failed", "error": str(e)}
+        if result and result.get("status") == "reloaded":
+            self._mark_deployment_status(name, outcome=outcome,
+                                         runtime_reload="reloaded")
+            log.info("[evolve] 部署完成(%s v%d, 运行实例已热加载, outcome=%s)",
+                     name, version, outcome)
+            return {"ok": True, "version": version, "meta": deployed_meta,
+                    "runtime_reload": result, "registered": registered,
+                    "error": None}
+        # reload 失败：恢复到部署前的版本，不留下"文件已回退、运行时未回退"
+        # 的半成功状态。恢复失败时保留现场并如实报告。
+        runtime_status = dict(result or {"status": "failed"})
+        if old_best and old_best != version:
+            try:
+                await asyncio.to_thread(
+                    zoo.restore_deployment, name, old_best,
+                    reason=f"reload失败恢复({runtime_status.get('error', '')})",
+                    outcome=outcome)
+            except Exception as e:  # noqa: BLE001
+                log.error("[evolve] reload 失败后恢复 %s v%d 也失败: %s",
+                          name, old_best, e)
+        self._mark_deployment_status(name, outcome="failed",
+                                     runtime_reload="failed")
+        log.warning("[evolve] 部署失败(%s v%d): reload 未成功 %s",
+                    name, version, runtime_status)
+        return {"ok": False, "version": version, "meta": deployed_meta,
+                "runtime_reload": runtime_status, "registered": registered,
+                "error": runtime_status.get("error") or "运行时模型热加载未完成"}
 
     def status(self) -> dict:
         """返回当前训练状态。"""
@@ -1071,9 +1234,15 @@ class EvolveEngine:
                                  f"old={old_fitness:.4f}×{self._rollback_threshold}），已回退最佳版本")
                 except Exception:  # noqa: BLE001
                     pass
-                # 覆盖保存最佳（不递增版本号）
-                await asyncio.to_thread(self.zoo.save_agent_best, best_agent, "factor_miner",
-                                        meta={"fitness": old_fitness, "rollback": True})
+                # 统一部署入口回退到当前锚点版本（候选 fitness 与部署分离）
+                _target_version = anchor.get("version") or self.zoo.best_version("factor_miner")
+                await self.deploy_model(
+                    "factor_miner", _target_version,
+                    outcome="rollback", symbol=symbol, timeframe=self._effective_timeframe(),
+                    reason=f"新模型退化({new_fitness:.4f})")
+                self._mark_deployment_status(
+                    "factor_miner", outcome="rollback",
+                    candidate_fitness=new_fitness)
                 # P2-13：回退轮次也要落库（此前回退路径漏记，曲线因此长期空白）
                 await self._log_round(
                     "factor_miner", symbol, self._effective_timeframe(),
@@ -1101,6 +1270,8 @@ class EvolveEngine:
             meta={"fitness": new_fitness, "timestamp": time.time(),
                   "data_source": data_source_used},
             is_best=is_best)
+        self._mark_deployment_status("factor_miner", outcome="accepted",
+                                     candidate_fitness=new_fitness)
         try:
             from core.notify import notify
             # P4-E1：old_fitness 只在上方 comparable 分支内绑定；锚点不可比路径
@@ -1298,8 +1469,12 @@ class EvolveEngine:
                                  f"策略DRL新模型退化（{cmp_desc}），已回退最佳版本")
                 except Exception:  # noqa: BLE001
                     pass
-                await asyncio.to_thread(self.zoo.save_agent_best, best_agent, "strategy_drl",
-                                         meta={"fitness": prev_fitness, "rollback": True})
+                await self.deploy_model(
+                    "strategy_drl", anchor.get("version") or self.zoo.best_version("strategy_drl"),
+                    outcome="rollback", symbol=symbol, timeframe=self._effective_timeframe(),
+                    reason=f"新模型退化({cmp_desc})")
+                self._mark_deployment_status("strategy_drl", outcome="rollback",
+                                             candidate_fitness=new_fitness)
                 # P2-13：回退轮次也要落库（此前回退路径漏记，曲线因此长期空白）
                 _oos_report_rb = result.get("oos_report") or {}
                 await self._log_round(
@@ -1309,18 +1484,13 @@ class EvolveEngine:
                     oos_ret=_oos_report_rb.get("oos_ret", 0.0) or 0.0,
                     decay=_oos_report_rb.get("decay", 0.0) or 0.0,
                     position_ratio=_oos_report_rb.get("oos_position_ratio", 0.0) or 0.0)
-                # 回退后 flat 已被旧模型覆盖（save_agent_best 连带清掉 pine_code 元数据），
-                # 重新注册一次：rl_evolve 的 Pine 必须来自图上/实盘实际运行的那份权重
-                try:
-                    await self._register_rl_evolve()
-                except Exception as e:  # noqa: BLE001
-                    log.warning("[evolve] 回退后策略重注册失败: %s", e)
                 # P4-E1：回退轮补发 evolve_train 事件（与因子挖掘一致）
                 await self.bus.publish(Event(EventType.SYSTEM, {
                     "kind": "evolve_train",
                     "model": "strategy_drl",
                     "fitness": float(new_fitness),
                     "status": "rollback",
+                    "deployed_version": self.zoo.best_version("strategy_drl"),
                 }, source="evolve_engine"))
                 return
         elif best_agent is not None:
@@ -1432,6 +1602,8 @@ class EvolveEngine:
                                     meta={"fitness": new_fitness, "timestamp": time.time(),
                                           "data_source": data_source_used,
                                           "oos_ret": (result.get("oos_report") or {}).get("oos_ret")})
+            self._mark_deployment_status("strategy_drl", outcome="accepted",
+                                         candidate_fitness=new_fitness)
         try:
             from core.notify import notify
             _oos = (result.get("oos_report") or {}).get("oos_ret")
@@ -1628,8 +1800,12 @@ class EvolveEngine:
                              f"元控制器新模型退化（{meta_cmp_desc}），已回退最佳版本")
             except Exception:  # noqa: BLE001
                 pass
-            await asyncio.to_thread(self.zoo.save_agent_best, best_agent, "meta_controller",
-                                     meta={"fitness": prev_fitness, "rollback": True})
+            await self.deploy_model(
+                "meta_controller", anchor.get("version") or self.zoo.best_version("meta_controller"),
+                outcome="rollback", symbol=symbol, timeframe=self._effective_timeframe(),
+                reason=f"新模型退化({meta_cmp_desc})")
+            self._mark_deployment_status("meta_controller", outcome="rollback",
+                                         candidate_fitness=best_ret)
             # P2-13：回退轮次也要落库（此前回退路径漏记，曲线因此长期空白）
             await self._log_round(
                 "meta_controller", symbol, self._effective_timeframe(),
@@ -1687,6 +1863,8 @@ class EvolveEngine:
             meta={"fitness": best_ret, "timestamp": time.time(),
                   "data_source": "exchange",
                   "oos_ret": (result.get("oos_report") or {}).get("oos_ret")})
+        self._mark_deployment_status("meta_controller", outcome="accepted",
+                                     candidate_fitness=best_ret)
 
         # 5. 注册为可用策略
         try:

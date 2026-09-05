@@ -533,21 +533,52 @@ async def iterate_strategy(payload: dict = {}, engine=Depends(get_engine)):
                 previous = []
             _ai_progress(task_id, "ai", "AI 批判性反思中", 45,
                          "审视失效点 + 对照前代改进效果…")
+
+            def _to_validation_df(candles):
+                """candles=[[ts,o,h,l,c,v],...] → 验证门 DataFrame；不足 200 根返回 None。"""
+                if not candles or len(candles) < 200:
+                    return None
+                try:
+                    import pandas as pd
+                    df = pd.DataFrame(candles, columns=["ts", "open", "high", "low", "close", "volume"])
+                    df["timestamp"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+                    return df.set_index("timestamp")[["open", "high", "low", "close", "volume"]].astype(float)
+                except Exception:  # noqa: BLE001
+                    return None
+
             validation_df = None
+            validation_df_alt = None
+            alt_candles = None
+            alt_tf = None
             try:
                 candles = guard_candles or snap.get("candles", [])
-                if len(candles) >= 200:
-                    import pandas as pd
-                    validation_df = pd.DataFrame(candles, columns=["ts", "open", "high", "low", "close", "volume"])
-                    validation_df["timestamp"] = pd.to_datetime(validation_df["ts"], unit="ms", utc=True)
-                    validation_df = validation_df.set_index("timestamp")[["open", "high", "low", "close", "volume"]].astype(float)
+                validation_df = _to_validation_df(candles)
+                # 备选验证窗口：主窗口（通常为引擎当前周期/近 3000 根）内若 0 成交
+                # （如 grid_pct 超出窗口波动导致网格永不触发），自动换更大周期/更长
+                # 历史重验同一版参数，避免"窗口恰好横盘→全 0 指标→误判绩效下降"。
+                sym = snap.get("symbol") or engine.symbol or "BTC/USDT"
+                tf = snap.get("timeframe") or engine.timeframe or "1h"
+                alt_candles = None
+                if tf == "5m":
+                    alt_candles = await engine._fetch_history_ohlcv(
+                        engine.GUARD_CANDLES, symbol=sym, timeframe="1h")
+                    alt_tf = "1h"
+                else:
+                    alt_candles = await engine._fetch_history_ohlcv(
+                        engine.GUARD_CANDLES * 2, symbol=sym, timeframe=tf)
+                    alt_tf = tf
+                if alt_candles and len(alt_candles) >= 200:
+                    validation_df_alt = _to_validation_df(alt_candles)
             except Exception:  # noqa: BLE001
-                validation_df = None
+                log.warning("[ai] 构造验证窗口失败（降级为不验证）: %s", exc_info=True)
             result = await engine.iteration.iterate(
                 target, perf, snap, backtests, previous,
                 validation_df=validation_df,
                 validation_symbol=snap.get("symbol", "BTC/USDT"),
                 validation_timeframe=snap.get("timeframe", "1h"),
+                validation_df_alt=validation_df_alt,
+                validation_alt_symbol=snap.get("symbol", "BTC/USDT"),
+                validation_alt_timeframe=alt_tf if alt_candles else None,
                 require_improve=True,
                 goal=(payload or {}).get("goal", ""))
             if result is None:

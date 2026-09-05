@@ -14,6 +14,10 @@ _CONFIG_KEYS = {
     "rolling_window", "rollback_threshold", "factor_miner_episodes",
     "strategy_drl_episodes", "meta_episodes", "vol_penalty", "oos_min_bars",
     "cross_symbol_oos", "min_new_bars",
+    # P0/P1：续训控成本 + 锚点量级闸 + 故障期暂停
+    "train_time_budget", "min_train_gap_sec", "train_on_demo", "anchor_max_fitness",
+    # P0-族群：策略 DRL 冠军/挑战者 K=2 族群开关
+    "strategy_drl_population",
 }
 _SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]*/[A-Z0-9][A-Z0-9._-]*(?::[A-Z0-9][A-Z0-9._-]*)?$")
 

@@ -19,6 +19,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import math
 import random
 import threading
 import time
@@ -255,7 +256,9 @@ class EvolveEngine:
                                      "oos_rejected": "", "_demo_streak": 0}
         self._strategy_drl_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
                                      "last_error": "", "next_run": 0, "last_success": False,
-                                     "oos_rejected": "", "_demo_streak": 0}
+                                     "oos_rejected": "", "_demo_streak": 0,
+                                     # P0-族群：冠军/挑战者轮次计数与当前谱系（展示用）
+                                     "_pop_round": 0, "lineage": "main"}
         self._meta_controller_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
                                         "last_error": "", "next_run": 0, "last_success": False,
                                         "oos_rejected": "", "_demo_streak": 0,
@@ -891,6 +894,11 @@ class EvolveEngine:
             "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
             "cross_symbol_oos": bool(getattr(settings, "evolve_cross_symbol_oos", True)),
             "min_new_bars": int(getattr(settings, "evolve_min_new_bars", 2)),
+            "train_time_budget": float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0),
+            "min_train_gap_sec": int(getattr(settings, "evolve_min_train_gap_sec", 0) or 0),
+            "train_on_demo": bool(getattr(settings, "evolve_train_on_demo", False)),
+            "anchor_max_fitness": float(getattr(settings, "evolve_anchor_max_fitness", 50.0) or 0.0),
+            "strategy_drl_population": bool(getattr(settings, "evolve_strategy_drl_population", True)),
         }
 
     async def apply_config(self, changes: dict) -> dict:
@@ -990,6 +998,17 @@ class EvolveEngine:
             _check("vol_penalty", "evolve_vol_penalty", conv=float, min_v=0.0, max_v=1000.0)
             _check("oos_min_bars", "evolve_oos_min_bars", conv=int, min_v=50, max_v=100000)
             _check("min_new_bars", "evolve_min_new_bars", conv=int, min_v=0, max_v=100000)
+            _check("train_time_budget", "evolve_train_time_budget", conv=float, min_v=0.0, max_v=86400.0)
+            _check("min_train_gap_sec", "evolve_min_train_gap_sec", conv=int, min_v=0, max_v=604800)
+            _check("anchor_max_fitness", "evolve_anchor_max_fitness", conv=float, min_v=0.0, max_v=1e9)
+            if "train_on_demo" in changes and changes["train_on_demo"] is not None:
+                if not isinstance(changes["train_on_demo"], bool):
+                    raise ValueError("train_on_demo 必须是布尔值")
+                pending.append(("evolve_train_on_demo", changes["train_on_demo"], None))
+            if "strategy_drl_population" in changes and changes["strategy_drl_population"] is not None:
+                if not isinstance(changes["strategy_drl_population"], bool):
+                    raise ValueError("strategy_drl_population 必须是布尔值")
+                pending.append(("evolve_strategy_drl_population", changes["strategy_drl_population"], None))
             if "cross_symbol_oos" in changes and changes["cross_symbol_oos"] is not None:
                 if not isinstance(changes["cross_symbol_oos"], bool):
                     raise ValueError("cross_symbol_oos 必须是布尔值")
@@ -1207,13 +1226,21 @@ class EvolveEngine:
         symbol = self._next_symbol()
         self._factor_miner_status["symbol"] = symbol
 
-        # 1. 获取最新数据（交易所不可达时用演示数据兜底）
+        # 1. 获取最新数据（交易所不可达时按配置决定：跳过本轮 或 用演示数据兜底）
         df = await self._fetch_latest_data(symbol=symbol)
         if df is None or len(df) < self._rolling_window * 0.1:
             if df is None:
-                data_source_used = "demo"
                 # P4-C1：递增连续 demo 计数（供 _run_loop 降频）
                 self._factor_miner_status["_demo_streak"] = int(self._factor_miner_status.get("_demo_streak", 0)) + 1
+                # P1：evolve_train_on_demo=False（默认）时故障期直接跳过——
+                # demo 模型永远不会被部署，故障期每 60s 全量重训纯烧 CPU，
+                # 合成数据的 OOS 还必为负、徒增回退噪声。跳过同样返回 False
+                # （与增量门同语义），_run_loop 的降频逻辑照常生效。
+                if not getattr(settings, "evolve_train_on_demo", False):
+                    self._factor_miner_status["last_error"] = f"交易所数据不可达，已暂停训练（{symbol}）"
+                    log.warning("[evolve] 因子挖掘（%s）：交易所数据不可达，跳过本轮（演示训练已禁用）", symbol)
+                    return False
+                data_source_used = "demo"
                 self._factor_miner_status["last_error"] = f"交易所数据不可达，已用合成数据兜底（{symbol}）"
                 log.warning("[evolve] 因子挖掘（%s）：交易所数据不可达，使用合成数据兜底", symbol)
                 df = self._generate_symbol_demo(symbol, n=self._rolling_window, timeframe=self._effective_timeframe())
@@ -1243,7 +1270,11 @@ class EvolveEngine:
         # 计算全部内置因子，纯 pandas 向量化数百毫秒~秒级，留在主协程会阻塞事件循环）
         mat = await asyncio.to_thread(compute_factor_matrix, df)
 
-        # 5. 训练
+        # 5. 训练（P0：续训——把已加载的 best_agent 传给训练器作为起点。
+        # 此前 load_agent 只用于回退对照，训练本体每次随机初始化重训，
+        # 8 轮 PPO 从零起步学不到东西 → 每轮都被锚点回退，形成死循环。
+        # 现在每轮在旧模型上小步增量，成本大幅下降、模型真正进化。
+        # 续训只换起点：OOS 安检、回退保护、demo 轮短路等防线全部照常生效。)
         def _train():
             return train_factor_miner(
                 df, mat=mat,
@@ -1260,6 +1291,8 @@ class EvolveEngine:
                     "ic_window": 120,
                     "max_steps": 6,
                     "corr_threshold": 0.85,
+                    "base_agent": best_agent,   # 续训起点（None=首轮从零）
+                    "time_budget": float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0),
                 },
                 # 不传 on_progress 避免回调跨线程
             )
@@ -1475,16 +1508,22 @@ class EvolveEngine:
 
     async def _train_strategy_drl_once(self, force: bool = False) -> Optional[bool]:
         """执行一次策略 DRL 训练，并注册为可用策略（轮换训练标的：BTC/ETH/SOL）。"""
-        # 1. 获取最新数据（交易所不可达时用演示数据兜底）
+        # 1. 获取最新数据（交易所不可达时按配置决定：跳过本轮 或 用演示数据兜底）
         data_source_used = "exchange"
         symbol = self._next_symbol()
         self._strategy_drl_status["symbol"] = symbol
         df = await self._fetch_latest_data(symbol=symbol)
         if df is None or len(df) < self._rolling_window * 0.1:
             if df is None:
-                data_source_used = "demo"
                 # P4-C1：递增连续 demo 计数（供 _run_loop 降频）
                 self._strategy_drl_status["_demo_streak"] = int(self._strategy_drl_status.get("_demo_streak", 0)) + 1
+                # P1：evolve_train_on_demo=False（默认）时故障期直接跳过——
+                # demo 模型永远不会被部署，故障期全量重训纯烧 CPU（与因子挖掘同口径）。
+                if not getattr(settings, "evolve_train_on_demo", False):
+                    self._strategy_drl_status["last_error"] = f"交易所数据不可达，已暂停训练（{symbol}）"
+                    log.warning("[evolve] 策略DRL（%s）：交易所数据不可达，跳过本轮（演示训练已禁用）", symbol)
+                    return False
+                data_source_used = "demo"
                 self._strategy_drl_status["last_error"] = f"交易所数据不可达，已用合成数据兜底（{symbol}）"
                 log.warning("[evolve] 策略DRL（%s）：交易所数据不可达，使用合成数据兜底", symbol)
                 df = self._generate_symbol_demo(symbol, n=self._rolling_window, timeframe=self._effective_timeframe())
@@ -1506,8 +1545,21 @@ class EvolveEngine:
                                                     is_demo=(data_source_used == "demo")):
             return False
 
-        # 3. 加载上次最佳模型（续训）
-        agent = self.zoo.load_agent("strategy_drl")
+        # P0-族群：冠军/挑战者 K=2 交替。_pop_round 每完成一轮真实训练递增一次
+        # （增量门跳过/故障跳过不计），偶数为冠军轮（走原路径，部署+注册），
+        # 奇数为挑战者轮（独立谱系 strategy_drl_alt，须显著优于冠军才晋升）。
+        # 每轮仍只训一个模型 → 墙钟成本不变；多样性来自两条谱系独立进化。
+        _pop_on = bool(getattr(settings, "evolve_strategy_drl_population", True))
+        # force（手动触发）恒走冠军谱系：手动训练语义是"更新部署模型"，
+        # 挑战者轮只由后台连续训练节奏驱动。
+        _round_no = int(self._strategy_drl_status.get("_pop_round", 0))
+        is_challenger = bool(_pop_on and not force and (_round_no % 2 == 1))
+        self._strategy_drl_status["_pop_round"] = _round_no + 1
+        self._strategy_drl_status["lineage"] = "challenger" if is_challenger else "main"
+        lineage_name = "strategy_drl_alt" if is_challenger else "strategy_drl"
+
+        # 3. 加载本轮谱系的上次最佳模型（续训）
+        agent = self.zoo.load_agent(lineage_name)
         best_agent = agent
 
         # 级联因子值：按当前训练标的加载，保证注入的因子与训练标的一致（P4-A1）
@@ -1518,13 +1570,19 @@ class EvolveEngine:
         train_cfg = _strategy_drl_train_cfg(
             getattr(settings, "evolve_strategy_drl_episodes", 8))
 
-        # 4. 训练
+        # 4. 训练（P0：续训——best_agent 传入作为起点。此前 load_agent 只用于
+        # 回退对照，训练每次随机初始化重训，8 轮 PPO 从零起步学不到东西 →
+        # 每轮都被锚点回退，形成死循环。现在每轮在旧模型上小步增量，
+        # 成本大幅下降、模型真正进化。续训只换起点：OOS 硬门、回退保护、
+        # 训练身份隔离、demo 短路全部照常生效。）
         def _train():
             # 级联因子注入：加载 factor_miner 产出的组合因子值（若有），
             # 作为策略 DRL 的额外状态特征（与训练/部署口径一致）
             if cascade_factor_values is not None:
                 train_cfg["factor_values"] = cascade_factor_values
                 log.info("[evolve] 已注入级联组合因子到策略 DRL 训练")
+            train_cfg["base_agent"] = best_agent   # 续训起点（None=首轮从零）
+            train_cfg["time_budget"] = float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0)
             return train_drl(df, train_cfg, on_progress=None)
 
         result = await self._run_train(_train)
@@ -1566,9 +1624,10 @@ class EvolveEngine:
         if data_source_used == "demo":
             log.warning("[evolve] 策略DRL（%s）demo 数据轮：跳过回退/OOS 门，存档留证", symbol)
             try:
-                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "strategy_drl",
+                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], lineage_name,
                                         meta={"fitness": new_fitness, "timestamp": time.time(),
-                                              "data_source": "demo", "demo_blocked": True})
+                                              "data_source": "demo", "demo_blocked": True,
+                                              "lineage": ("challenger" if is_challenger else "main")})
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 策略DRL demo 存档失败: %s", e)
             await self._log_round("strategy_drl", symbol, self._effective_timeframe(),
@@ -1579,7 +1638,32 @@ class EvolveEngine:
         # P1-6 回退判据统一为 OOS 收益——与部署门同口径，不再用训练段收益比较）
         # 锚点口径不可比时跳过比较：demo 合成数据留下的高分基线（实测 3.9167）真实
         # 行情一辈子也够不到，只会把每一轮都判成"退化"，进化循环事实上停摆。
-        if best_agent is not None and anchor.get("comparable"):
+        # P0-族群：冠军轮走"退化即回退"；挑战者轮走"显著优于冠军才晋升"——
+        # 挑战者永不动部署端（best/flat/注册全保留），只有晋升那一轮才接管冠军槽位。
+        # 挑战者轮的晋升只依赖冠军锚点（best_info("strategy_drl")），与挑战者自身
+        # 起点无关——首轮 alt 槽位为空（best_agent=None）也应能与冠军比较。
+        promote = False  # 挑战者轮晋升标志（冠军轮恒 False，不用）
+        if is_challenger:
+            if anchor.get("comparable") and not _identity_mismatch(anchor, _identity):
+                oos_report = result.get("oos_report") or {}
+                new_oos = float(oos_report.get("oos_ret") or 0.0) if oos_report.get("enabled") else None
+                prev_oos = anchor.get("oos_ret")
+                if new_oos is not None and prev_oos is not None:
+                    # 挑战者须显著优于冠军才晋升（> 冠军×(1/threshold)，防噪音替换）
+                    promote = new_oos > float(prev_oos) * (1.0 / max(self._rollback_threshold, 1e-6))
+                    cmp_desc = f"挑战者OOS {new_oos:.4f} vs 冠军 {float(prev_oos):.4f}×(1/{self._rollback_threshold})"
+                else:
+                    # 旧模型缺 OOS 记录（升级前版本）：退化为训练段收益比较
+                    promote = new_fitness > prev_fitness * (1.0 / max(self._rollback_threshold, 1e-6))
+                    cmp_desc = f"挑战者fitness {new_fitness:.4f} vs 冠军 {prev_fitness:.4f}×(1/{self._rollback_threshold})"
+                if promote:
+                    log.info("[evolve] 策略DRL挑战者显著优于冠军（%s），晋升接管冠军槽位", cmp_desc)
+                else:
+                    log.info("[evolve] 策略DRL挑战者未显著优于冠军（%s），保留冠军，挑战者更新自身谱系", cmp_desc)
+            else:
+                log.info("[evolve] 策略DRL挑战者轮：冠军锚点不可比（%s），不晋升",
+                         anchor.get("reason") or "身份不匹配")
+        elif best_agent is not None and anchor.get("comparable"):
             identity_mismatch = _identity_mismatch(anchor, _identity)
             if identity_mismatch:
                 self._mark_deployment_status("strategy_drl", anchor_mismatch=identity_mismatch)
@@ -1643,10 +1727,11 @@ class EvolveEngine:
             # 模型多了会把真改进版挤出版本历史。
             log.warning("[evolve] 策略DRL 未通过 OOS 硬门，保留原最佳模型：%s", gate_reason)
             try:
-                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "strategy_drl",
+                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], lineage_name,
                                         meta={"fitness": new_fitness, "timestamp": time.time(),
                                               "data_source": data_source_used,
-                                              "oos_rejected": gate_reason})
+                                              "oos_rejected": gate_reason,
+                                              "lineage": ("challenger" if is_challenger else "main")})
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 被拦截模型存档失败: %s", e)
             try:
@@ -1687,13 +1772,14 @@ class EvolveEngine:
                         cross_oos.get("symbol"), cross_oos.get("ret", 0.0))
             try:
                 # P4-C2：仅存档不占版本名额（跨标被拦模型非有效改进）
-                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "strategy_drl",
+                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], lineage_name,
                                         meta={"fitness": new_fitness, "timestamp": time.time(),
                                               "data_source": data_source_used,
                                               "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
                                               "cross_oos_rejected": True,
                                               "cross_symbol": cross_oos.get("symbol"),
-                                              "cross_oos_ret": cross_oos.get("ret", 0.0)})
+                                              "cross_oos_ret": cross_oos.get("ret", 0.0),
+                                              "lineage": ("challenger" if is_challenger else "main")})
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 跨标被拦模型存档失败: %s", e)
             try:
@@ -1722,14 +1808,75 @@ class EvolveEngine:
         # P0-2：demo 数据训练只存档不写 best（is_best=False），
         # 且跳过兼容格式 flat 写入（rl_adaptive 部署端读取的正是 flat 文件，
         # 若被合成数据模型覆盖，实盘会被未经验证的权重接管）。
-        if data_source_used == "demo":
+        # P0-族群：挑战者轮未晋升 → 只更新挑战者谱系槽位（strategy_drl_alt，
+        # 独立 best/flat，不触碰部署端），记 challenger_kept 后收尾；
+        # 晋升 → 与冠军轮同样落盘部署（下方 else 分支）。
+        if is_challenger and not promote:
+            # 挑战者谱系自保护：新模型若相对挑战者自身锚点退化（< 自身×threshold），
+            # 只存档不覆盖 alt 槽位——谱系质量优先，退化模型不进族群。
+            alt_anchor = self.zoo.best_info("strategy_drl_alt")
+            alt_prev = alt_anchor.get("fitness")
+            if alt_prev is not None and _should_rollback(new_fitness, float(alt_prev), self._rollback_threshold):
+                log.info("[evolve] 策略DRL挑战者相对自身退化（%.4f < %.4f×%.2f），只存档不更新谱系",
+                         new_fitness, float(alt_prev), self._rollback_threshold)
+                try:
+                    await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "strategy_drl_alt",
+                                            meta={"fitness": new_fitness, "timestamp": time.time(),
+                                                  "data_source": data_source_used,
+                                                  "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
+                                                  "lineage": "challenger", "challenger_degraded": True})
+                except Exception as e:  # noqa: BLE001
+                    log.warning("[evolve] 挑战者退化存档失败: %s", e)
+                await self._log_round(
+                    "strategy_drl", symbol, self._effective_timeframe(),
+                    data_source_used, new_fitness,
+                    status="challenger_degraded",
+                    oos_ret=(result.get("oos_report") or {}).get("oos_ret", 0.0) or 0.0,
+                    decay=(result.get("oos_report") or {}).get("decay", 0.0) or 0.0,
+                    position_ratio=(result.get("oos_report") or {}).get("oos_position_ratio", 0.0) or 0.0)
+                await self.bus.publish(Event(EventType.SYSTEM, {
+                    "kind": "evolve_train",
+                    "model": "strategy_drl",
+                    "fitness": new_fitness,
+                    "lineage": "challenger",
+                    "status": "challenger_degraded",
+                }, source="evolve_engine"))
+                return
+            log.info("[evolve] 策略DRL挑战者更新自身谱系（不晋升，冠军部署不动）")
             try:
-                # P4-C2：demo 模型仅存档不占版本名额（合成数据模型非真实改进）
-                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "strategy_drl",
+                await asyncio.to_thread(self.zoo.save_agent, result["agent"], "strategy_drl_alt",
                                         meta={"fitness": new_fitness, "timestamp": time.time(),
                                               "data_source": data_source_used,
                                               "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
-                                              "demo_blocked": True})
+                                              "base_oos_ret": anchor.get("oos_ret"),
+                                              "base_fitness": anchor.get("fitness"),
+                                              "lineage": "challenger", **_identity})
+            except Exception as e:  # noqa: BLE001
+                log.warning("[evolve] 挑战者谱系保存失败: %s", e)
+            await self._log_round(
+                "strategy_drl", symbol, self._effective_timeframe(),
+                data_source_used, new_fitness,
+                status="challenger_kept",
+                oos_ret=(result.get("oos_report") or {}).get("oos_ret", 0.0) or 0.0,
+                decay=(result.get("oos_report") or {}).get("decay", 0.0) or 0.0,
+                position_ratio=(result.get("oos_report") or {}).get("oos_position_ratio", 0.0) or 0.0)
+            await self.bus.publish(Event(EventType.SYSTEM, {
+                "kind": "evolve_train",
+                "model": "strategy_drl",
+                "fitness": new_fitness,
+                "lineage": "challenger",
+                "status": "challenger_kept",
+            }, source="evolve_engine"))
+            return
+
+        if data_source_used == "demo":
+            try:
+                # P4-C2：demo 模型仅存档不占版本名额（合成数据模型非真实改进）
+                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], lineage_name,
+                                        meta={"fitness": new_fitness, "timestamp": time.time(),
+                                              "data_source": data_source_used,
+                                              "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
+                                              "demo_blocked": True, "lineage": ("challenger" if is_challenger else "main")})
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] demo 模型存档失败: %s", e)
             log.warning("[evolve] 策略DRL使用演示数据训练，仅存档不部署（防实盘被未验证模型接管）")
@@ -1738,6 +1885,14 @@ class EvolveEngine:
                                     meta={"fitness": new_fitness, "timestamp": time.time(),
                                           "data_source": data_source_used,
                                           "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
+                                          # P2 续训护栏审计：记录起点（旧模型）的 OOS/收益，
+                                          # 让"续训后是否真进步"可追溯。接受路径已保证
+                                          # new_oos ≥ prev_oos×threshold（rollback 守卫），
+                                          # 这里把对比写进 meta 供前端/审计展示。
+                                          "base_oos_ret": anchor.get("oos_ret"),
+                                          "base_fitness": anchor.get("fitness"),
+                                          "base_version": anchor.get("version"),
+                                          "lineage": ("challenger_promoted" if is_challenger else "main"),
                                           **_identity})
             self._mark_deployment_status("strategy_drl", outcome="accepted",
                                          candidate_fitness=new_fitness)
@@ -1818,6 +1973,7 @@ class EvolveEngine:
             "kind": "evolve_train",
             "model": "strategy_drl",
             "fitness": new_fitness,
+            "lineage": ("challenger_promoted" if is_challenger else "main"),
         }, source="evolve_engine"))
 
     # ---- 元策略控制器持续训练 ----
@@ -1868,7 +2024,10 @@ class EvolveEngine:
             (get_dynamic("meta_controller") or {}).get("params"))
         self._meta_controller_status["sub_strategies"] = sub_strategies
 
-        # 3. 训练元控制器
+        # 3. 训练元控制器（P0：续训——best_agent 传入作为起点，与另两管线同口径。
+        # 此前 load_agent 只用于回退对照，元策略每次随机初始化重训 → 每轮被锚点
+        # 回退的死循环。现在每轮在旧模型上小步增量；OOS 硬门/回退保护/身份隔离
+        # 全部照常生效。子策略池变更时本轮仍作废，续训起点不受影响。）
         def _train():
             return train_meta_controller(
                 df, {
@@ -1879,6 +2038,8 @@ class EvolveEngine:
                     "sub_strategies": sub_strategies,
                     "fee_rate": 0.001,
                     "meta_window": 20,
+                    "base_agent": best_agent,   # 续训起点（None=首轮从零）
+                    "time_budget": float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0),
                 },
                 on_progress=None,
             )
@@ -2134,7 +2295,20 @@ class EvolveEngine:
         try:
             # 统计自上次训练以来的新增根数（与 tail_ts 同为 epoch 秒）
             n_new = int((sec > prev).sum())
+            # 增量门槛 = max(手工 min_new_bars, 按周期自动换算)。
+            # P1：evolve_min_train_gap_sec>0 时按训练周期换算所需新增根数——
+            # 训练间隔至少覆盖该秒数（5m 周期下 2 根=10 分钟一轮仍偏密，
+            # 换算后与训练成本/行情节奏更贴合）。0 则仅用 min_new_bars。
             min_bars = max(1, int(getattr(settings, "evolve_min_new_bars", 2)))
+            gap_sec = int(getattr(settings, "evolve_min_train_gap_sec", 0) or 0)
+            if gap_sec > 0:
+                try:
+                    from backtest.data_loader import _TF_SECONDS
+                    tf_sec = int(_TF_SECONDS.get(tf, 1))
+                    need_by_gap = max(1, int(math.ceil(gap_sec / max(tf_sec, 1))))
+                    min_bars = max(min_bars, need_by_gap)
+                except Exception:  # noqa: BLE001
+                    pass  # 换算失败回落 min_bars
             if n_new < min_bars:
                 return False  # 有变化但根数不足，等待积累
         except Exception:  # noqa: BLE001

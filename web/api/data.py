@@ -29,7 +29,8 @@ _DL_STATUS: dict = {"running": False, "symbol": "", "timeframe": "",
 
 @router.get("/series")
 async def list_series():
-    return {"series": kline_store.all_series()}
+    # 同步 SQLite 查询放线程池，避免阻塞事件循环
+    return {"series": await asyncio.to_thread(kline_store.all_series)}
 
 
 class DownloadRequest(BaseModel):
@@ -95,9 +96,12 @@ class DeleteRequest(BaseModel):
 @router.delete("/series")
 async def delete_series(body: DeleteRequest):
     from backtest.data_loader import timeframe_seconds
-    cov = kline_store.coverage(body.exchange, body.symbol, body.timeframe)
+    cov = await asyncio.to_thread(kline_store.coverage, body.exchange, body.symbol, body.timeframe)
     if not cov["count"]:
         raise HTTPException(status_code=404, detail="本地无该序列数据")
-    n = kline_store.delete_range(body.exchange, body.symbol, body.timeframe,
-                                 0, cov["max_ts"] + timeframe_seconds(body.timeframe) * 2000)
+    # delete 前把 WAL 落盘并截断（TRUNCATE），保证删除作用于完整数据视图
+    await asyncio.to_thread(kline_store.checkpoint)
+    n = await asyncio.to_thread(
+        kline_store.delete_range, body.exchange, body.symbol, body.timeframe,
+        0, cov["max_ts"] + timeframe_seconds(body.timeframe) * 2000)
     return {"ok": True, "deleted": n}

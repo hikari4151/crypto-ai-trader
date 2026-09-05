@@ -487,6 +487,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     t0 = time.time()
     # PPO 默认超参（真 PPO：批量收集 + 多轮 mini-batch，比单轨迹更新更稳）
     episodes = int(cfg.get("episodes", 300))
+    # 单轮训练时间预算（秒）：>0 时训练到预算即提前结束（连续训练控成本用，
+    # 续训场景下"学一点就停"优于"从头重训"，且超时后 OOS 门照常把关防过拟合）。
+    # 0 = 不限时（手动训练全量跑满 episodes 用）。
+    time_budget = float(cfg.get("time_budget", 0.0) or 0.0)
     # C2：隐藏层默认 32 而非 64——15 维输入下 64 维隐层过参数化（过拟合风险高），
     # 且 Pine 导出权重规模与隐层平方相关（64×64=4096 vs 32×32=1024，缩小 4 倍）
     hidden = tuple(cfg.get("hidden", [32, 32]))
@@ -627,9 +631,31 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     gamma=float(cfg.get("gamma", 0.99)), seed=seed,
                     entropy_coef=float(cfg.get("entropy_coef", 0.05)),
                     state_window=state_window)
-    # 续训支持：从已训练模型加载权重作为起点（保留已学知识继续增强）
+    # 续训支持：两种起点（优先 base_agent，均为"在旧模型上继续学"）——
+    # 1) base_agent：内存中的 ACAgent 对象（持续进化引擎用，已通过 zoo.load_agent
+    #    加载，无需磁盘往返；必须 deepcopy 权重，否则训练会原地修改 best_agent，
+    #    回退保护就形同虚设）
+    # 2) base_model：模型文件路径（手动训练 API 用，兼容旧调用）
+    # 注意：续训只是起点不同，训练/验证/OOS 切分、OOS 硬门、过拟合衰减全部照常生效。
+    base_agent = cfg.get("base_agent")
     base_model = cfg.get("base_model")
-    if base_model:
+    if base_agent is not None:
+        try:
+            if base_agent.state_dim == agent.state_dim and base_agent.n_actions == agent.n_actions:
+                agent.actor = copy.deepcopy(base_agent.actor)
+                agent.critic = copy.deepcopy(base_agent.critic)
+                log.info("[drl] 已加载内存基础模型作为续训起点（state_dim=%d）", agent.state_dim)
+                # 与 base_model 路径同口径：重设 cfg 的学习率（退火起点 L689-690 之前）
+                agent.actor.lr = float(cfg.get("lr_actor", 2e-3))
+                agent.critic.lr = float(cfg.get("lr_critic", 5e-3))
+                # 续训时保留少量探索，避免刚接手就过度确定
+                agent.epsilon = 0.4
+            else:
+                log.warning("[drl] 基础模型维度不匹配(%s vs %s)，忽略，从零训练",
+                            getattr(base_agent, "state_dim", "?"), agent.state_dim)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[drl] 内存基础模型接入失败，从零训练: %s", e)
+    elif base_model:
         try:
             from .agent import ACAgent as _ACA
             base = _ACA.load(base_model)
@@ -740,6 +766,11 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     pool = ThreadPoolExecutor(max_workers=min(n_episodes, 4))
     try:
         for ep in range(1, episodes + 1):
+            # 时间预算：至少完成 1 轮后超时即提前收尾（保证 history 非空、best_agent 有值）
+            if time_budget > 0 and ep > 1 and (time.time() - t0) >= time_budget:
+                log.info("[drl] 单轮训练达到时间预算 %.0fs（已完成 %d 轮），提前结束",
+                         time_budget, ep - 1)
+                break
             agent.set_episode_epsilon(ep - 1)
             # 学习率退火：训练后期降低更新幅度，收敛更稳
             frac = ep / episodes
@@ -1028,6 +1059,7 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     "mini_batch_size": mini_batch_size, "clip_eps": 0.2,
                     "factor_expression": factor_expr,
                     "replay": {"capacity": replay_capacity, "mix_ratio": replay_mix_ratio}},
+        "time_budget": time_budget,
         "factor_expression": factor_expr,
         "factor_mu": factor_mu,
         "factor_sd": factor_sd,

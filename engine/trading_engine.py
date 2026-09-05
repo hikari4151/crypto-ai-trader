@@ -1039,13 +1039,24 @@ class TradingEngine:
 
         用于迭代正循环：AI 迭代时能看到上一代说了什么、改了什么、效果如何，
         从而避免重复同样错误、真正做到"每一代正向提升"。
+
+        除已注册的成功迭代外，还会把同一基础策略最近被验证门拒绝的记录
+        （iteration_blocked）一并喂给 AI——被拒迭代不落 ai_strategies 表，
+        此前下一轮 AI 完全看不到失败原因，只能盲目重试（如 grid 网格间距
+        超出验证窗口波动导致 0 成交、四指标全 0，被误报"绩效下降"后
+        死循环 v11→v17）。把"上一轮为何被拒"明确反馈回去，AI 才能收敛参数。
         """
         try:
-            from core.database import AiStrategy
+            from core.database import AiStrategy, OptimizationLog
             from sqlalchemy import select
             async with self.db.session() as s:
                 rows = (await s.execute(
                     select(AiStrategy).order_by(AiStrategy.id.desc()).limit(200)
+                )).scalars().all()
+                blocked = (await s.execute(
+                    select(OptimizationLog)
+                    .where(OptimizationLog.kind == "iteration_blocked")
+                    .order_by(OptimizationLog.id.desc()).limit(20)
                 )).scalars().all()
             out = []
             # 基础名归一化：对 dual_ma_v2 再迭代时 based_on 是 "dual_ma_v2"，
@@ -1069,6 +1080,34 @@ class TradingEngine:
                         "backtest": spec.get("backtest"),
                     })
                     if len(out) >= limit:
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
+            # 被拒记录追加在尾部（_previous_block 的 recent 取最后 3 条，被拒原因
+            # 因此优先进入"最近一代完整记录"）；summary 形如
+            # "策略[grid_dense_5m_v10] 迭代 [grid_dense_5m_v11] 验证窗口无成交（0/0 笔）被拒绝"
+            for lg in blocked:
+                try:
+                    text = lg.summary or ""
+                    if f"[{base}" not in text and f"[{based_on}" not in text:
+                        continue
+                    m = re.search(r"迭代\s*\[([^\]]+)\]", text)
+                    rej_name = m.group(1) if m else ""
+                    suggestion = json.loads(lg.suggestion or "{}")
+                    comp = suggestion.get("comparison") if isinstance(suggestion, dict) else None
+                    if not comp:
+                        comp = None
+                    out.append({
+                        "name": rej_name,
+                        "version": "",
+                        "critique": f"上一版被拒：{text}",
+                        "improvements": [],
+                        "summary": text,
+                        "params": json.loads(lg.params_json or "{}"),
+                        "backtest": comp,
+                        "rejected": True,
+                    })
+                    if len(out) >= limit + 2:
                         break
                 except Exception:  # noqa: BLE001
                     continue

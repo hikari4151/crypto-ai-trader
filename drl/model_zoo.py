@@ -458,6 +458,10 @@ class ModelZoo:
         与真实交易所数据不同量级（合成数据能跑到 1267，真实数据 0.3 已算不错），
         拿它当基线会让进化循环永远 rollback。data_source 缺失的老锚点按可比处理
         （保留回退保护），只打 source_unknown 标记供前端提示。
+        P0：再多一道量级闸——demo 锚点在旧版本里写盘时曾把 data_source 抹掉
+        （现场 strategy_drl 的锚点 fitness=1267 且来源为空，导致每轮必回退的
+        永久锁死）。对来源缺失的锚点，若 fitness 超过 settings.evolve_anchor_max_fitness
+        量级上限（默认 50，真实行情收益不可能达到），直接判不可比，解除锁死。
         """
         meta = self._load_meta(name)
         best_version = meta.get("best_version") or 0
@@ -497,6 +501,22 @@ class ModelZoo:
             info["reason"] = ("锚点由合成数据(demo)训练得出，fitness 与真实行情不同口径，"
                               "不可比较——继续用它锁死迭代")
             return info
+        # P0：来源缺失但量级异常（疑似被抹掉 data_source 的 demo 锚点）→ 判不可比
+        if info["source_unknown"] and not info["data_source"]:
+            try:
+                from config.settings import settings as _st
+                cap = float(getattr(_st, "evolve_anchor_max_fitness", 0.0) or 0.0)
+            except Exception:  # noqa: BLE001
+                cap = 0.0
+            if cap > 0 and info["fitness"] is not None:
+                try:
+                    if float(info["fitness"]) > cap:
+                        info["reason"] = (f"锚点 fitness={info['fitness']} 远超真实行情量级上限 "
+                                          f"{cap:.0f}（疑似被抹掉来源的合成数据模型），"
+                                          f"不可比较——建议在面板重置锚点恢复迭代")
+                        return info
+                except (TypeError, ValueError):
+                    pass
         info["comparable"] = True
         return info
 

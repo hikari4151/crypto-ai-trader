@@ -157,6 +157,28 @@ class Settings(BaseSettings):
     evolve_vol_penalty: float = 20.0              # 策略 DRL 波动率惩罚（与 train_drl 默认对齐，原 0.5 偏小压不住波动）
     evolve_cross_symbol_oos: bool = True          # 是否启用跨标的传导 OOS（P1-8）
     evolve_min_new_bars: int = 2                  # 增量训练触发阈值：新增 K 线达此根数才训练（1h 周期 2 根≈2 小时）
+    # P0：单轮训练时间预算（秒）。>0 时训练到预算即提前结束（续训场景"学一点就停"
+    # 优于"从头重训"，超时后 OOS 门照常把关防过拟合）；0 = 不限时跑满 episodes。
+    # 配合续训（base_agent）让 60s 周期内的每轮训练都变得轻量，成本大幅下降。
+    evolve_train_time_budget: float = 0.0
+    # P1：增量门按训练周期自动换算最小新增K线根数——训练间隔至少覆盖
+    # evolve_min_train_gap_sec 秒（5m 周期 2 根=10 分钟一轮仍偏密，换算后更贴合
+    # 训练成本与行情节奏）。0 = 关闭自适应，仅用 evolve_min_new_bars。
+    evolve_min_train_gap_sec: int = 0
+    # P1：交易所故障期是否用合成数据训练（True=保留兜底训练；False=直接跳过，
+    # 彻底省掉故障期 60s 一轮的全量重训 CPU 成本）。demo 模型本就不会被部署，
+    # 故障期训练只烧电不产出，默认关。
+    evolve_train_on_demo: bool = False
+    # P0：锚点 fitness 量级上限。demo 合成数据能跑出 1267 这类量级，真实行情
+    # 0.3 已算不错；data_source 缺失的老锚点无法识破时会永久锁死迭代。
+    # 超过此上限的锚点判为不可比（禁止回退比较，等新模型重建基线）。
+    # 0 = 关闭该检查。
+    evolve_anchor_max_fitness: float = 50.0
+    # P0-族群：策略 DRL 冠军/挑战者 K=2 族群训练开关。开启后训练轮次在两个
+    # 谱系间交替（每轮仍只训一个模型，墙钟成本不变）：冠军谱系照常部署/注册；
+    # 挑战者谱系独立槽位（strategy_drl_alt）提供多样性，须显著优于冠军才晋升，
+    # 防"运气好"的模型靠噪音上位（选择只看 OOS，不看训练段）。
+    evolve_strategy_drl_population: bool = True
 
     @property
     def data_dir(self) -> Path:

@@ -104,6 +104,28 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
                     gamma=float(cfg.get("gamma", 0.95)), seed=seed,
                     entropy_coef=float(cfg.get("entropy_coef", 0.05)))
 
+    # 续训支持（与 train_drl 同口径）：base_agent 为内存 ACAgent 对象
+    # （持续进化引擎用），权重必须 deepcopy——否则训练原地修改 best_agent，
+    # 回退保护失效。续训只换起点，OOS 安检/回退比较等防线照常生效。
+    base_agent = cfg.get("base_agent")
+    if base_agent is not None:
+        try:
+            if base_agent.state_dim == agent.state_dim and base_agent.n_actions == agent.n_actions:
+                agent.actor = copy.deepcopy(base_agent.actor)
+                agent.critic = copy.deepcopy(base_agent.critic)
+                log.info("[factor_miner] 已加载内存基础模型作为续训起点（state_dim=%d）",
+                         agent.state_dim)
+                agent.actor.lr = float(cfg.get("lr_actor", 3e-3))
+                agent.critic.lr = float(cfg.get("lr_critic", 6e-3))
+                agent.epsilon = 0.4
+            else:
+                log.warning("[factor_miner] 基础模型维度不匹配(%s vs %s)，忽略，从零训练",
+                            getattr(base_agent, "state_dim", "?"), agent.state_dim)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[factor_miner] 内存基础模型接入失败，从零训练: %s", e)
+    # 单轮训练时间预算（秒）：>0 时超时提前结束（连续训练控成本）
+    time_budget = float(cfg.get("time_budget", 0.0) or 0.0)
+
     # 训练循环（PPO 批量收集 + 多轮 mini-batch）
     history: list[dict] = []
     best_fitness = -1e9
@@ -124,6 +146,11 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
 
     with ThreadPoolExecutor(max_workers=min(n_episodes, 4)) as pool:
         for ep in range(1, episodes + 1):
+            # 时间预算：至少完成 1 轮后超时即提前收尾
+            if time_budget > 0 and ep > 1 and (time.time() - t0) >= time_budget:
+                log.info("[factor_miner] 单轮训练达到时间预算 %.0fs（已完成 %d 轮），提前结束",
+                         time_budget, ep - 1)
+                break
             trajs = list(pool.map(_collect_one, [(ep, i) for i in range(n_episodes)]))
             states = np.concatenate([t["states"] for t in trajs])
             actions = np.concatenate([t["actions"] for t in trajs])

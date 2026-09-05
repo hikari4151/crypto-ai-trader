@@ -46,12 +46,18 @@ class StrategyIteration:
                       previous: Optional[list] = None,
                       validation_df=None, validation_symbol: str = "BTC/USDT",
                       validation_timeframe: str = "1h",
+                      validation_df_alt=None,
+                      validation_alt_symbol: Optional[str] = None,
+                      validation_alt_timeframe: Optional[str] = None,
                       require_improve: bool = True,
                       goal: str = "") -> Optional[dict]:
         """对现有策略做一次深度反思迭代（参考历史回测与前代迭代记录）。失败时返回 None。
 
         validation_df：同数据回测验证门（先回测后注册，绩效差拒绝）——
         由调用方传入快照 K 线构造的 DataFrame；None 时跳过验证直接注册。
+        validation_df_alt：备选验证窗口（如更大周期/更长历史）——主窗口 0 成交时
+        自动用备选窗口重验同一版参数，避免"验证窗口恰好横盘→网格 0 成交→
+        四指标全 0→误判绩效下降"的死锁（grid_pct 超出窗口波动时窗口触发不了）。
         """
         # 保留原策略的执行器与参数 schema：用原策略类校验 AI 给出的参数，
         # 避免迭代 dual_ma/grid 后 executor 被替换成 price_action（逻辑脱节）。
@@ -142,37 +148,99 @@ class StrategyIteration:
             try:
                 from backtest.engine import BacktestConfig
                 from backtest.fast_engine import run_backtest_fast
-                old_bt = run_backtest_fast(validation_df, BacktestConfig(
-                    symbol=validation_symbol, timeframe=validation_timeframe,
-                    strategy_name=strategy.name, strategy_params=dict(strategy.params or {})),
-                    bootstrap=False)["metrics"]  # P2-13 验证门只需基础指标
-                new_bt = run_backtest_fast(validation_df, BacktestConfig(
-                    symbol=validation_symbol, timeframe=validation_timeframe,
-                    strategy_name=executor, strategy_params=applied),
-                    bootstrap=False)["metrics"]
-                comparison = {
-                    "old": {"total_return": old_bt["total_return"], "sharpe": old_bt["sharpe"],
-                            "max_drawdown": old_bt["max_drawdown"], "win_rate": old_bt["win_rate"]},
-                    "new": {"total_return": new_bt["total_return"], "sharpe": new_bt["sharpe"],
-                            "max_drawdown": new_bt["max_drawdown"], "win_rate": new_bt["win_rate"]},
-                    "improved": bool(new_bt["total_return"] > old_bt["total_return"]
-                                     and new_bt["max_drawdown"] < old_bt["max_drawdown"] * 1.3),
-                    "note": "同数据快速回测对比（含手续费/滑点）",
-                }
+
+                async def _run_pair(df, sym, tf):
+                    """跑同一份验证数据上的新旧策略对比，返回 (旧指标, 新指标)。"""
+                    old_bt = run_backtest_fast(df, BacktestConfig(
+                        symbol=sym, timeframe=tf,
+                        strategy_name=strategy.name, strategy_params=dict(strategy.params or {})),
+                        bootstrap=False)["metrics"]  # P2-13 验证门只需基础指标
+                    new_bt = run_backtest_fast(df, BacktestConfig(
+                        symbol=sym, timeframe=tf,
+                        strategy_name=executor, strategy_params=applied),
+                        bootstrap=False)["metrics"]
+                    return old_bt, new_bt
+
+                def _make_comparison(old_bt, new_bt, note: str) -> dict:
+                    return {
+                        "old": {"total_return": old_bt["total_return"], "sharpe": old_bt["sharpe"],
+                                "max_drawdown": old_bt["max_drawdown"], "win_rate": old_bt["win_rate"],
+                                "total_trades": int(old_bt.get("total_trades") or 0)},
+                        "new": {"total_return": new_bt["total_return"], "sharpe": new_bt["sharpe"],
+                                "max_drawdown": new_bt["max_drawdown"], "win_rate": new_bt["win_rate"],
+                                "total_trades": int(new_bt.get("total_trades") or 0)},
+                        "improved": bool(new_bt["total_return"] > old_bt["total_return"]
+                                         and new_bt["max_drawdown"] < old_bt["max_drawdown"] * 1.3),
+                        "note": note,
+                    }
+
+                old_bt, new_bt = await _run_pair(validation_df, validation_symbol, validation_timeframe)
+                comparison = _make_comparison(
+                    old_bt, new_bt, "同数据快速回测对比（含手续费/滑点）")
                 spec["comparison"] = comparison
+
+                # 0 成交识别：主验证窗口没有触发任何交易（网格/间距类参数超出窗口
+                # 实际波动、或窗口恰好横盘）→ 四指标全 0 会误报"绩效下降"。
+                # 此时若有备选窗口（更大周期/更长历史），用同一版参数自动重验一次，
+                # 避免因窗口选择而误杀合理迭代。
+                old_trades = int(comparison["old"]["total_trades"])
+                new_trades = int(comparison["new"]["total_trades"])
+                no_trade = old_trades == 0 or new_trades == 0
+                if no_trade and validation_df_alt is not None and len(validation_df_alt) >= 200:
+                    try:
+                        alt_old, alt_new = await _run_pair(
+                            validation_df_alt,
+                            validation_alt_symbol or validation_symbol,
+                            validation_alt_timeframe or validation_timeframe)
+                        alt_old_trades = int(alt_old.get("total_trades") or 0)
+                        alt_new_trades = int(alt_new.get("total_trades") or 0)
+                        if alt_old_trades > 0 and alt_new_trades > 0:
+                            comparison = _make_comparison(
+                                alt_old, alt_new,
+                                "主窗口无成交，改用备选验证窗口（"
+                                f"{validation_alt_timeframe or validation_timeframe}）后重验对比")
+                            spec["comparison"] = comparison
+                            log.info("[ai] 迭代 %s 主窗口无成交，备选窗口(%s)重验："
+                                     "旧 %d 笔/新 %d 笔",
+                                     spec["name"], validation_alt_timeframe,
+                                     alt_old_trades, alt_new_trades)
+                    except Exception:  # noqa: BLE001
+                        log.warning("[ai] 迭代备选窗口重验失败，沿用主窗口判定: %s",
+                                    exc_info=True)
+
+                old_trades = int(comparison["old"]["total_trades"])
+                new_trades = int(comparison["new"]["total_trades"])
+                no_trade = old_trades == 0 or new_trades == 0
+
                 if require_improve and not comparison["improved"]:
-                    log.warning("[ai] 迭代策略 %s 回测未超越旧策略，拒绝注册: %s",
-                                spec["name"], comparison["improved"])
                     spec["registered"] = False
-                    spec["rejected_reason"] = (
-                        f"同数据回测未超越上一代（新收益 {new_bt['total_return']:.2%} "
-                        f"vs 旧 {old_bt['total_return']:.2%}），保留旧策略")
+                    if no_trade:
+                        # 明确区别"窗口无成交"与"绩效下降"，不再给 0%→0% 的误导结论
+                        log.warning("[ai] 迭代策略 %s 验证窗口无成交触发（旧 %d 笔/新 %d 笔），拒绝注册",
+                                    spec["name"], old_trades, new_trades)
+                        spec["no_trade"] = True
+                        spec["rejected_reason"] = (
+                            f"验证窗口无成交触发（旧 {old_trades} 笔 / 新 {new_trades} 笔）——"
+                            "疑似参数间距（如 grid_pct）超出窗口实际波动或窗口恰好横盘，"
+                            "非绩效下降；请调整参数间距后重试，或等待行情波动放大")
+                        summary = (f"策略[{strategy.name}] 迭代 [{spec['name']}] "
+                                   f"验证窗口无成交（{old_trades}/{new_trades} 笔）被拒绝")
+                    else:
+                        log.warning("[ai] 迭代策略 %s 回测未超越旧策略，拒绝注册: %s",
+                                    spec["name"], comparison["improved"])
+                        spec["rejected_reason"] = (
+                            f"同数据回测未超越上一代（新收益 {new_bt['total_return']:.2%} "
+                            f"vs 旧 {old_bt['total_return']:.2%}），保留旧策略")
+                        summary = (f"策略[{strategy.name}] 迭代 [{spec['name']}] "
+                                   f"因回测未提升被拒绝")
                     async with self._db.session() as s:
                         from core.database import OptimizationLog
                         s.add(OptimizationLog(
                             kind="iteration_blocked",
-                            summary=f"策略[{strategy.name}] 迭代 [{spec['name']}] 因回测未提升被拒绝",
-                            suggestion=json.dumps({"comparison": comparison}, ensure_ascii=False),
+                            summary=summary,
+                            suggestion=json.dumps({"comparison": comparison,
+                                                    "no_trade": no_trade},
+                                                   ensure_ascii=False),
                             params_json=json.dumps(applied, ensure_ascii=False),
                         ))
                         await s.commit()

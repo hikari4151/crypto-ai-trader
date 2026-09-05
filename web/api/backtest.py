@@ -29,6 +29,17 @@ def _load_csv_guarded(csv_path: str):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
+def _require_backtest_data(df, source: str = "exchange"):
+    """回测前确认数据源确实返回了足够的 OHLCV 数据。"""
+    source_label = {"exchange": "交易所", "csv": "CSV", "demo": "演示数据"}.get(source, source)
+    size = len(df) if df is not None else 0
+    if size == 0:
+        raise ValueError(f"{source_label}未返回有效 K 线")
+    if size < 60:
+        raise ValueError(f"{source_label}数据不足，至少需要 60 根 K 线（当前 {size} 根）")
+    return df
+
 # 实时进度缓存: {task_id: {i, n, price, equity, cash, position, last_trade, trades, done, elapsed}}
 _PROGRESS: dict[int, dict] = {}
 _PROGRESS_LOCK = threading.Lock()
@@ -57,6 +68,7 @@ class BacktestRequest(BaseModel):
     fee_rate: float = 0.001
     slippage: float = 0.0005
     since: str = ""
+    until: str = ""                 # 结束时间（含当日；空=不限制）
     limit: int = Field(default=1000, ge=100, le=5000)   # 封顶防任意大值阻塞
     use_gpu: bool = False             # 是否启用 GPU 加速（需 cupy）
     stream: bool = True               # 是否推送实时进度
@@ -281,10 +293,11 @@ async def _schedule_backtest(body: BacktestRequest, db: Database, engine) -> int
                                            limit=body.limit))
                 else:
                     raise ValueError("未知数据源")
+                _require_backtest_data(df, body.data_source)
                 cfg = BacktestConfig(symbol=body.symbol, timeframe=body.timeframe,
                                      strategy_name=body.strategy_name, strategy_params=body.strategy_params,
                                      start_cash=body.start_cash, fee_rate=body.fee_rate,
-                                     slippage=body.slippage, start=body.since or None,
+                                     slippage=body.slippage, start=body.since or None, end=body.until or None,
                                      limit_order_model=body.limit_order_model,
                                      maker_fee_rate=body.maker_fee_rate,
                                      taker_fee_rate=body.taker_fee_rate,
@@ -447,6 +460,10 @@ async def detect_overfit_api(body: BacktestRequest):
     else:
         raise HTTPException(status_code=400, detail="未知数据源")
 
+    try:
+        _require_backtest_data(df, body.data_source)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if len(df) < 600:
         raise HTTPException(status_code=400, detail="过拟合检测需要至少 600 根K线（训练+验证）")
 
@@ -510,6 +527,10 @@ async def grid_scan(body: GridScanIn):
                                       limit=body.limit)
     else:
         raise HTTPException(status_code=400, detail="未知数据源")
+    try:
+        _require_backtest_data(df, body.data_source)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # 生成参数组合
     keys = list(body.param_grid.keys())
@@ -607,6 +628,10 @@ async def compare_strategies(body: BacktestRequest):
                                       limit=body.limit)
     else:
         raise HTTPException(status_code=400, detail="未知数据源")
+    try:
+        _require_backtest_data(df, body.data_source)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # 对比全部可执行策略：内置 + AI/迭代/DRL 动态策略。
     # 曾只跑内置策略——用户训练出的 AI 策略从不参与选型对比。
@@ -670,6 +695,10 @@ async def cost_scan_api(body: CostScanRequest):
                                       limit=body.limit)
     else:
         raise HTTPException(status_code=400, detail="未知数据源")
+    try:
+        _require_backtest_data(df, body.data_source)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # 校验放大倍数合理（防 0/负值导致 fee_rate 无效）
     fee_mults = [float(m) for m in body.fee_mults if float(m) > 0]
@@ -735,6 +764,10 @@ async def portfolio_api(body: PortfolioRequest):
             data[s] = await load_klines_cached(body.exchange, s, body.timeframe, limit=body.limit)
         else:
             raise HTTPException(status_code=400, detail="未知数据源")
+        try:
+            _require_backtest_data(data[s], body.data_source)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"{s}: {e}")
 
     pcfg = PortfolioConfig(
         symbols=symbols, strategy_name=body.strategy_name,

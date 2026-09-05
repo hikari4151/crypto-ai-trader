@@ -112,6 +112,8 @@ class EvolveRound(Base):
     position_ratio: Mapped[float] = mapped_column(Float, default=0.0)
     selected_factors: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(32), default="ok")
+    # Task 5：人工回退等操作审计明细（目标/源版本、原因、运行时结果）JSON
+    audit_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class Database:
@@ -141,6 +143,11 @@ class Database:
                 await conn.execute(text(
                     "CREATE INDEX IF NOT EXISTS ix_evolve_rounds_model_round_no "
                     "ON evolve_rounds (model, round_no DESC)"))
+                # Task 5：既有库缺 audit_json 列时幂等补列（新库由 create_all 建全）
+                cols = (await conn.execute(text("PRAGMA table_info(evolve_rounds)"))).fetchall()
+                if cols and "audit_json" not in {c[1] for c in cols}:
+                    await conn.execute(text(
+                        "ALTER TABLE evolve_rounds ADD COLUMN audit_json TEXT NOT NULL DEFAULT '{}'"))
         log.info("数据库初始化完成: %s", self.engine.url.render_as_string(hide_password=True))
 
     async def close(self) -> None:

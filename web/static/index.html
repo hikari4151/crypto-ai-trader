@@ -2888,6 +2888,15 @@
               </span>
               <button class="mac-btn text-[12px] ml-auto" @click="showEvolveVersions('strategy_drl')" style="padding:3px 10px">查看版本</button>
             </div>
+            <div class="text-[12px] mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-slate-400">
+              <span>候选 <span class="font-mono" :class="(evolveStatus.strategy_drl?.candidate_fitness||0)>=0?'pos':'neg'">{{ (evolveStatus.strategy_drl?.candidate_fitness!=null ? evolveStatus.strategy_drl.candidate_fitness.toFixed(5) : '-') }}</span></span>
+              <span>部署 <span class="font-mono" :class="(evolveStatus.strategy_drl?.deployed_fitness||0)>=0?'pos':'neg'">{{ (evolveStatus.strategy_drl?.deployed_fitness!=null ? evolveStatus.strategy_drl.deployed_fitness.toFixed(5) : '-') }}</span><span v-if="evolveStatus.strategy_drl?.deployed_version" class="font-mono"> · v{{evolveStatus.strategy_drl.deployed_version}} <span v-if="evolveStatus.strategy_drl?.deployed_source==='demo'">(demo)</span></span></span>
+              <span v-if="evolveStatus.strategy_drl?.last_outcome" class="pill" :class="evolveStatus.strategy_drl.last_outcome==='accepted'?'green':(evolveStatus.strategy_drl.last_outcome==='failed'?'red':'orange')" style="font-size:11px">{{evolveStatus.strategy_drl.last_outcome}}</span>
+              <span v-if="evolveStatus.strategy_drl?.runtime_reload && evolveStatus.strategy_drl.runtime_reload!=='skipped'">热加载 {{evolveStatus.strategy_drl.runtime_reload}}</span>
+            </div>
+            <div v-if="evolveStatus.strategy_drl?.anchor_mismatch" class="text-[12px] text-slate-500 mt-1 flex items-center gap-1">
+              <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>锚点口径不一致，跳过对比：{{evolveStatus.strategy_drl.anchor_mismatch}}
+            </div>
             <div v-if="evolveStatus.strategy_drl?.last_error" class="text-[12px] text-orange-400 mt-1 flex items-center gap-1">
               <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>{{evolveStatus.strategy_drl.last_error}}
             </div>

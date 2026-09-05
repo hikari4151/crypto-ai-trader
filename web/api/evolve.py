@@ -1,4 +1,5 @@
 """持续进化引擎控制 API。"""
+import json
 from datetime import timezone
 import re
 
@@ -22,6 +23,18 @@ def _validate_model_name(name: str) -> str:
     if not _MODEL_NAME_RE.fullmatch(name) or name in (".", ".."):
         raise HTTPException(status_code=400, detail="非法模型名")
     return name
+
+
+def _parse_json_value(value, fallback):
+    """把落库的 JSON 文本解析回对象；老行 str(list) 等非 JSON 格式原样透传。"""
+    if value is None or value == "":
+        return fallback
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:  # noqa: BLE001
+        return value
 
 
 def _get_evolve(request: Request):
@@ -187,8 +200,9 @@ async def rounds(model: str = "strategy_drl",
                     "oos_ret": r.oos_ret,
                     "decay": r.decay,
                     "position_ratio": r.position_ratio,
-                    "selected_factors": r.selected_factors,
+                    "selected_factors": _parse_json_value(r.selected_factors, []),
                     "status": r.status,
+                    "audit": _parse_json_value(getattr(r, "audit_json", None), {}),
                 })
     except HTTPException:
         raise
@@ -202,31 +216,37 @@ async def rounds(model: str = "strategy_drl",
 
 @router.get("/versions")
 async def versions(name: str = "factor_miner", request: Request = None):
-    """列出指定模型的版本。"""
+    """列出指定模型的版本（含身份/部署元数据摘要）。"""
     name = _validate_model_name(name)
     evolve = _get_evolve(request)
     return {"versions": evolve.zoo.list_versions(name),
             "best_version": evolve.zoo.best_version(name),
-            "best_fitness": evolve.zoo.best_fitness(name)}
+            "best_fitness": evolve.zoo.best_fitness(name),
+            "best_info": evolve.zoo.best_info(name)}
 
 
 @router.post("/rollback")
 async def rollback(name: str, version: int = Query(..., ge=1), request: Request = None):
-    """回退到指定版本。
+    """手动回退到指定版本（走统一部署入口：快照恢复 + 注册 + 运行时热加载）。
 
     P4-E1：与训练写路径互斥（_train_lock）——后台 save_agent/save_agent_best
     对同一份 meta.json/best.json.gz 读改写，无锁时 rollback 与训练并发会互相
-    覆盖（丢失版本记录/锚点分裂）。zoo.rollback 含 gzip 压缩与留档复制，
-    放 to_thread 防阻塞事件循环。
+    覆盖（丢失版本记录/锚点分裂）。手动回退落 manual_rollback 审计轮次。
     """
-    import asyncio
     name = _validate_model_name(name)
     evolve = _get_evolve(request)
     async with evolve._train_lock:
-        ok = await asyncio.to_thread(evolve.zoo.rollback, name, version)
-    if not ok:
-        raise HTTPException(status_code=404, detail=f"版本 v{version} 不存在")
-    return {"ok": True, "version": version}
+        result = await evolve.deploy_model(
+            name, version, outcome="manual_rollback", reason="UI 手动回退")
+    if not result.get("ok"):
+        if "不存在" in str(result.get("error") or ""):
+            raise HTTPException(status_code=404, detail=f"版本 v{version} 不存在")
+        if result.get("runtime_reload", {}).get("status") == "failed":
+            raise HTTPException(status_code=409,
+                                detail=result.get("error") or "运行时模型热加载未完成")
+        raise HTTPException(status_code=400,
+                            detail=result.get("error") or "回退失败")
+    return result
 
 
 @router.post("/reset-anchor")

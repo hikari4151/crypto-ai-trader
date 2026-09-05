@@ -720,6 +720,20 @@ class EvolveEngine:
             register_dynamic("meta_controller", spec)
             await self._upsert_ai_strategy("meta_controller", spec)
 
+    async def _audit_manual_rollback(self, name: str, version: int, *, reason: str,
+                                     runtime_reload: dict, registered: bool) -> None:
+        """手动回退的审计轮次：目标/源版本、原因、运行时结果（不阻断主流程）。"""
+        try:
+            await self._log_round(
+                name, "", self._effective_timeframe(), "manual", 0.0,
+                status="manual_rollback",
+                audit={"target_version": version,
+                       "reason": reason or "",
+                       "runtime_reload": runtime_reload.get("status", "skipped"),
+                       "registered": registered})
+        except Exception as e:  # noqa: BLE001
+            log.warning("[evolve] 手动回退审计落库失败(%s v%d): %s", name, version, e)
+
     async def deploy_model(self, name: str, version: int, *,
                            outcome: str, symbol: str = "",
                            timeframe: str = "", reason: str = "") -> dict:
@@ -756,6 +770,10 @@ class EvolveEngine:
         if self._deployment_reload is None:
             self._mark_deployment_status(name, outcome=outcome,
                                          runtime_reload="skipped")
+            if outcome == "manual_rollback":
+                await self._audit_manual_rollback(
+                    name, version, reason=reason,
+                    runtime_reload={"status": "skipped"}, registered=registered)
             log.info("[evolve] 部署完成(%s v%d, 无运行时回调, outcome=%s)",
                      name, version, outcome)
             return {"ok": True, "version": version, "meta": deployed_meta,
@@ -768,6 +786,10 @@ class EvolveEngine:
         if result and result.get("status") == "reloaded":
             self._mark_deployment_status(name, outcome=outcome,
                                          runtime_reload="reloaded")
+            if outcome == "manual_rollback":
+                await self._audit_manual_rollback(
+                    name, version, reason=reason,
+                    runtime_reload=result, registered=registered)
             log.info("[evolve] 部署完成(%s v%d, 运行实例已热加载, outcome=%s)",
                      name, version, outcome)
             return {"ok": True, "version": version, "meta": deployed_meta,
@@ -787,6 +809,10 @@ class EvolveEngine:
                           name, old_best, e)
         self._mark_deployment_status(name, outcome="failed",
                                      runtime_reload="failed")
+        if outcome == "manual_rollback":
+            await self._audit_manual_rollback(
+                name, version, reason=reason,
+                runtime_reload=runtime_status, registered=registered)
         log.warning("[evolve] 部署失败(%s v%d): reload 未成功 %s",
                     name, version, runtime_status)
         return {"ok": False, "version": version, "meta": deployed_meta,
@@ -2121,8 +2147,13 @@ class EvolveEngine:
                          oos_ret: float = 0.0, decay: float = 0.0,
                          position_ratio: float = 0.0,
                          selected_factors: Optional[list] = None,
-                         round_no: Optional[int] = None) -> None:
-        """P2-13：训练轮次落库（evolve_rounds 表）。失败仅记日志，不影响训练流程。"""
+                         round_no: Optional[int] = None,
+                         audit: Optional[dict] = None) -> None:
+        """P2-13：训练轮次落库（evolve_rounds 表）。失败仅记日志，不影响训练流程。
+
+        Task 5：audit 为人工操作的审计载荷（manual_rollback 等），与
+        selected_factors 一样以 JSON 文本落库（老行 read 端兼容两种格式）。
+        """
         # 连续拒绝计数先于落库：锁死判定要在落库失败时依然有效（前端提示依赖它）
         self._rounds_total[model] = int(self._rounds_total.get(model, 0)) + 1
         if status == "ok":
@@ -2148,8 +2179,10 @@ class EvolveEngine:
                     data_source=data_source, round_no=round_no,
                     fitness=float(fitness), oos_ret=float(oos_ret),
                     decay=float(decay), position_ratio=float(position_ratio),
-                    selected_factors=str(list(selected_factors or [])),
+                    selected_factors=json.dumps(list(selected_factors or []),
+                                                ensure_ascii=False),
                     status=status,
+                    audit_json=json.dumps(audit or {}, ensure_ascii=False),
                 ))
                 # P2-9：每模型保留最近 N 轮（含 demo/oos_rejected/rollback），
                 # 防止 evolve_rounds 表长期运行无界增长、重启全表扫描变慢

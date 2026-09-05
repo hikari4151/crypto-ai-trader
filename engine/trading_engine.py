@@ -105,6 +105,8 @@ class TradingEngine:
         # 成交事件：对账回灌的迟到成交（late=True）走公共记账 _record_fill；
         # 普通成交事件（即时路径已直接记账）忽略
         bus.subscribe(EventType.ORDER_FILL, self._on_order_fill)
+        # 持续进化部署后热加载当前运行实例：策略与锁均已就绪
+        self.evolve.set_deployment_reload(self.reload_active_strategy_model)
 
     async def _load_live_config(self) -> None:
         """从数据库 KV 读取实盘/模拟启动配置（交易所/交易对/周期/初始资金/手续费）。"""
@@ -1325,3 +1327,34 @@ class TradingEngine:
 
     def list_strategies(self) -> list[dict]:
         return list_strategies()
+
+    async def reload_active_strategy_model(self, model_name: str, version: int,
+                                           meta: dict) -> dict:
+        """持续进化部署后的运行时热加载：让当前策略实例使用刚回退/接受的模型。
+
+        只在当前策略确实运行目标模型族时才重载（strategy_drl/rl_evolve → RL 策略，
+        meta_controller → 元控制器）；用户当前用的是其他策略时返回 skipped，
+        绝不替换用户选中的策略。持 _strategy_lock，与 K 线处理互斥。
+        """
+        from strategies.rl_adaptive import RLAdaptiveStrategy
+        from strategies.meta import MetaController
+        async with self._strategy_lock:
+            st = self.strategy
+            if model_name == "meta_controller" and isinstance(st, MetaController):
+                self._pending_signal = None
+                if st.reload_model():
+                    log.info("[engine] 元控制器模型已热加载 (v%d)", version)
+                    return {"status": "reloaded", "model": model_name, "version": version}
+                return {"status": "failed", "model": model_name, "version": version,
+                        "error": "元控制器模型重载失败"}
+            if model_name in ("strategy_drl", "rl_evolve") and isinstance(st, RLAdaptiveStrategy):
+                self._pending_signal = None
+                if st.reload_model():
+                    log.info("[engine] RL 策略模型已热加载 (v%d)", version)
+                    return {"status": "reloaded", "model": model_name, "version": version}
+                return {"status": "failed", "model": model_name, "version": version,
+                        "error": "RL 策略模型重载失败（状态维度/因子元数据不匹配？）"}
+            log.info("[engine] 当前策略 %s 与部署目标 %s 无关，跳过运行时热加载",
+                     getattr(st, "name", "?") if st else "无", model_name)
+            return {"status": "skipped", "model": model_name, "version": version,
+                    "reason": f"当前策略 {getattr(st, 'name', '?') if st else '无'} 非部署目标"}

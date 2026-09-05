@@ -262,6 +262,16 @@ class MetaController(Strategy):
         except (TypeError, ValueError):
             return _DEFAULT_META_WINDOW
 
+    def reload_model(self) -> bool:
+        """元模型文件被回退/替换后重载运行实例（返回是否加载成功）。
+
+        清空 DRL 模型缓存与状态维度后从当前 model_path 重新加载；
+        失败时 _meta_agent 保持 None，让上层按运行时失败处理。
+        """
+        self._meta_agent = None
+        self._meta_state_dim = 0
+        return self._load_meta_agent()
+
     def _load_meta_agent(self) -> bool:
         """加载 DRL 元模型（仅 drl 模式）。"""
         path = str(self.params.get("model_path", "") or "").strip()

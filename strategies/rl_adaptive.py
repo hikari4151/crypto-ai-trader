@@ -66,6 +66,22 @@ class RLAdaptiveStrategy(Strategy):
         self._n_actions = len(ACTION_BUCKETS) if _DRL_AVAILABLE else 5
 
     def _load_agent(self) -> bool:
+        """首次懒加载 / 显式重载共用实现：清空旧运行态后从当前 model_path 加载。"""
+        self._agent = None
+        self._factor_mu = None
+        self._factor_sd = None
+        self._factor_expr_from_model = ""
+        self._trade_zone = None
+        return self._reload_agent()
+
+    def reload_model(self) -> bool:
+        """模型文件被回退/替换后重载运行实例（返回是否加载成功）。
+
+        失败时保持 _agent=None，让上层按运行时失败处理而不是继续用旧权重。
+        """
+        return self._load_agent()
+
+    def _reload_agent(self) -> bool:
         path = self.params.get("model_path", "")
         if not path:
             return False
@@ -80,12 +96,6 @@ class RLAdaptiveStrategy(Strategy):
             self._agent = ACAgent.load(path)
             self._state_dim = self._agent.state_dim
             self._n_actions = self._agent.n_actions
-            # 读取模型文件内的因子标准化统计量（训练段拟合）——
-            # 部署端必须用同一 mu/sd 标准化因子值，与训练状态分布一致
-            self._factor_mu = None
-            self._factor_sd = None
-            self._factor_expr_from_model = ""
-            self._trade_zone = None   # 训练死区（模型内记录），None 时用 params.buy_zone 兜底
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     md = json.load(f)

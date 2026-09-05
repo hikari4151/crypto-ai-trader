@@ -826,6 +826,29 @@ def train_meta_controller(df, cfg: dict,
                     lr_critic=float(cfg.get("lr_critic", 6e-3)),
                     gamma=float(cfg.get("gamma", 0.99)), seed=seed,
                     entropy_coef=float(cfg.get("entropy_coef", 0.05)))
+
+    # 续训支持（与 train_drl / train_factor_miner 同口径）：base_agent 为内存
+    # ACAgent 对象（持续进化引擎用），deepcopy 权重防训练污染 best_agent。
+    # 续训只换起点，OOS 硬门/回退比较/跨标安检等防线照常生效。
+    base_agent = cfg.get("base_agent")
+    if base_agent is not None:
+        try:
+            if base_agent.state_dim == agent.state_dim and base_agent.n_actions == agent.n_actions:
+                agent.actor = copy.deepcopy(base_agent.actor)
+                agent.critic = copy.deepcopy(base_agent.critic)
+                log.info("[meta_train] 已加载内存基础模型作为续训起点（state_dim=%d）",
+                         agent.state_dim)
+                agent.actor.lr = float(cfg.get("lr_actor", 3e-3))
+                agent.critic.lr = float(cfg.get("lr_critic", 6e-3))
+                agent.epsilon = 0.4
+            else:
+                log.warning("[meta_train] 基础模型维度不匹配(%s vs %s)，忽略，从零训练",
+                            getattr(base_agent, "state_dim", "?"), agent.state_dim)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[meta_train] 内存基础模型接入失败，从零训练: %s", e)
+    # 单轮训练时间预算（秒）：>0 时超时提前结束（连续训练控成本）
+    time_budget = float(cfg.get("time_budget", 0.0) or 0.0)
+
     # 验证环境全程复用：run_episode 内部 reset 会把子策略退回起点重推
     val_env = None if split_skipped else _make_env(val_df)
 
@@ -839,6 +862,11 @@ def train_meta_controller(df, cfg: dict,
 
     with ThreadPoolExecutor(max_workers=min(n_episodes, 4)) as pool:
         for ep in range(1, episodes + 1):
+            # 时间预算：至少完成 1 轮后超时即提前收尾
+            if time_budget > 0 and ep > 1 and (time.time() - t0) >= time_budget:
+                log.info("[meta_train] 单轮训练达到时间预算 %.0fs（已完成 %d 轮），提前结束",
+                         time_budget, ep - 1)
+                break
             agent.set_episode_epsilon(ep - 1)
 
             def _collect_one(args: tuple) -> dict:
@@ -944,6 +972,7 @@ def train_meta_controller(df, cfg: dict,
             oos_report = {"enabled": False}
 
     best_ret = max(best_train_ret, best_val_ret)
+    time_budget = time.time() - t0
     result = {
         "agent": final_agent,
         "history": history,
@@ -959,6 +988,7 @@ def train_meta_controller(df, cfg: dict,
                   "warmup": warmup},
         "oos_report": oos_report,
         "deployment_blocked": deployment_blocked,
+        "time_budget": time_budget,
         "elapsed_sec": round(time.time() - t0, 2),
     }
     if split_skipped:

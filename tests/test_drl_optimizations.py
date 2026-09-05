@@ -314,6 +314,9 @@ class _MetaResult:
     def scalar_one_or_none(self):
         return self._row
 
+    def scalar_one(self):
+        return self._row
+
 
 class _MetaSession:
     def __init__(self, row):

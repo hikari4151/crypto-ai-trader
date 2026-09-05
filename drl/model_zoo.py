@@ -479,6 +479,10 @@ class ModelZoo:
                 "rolled_back_at": anchor_meta.get("rolled_back_at"),
                 "reset": meta.get("anchor_reset"),
                 "comparable": False, "reason": "", "source_unknown": False}
+        # 训练身份字段透传：_identity_mismatch 需要读锚点的符号/周期/配置指纹
+        for _ik in ("model", "symbol", "timeframe", "state_window",
+                    "factor_signature", "config_fingerprint", "window_tail_ts"):
+            info[_ik] = anchor_meta.get(_ik)
         if not best_version and info["fitness"] is None:
             # 没有锚点：全新仓库，或 reset_anchor 之后。此时 best 文件里的权重仍然
             # 在线部署着，data_source 要照实返回——前端得知道"现在跑的是 demo 权重"。

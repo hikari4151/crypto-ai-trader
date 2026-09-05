@@ -181,6 +181,50 @@ def resolve_meta_sub_strategies(spec_params: dict | None) -> str:
     return ",".join(dict.fromkeys(defaults)) or "dual_ma,factor_signal"
 
 
+def _training_identity(model: str, symbol: str, timeframe: str, *,
+                       state_window: int = 1, factor_signature: str = "",
+                       config: Optional[dict] = None,
+                       window_tail_ts: Optional[int] = None) -> dict:
+    """当前训练轮的可比较身份：回退判据只在身份一致时生效。
+
+    不同 symbol/timeframe/state_window/训练配置产出的模型互相比较没有意义
+    （BTC 锚点不该压住 ETH 候选；1h 锚点不该与 15m 候选比）。config_fingerprint
+    用稳定排序后的结构化 JSON 做 SHA-256，只覆盖影响状态/奖励/切分/部署门的口径。
+    """
+    stable = config or {}
+    import hashlib
+    canonical = json.dumps(
+        stable, sort_keys=True, ensure_ascii=False, default=str,
+        separators=(",", ":"))
+    fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return {
+        "model": model,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "state_window": int(state_window),
+        "factor_signature": str(factor_signature or ""),
+        "config_fingerprint": fingerprint,
+        "window_tail_ts": window_tail_ts,
+    }
+
+
+def _identity_mismatch(anchor_meta: dict, identity: dict) -> Optional[str]:
+    """锚点与候选的身份差异。返回 None 表示可比；否则给出不可比原因。
+
+    锚点缺身份字段（旧版本）视为 unknown：不进行跨口径回退比较，
+    但保留其权重作为可运行部署（comparable 仍由 demo 口径控制）。
+    """
+    for key in ("model", "symbol", "timeframe", "state_window",
+                "factor_signature", "config_fingerprint"):
+        a = anchor_meta.get(key)
+        b = identity.get(key)
+        if a is None:
+            return f"锚点缺少身份字段 {key}（旧版本，不可比）"
+        if str(a) != str(b):
+            return f"{key} 不一致（锚点 {a} vs 候选 {b}）"
+    return None
+
+
 class EvolveEngine:
     """持续进化引擎：管理因子挖掘和策略训练的持续循环。"""
 
@@ -1221,54 +1265,112 @@ class EvolveEngine:
         # 6. 最佳模型回退保护（P0-4：旧 fitness 非正时“×阈值”方向反转，统一走 _should_rollback）
         # 锚点口径不可比时（如 demo 合成数据留下的 3.9 分）跳过：真实数据永远够不着
         # 合成数据的量级，继续比较等于让这条管线永久只回退不前进。
+        # Task 4：同符号/周期/配置才可比；旧锚点缺身份字段按 unknown 不压新模型。
         anchor = self.zoo.best_info("factor_miner")
+        _factor_identity = _training_identity(
+            "factor_miner", symbol, self._effective_timeframe(),
+            state_window=1,
+            factor_signature=str(result.get("selected_factors", [])),
+            config={
+                "episodes": int(getattr(settings, "evolve_factor_miner_episodes", 8)),
+                "ic_window": 120, "corr_threshold": 0.85,
+                "train_ratio": 0.6, "val_ratio": 0.2,
+            })
         if best_agent is not None and anchor.get("comparable"):
-            old_fitness = anchor.get("fitness") or 0.0
-            if _should_rollback(new_fitness, old_fitness, self._rollback_threshold):
-                log.warning("[evolve] 因子挖掘新模型退化 (new=%.4f < old=%.4f*%.2f)，回退到最佳版本",
-                            new_fitness, old_fitness, self._rollback_threshold)
-                try:
-                    from core.notify import notify
-                    await notify(self.db, "进化引擎：模型回退",
-                                 f"因子挖掘新模型退化（new={new_fitness:.4f} < "
-                                 f"old={old_fitness:.4f}×{self._rollback_threshold}），已回退最佳版本")
-                except Exception:  # noqa: BLE001
-                    pass
-                # 统一部署入口回退到当前锚点版本（候选 fitness 与部署分离）
-                _target_version = anchor.get("version") or self.zoo.best_version("factor_miner")
-                await self.deploy_model(
-                    "factor_miner", _target_version,
-                    outcome="rollback", symbol=symbol, timeframe=self._effective_timeframe(),
-                    reason=f"新模型退化({new_fitness:.4f})")
-                self._mark_deployment_status(
-                    "factor_miner", outcome="rollback",
-                    candidate_fitness=new_fitness)
-                # P2-13：回退轮次也要落库（此前回退路径漏记，曲线因此长期空白）
-                await self._log_round(
-                    "factor_miner", symbol, self._effective_timeframe(),
-                    data_source_used, new_fitness, status="rollback")
-                # P4-E1：回退轮补发 evolve_train 事件——此前三条 rollback 分支
-                # 不发事件，前端若依赖事件流刷新进度，回退轮完全看不到更新
-                await self.bus.publish(Event(EventType.SYSTEM, {
-                    "kind": "evolve_train",
-                    "model": "factor_miner",
-                    "fitness": float(new_fitness),
-                    "status": "rollback",
-                }, source="evolve_engine"))
-                return
+            _factor_mismatch = _identity_mismatch(anchor, _factor_identity)
+            if _factor_mismatch:
+                self._mark_deployment_status("factor_miner", anchor_mismatch=_factor_mismatch)
+                log.info("[evolve] 因子挖掘锚点身份不可比（%s），跳过回退比较", _factor_mismatch)
+            else:
+                old_fitness = anchor.get("fitness") or 0.0
+                if _should_rollback(new_fitness, old_fitness, self._rollback_threshold):
+                    log.warning("[evolve] 因子挖掘新模型退化 (new=%.4f < old=%.4f*%.2f)，回退到最佳版本",
+                                new_fitness, old_fitness, self._rollback_threshold)
+                    try:
+                        from core.notify import notify
+                        await notify(self.db, "进化引擎：模型回退",
+                                     f"因子挖掘新模型退化（new={new_fitness:.4f} < "
+                                     f"old={old_fitness:.4f}×{self._rollback_threshold}），已回退最佳版本")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    # 统一部署入口回退到当前锚点版本（候选 fitness 与部署分离）
+                    _target_version = anchor.get("version") or self.zoo.best_version("factor_miner")
+                    await self.deploy_model(
+                        "factor_miner", _target_version,
+                        outcome="rollback", symbol=symbol, timeframe=self._effective_timeframe(),
+                        reason=f"新模型退化({new_fitness:.4f})")
+                    self._mark_deployment_status(
+                        "factor_miner", outcome="rollback",
+                        candidate_fitness=new_fitness)
+                    # P2-13：回退轮次也要落库（此前回退路径漏记，曲线因此长期空白）
+                    await self._log_round(
+                        "factor_miner", symbol, self._effective_timeframe(),
+                        data_source_used, new_fitness, status="rollback")
+                    # P4-E1：回退轮补发 evolve_train 事件——此前三条 rollback 分支
+                    # 不发事件，前端若依赖事件流刷新进度，回退轮完全看不到更新
+                    await self.bus.publish(Event(EventType.SYSTEM, {
+                        "kind": "evolve_train",
+                        "model": "factor_miner",
+                        "fitness": float(new_fitness),
+                        "status": "rollback",
+                    }, source="evolve_engine"))
+                    return
         elif best_agent is not None:
             log.warning("[evolve] 因子挖掘锚点不可比（%s），跳过回退保护，本轮模型重建基线",
                         anchor.get("reason") or "未知")
 
-        # 7. 保存最佳模型（标记数据源：demo/真实交易所）
-        # P0-2：演示数据训练的模型不写 best（is_best=False 只存档），
-        # 否则合成数据的"伪提升"会覆盖真实最佳模型、污染后续续训与部署。
-        # 写盘（gzip+JSON）在事件循环外执行（P2-4：接受轮阻塞几十~几百 ms）
-        is_best = data_source_used != "demo"
+        # 7.0 OOS 安检门前置（Task 4）：未通过安检的因子不得成为 factor best
+        # 基线，也不得发布级联因子——此前安检在 save_agent(is_best=True) 之后，
+        # 被拦模型照样覆盖 best（研究最佳与部署基线混为一谈）。
+        gate_ok, gate_reason = _oos_gate_passed(result.get("report"))
+        if data_source_used == "demo":
+            self._factor_miner_status["oos_rejected"] = "演示数据训练，禁止级联发布"
+            log.warning("[evolve] 因子挖掘使用演示数据训练，跳过最佳保存与级联发布")
+            try:
+                await asyncio.to_thread(
+                    self.zoo.save_agent_archive, result["agent"], "factor_miner",
+                    meta={"fitness": new_fitness, "timestamp": time.time(),
+                          "data_source": "demo", "demo_blocked": True})
+            except Exception as e:  # noqa: BLE001
+                log.warning("[evolve] 因子挖掘 demo 存档失败: %s", e)
+            await self._log_round("factor_miner", symbol, self._effective_timeframe(),
+                                  "demo", new_fitness, status="demo_blocked")
+            return "demo"
+        if not gate_ok:
+            self._factor_miner_status["oos_rejected"] = gate_reason
+            log.warning("[evolve] 组合因子未通过 OOS 安检（%s），仅存档不设为 best", gate_reason)
+            try:
+                await asyncio.to_thread(
+                    self.zoo.save_agent_archive, result["agent"], "factor_miner",
+                    meta={"fitness": new_fitness, "timestamp": time.time(),
+                          "data_source": data_source_used,
+                          "oos_rejected": gate_reason})
+            except Exception as e:  # noqa: BLE001
+                log.warning("[evolve] 被拦因子模型存档失败: %s", e)
+            try:
+                from core.notify import notify
+                await notify(self.db, "进化引擎：因子 OOS 安检拦截",
+                             f"因子挖掘新模型未通过样本外安检（{gate_reason}），"
+                             f"已保留原因子最佳基线")
+            except Exception:  # noqa: BLE001
+                pass
+            await self._log_round("factor_miner", symbol, self._effective_timeframe(),
+                                  data_source_used, new_fitness, status="oos_rejected",
+                                  selected_factors=result.get("selected_factors", []))
+            await self.bus.publish(Event(EventType.SYSTEM, {
+                "kind": "evolve_train",
+                "model": "factor_miner",
+                "fitness": float(new_fitness),
+                "oos_rejected": gate_reason,
+            }, source="evolve_engine"))
+            return "oos_rejected"
+
+        # 7. 保存最佳模型（OOS 安检通过的 exchange 模型才写 best）
+        is_best = True
         await asyncio.to_thread(
             self.zoo.save_agent, result["agent"], "factor_miner",
             meta={"fitness": new_fitness, "timestamp": time.time(),
-                  "data_source": data_source_used},
+                  "data_source": data_source_used, **_factor_identity},
             is_best=is_best)
         self._mark_deployment_status("factor_miner", outcome="accepted",
                                      candidate_fitness=new_fitness)
@@ -1282,22 +1384,13 @@ class EvolveEngine:
                          f"（{data_source_used} 数据）")
         except Exception:  # noqa: BLE001
             pass
-        if data_source_used == "demo":
-            log.warning("[evolve] 因子挖掘使用演示数据训练完成（仅供测试，勿用于实盘），fitness=%.4f", new_fitness)
         log.info("[evolve] 因子挖掘训练完成，fitness=%.4f，已保存", new_fitness)
 
-        # 7.1 保存组合因子供策略 DRL 级联使用（P0-2：demo 数据不级联发布，防污染下游）
+        # 7.1 保存组合因子供策略 DRL 级联使用（已过 7.0 安检）
         import numpy as np
         composite_series = result.get("composite")
-        gate_ok, gate_reason = _oos_gate_passed(result.get("report"))
-        if data_source_used == "demo":
-            self._factor_miner_status["oos_rejected"] = "演示数据训练，禁止级联发布"
-            log.warning("[evolve] 因子挖掘使用演示数据训练，跳过级联发布")
-        elif not gate_ok:
-            self._factor_miner_status["oos_rejected"] = gate_reason
-            log.warning("[evolve] 组合因子未通过 OOS 安检（%s），跳过级联发布", gate_reason)
-        elif composite_series is not None:
-            self._factor_miner_status["oos_rejected"] = ""
+        self._factor_miner_status["oos_rejected"] = ""
+        if composite_series is not None:
             import pandas as pd
             # 对齐到原始 df 的索引（factor_miner 内部可能截断或排序）
             factor_values = pd.Series(composite_series.to_numpy(), index=composite_series.index)
@@ -1428,6 +1521,17 @@ class EvolveEngine:
         self._strategy_drl_status["episode"] += 1
         self._strategy_drl_status["fitness"] = round(new_fitness, 5)
 
+        # 训练身份：与锚点同口径才允许回退比较（不同符号/周期/状态维度/配置不可比）
+        _identity = _training_identity(
+            "strategy_drl", symbol, self._effective_timeframe(),
+            state_window=int(train_cfg.get("state_window", 1)),
+            factor_signature=str(result.get("factor_expression", "") or ""),
+            config={
+                "episodes": int(getattr(settings, "evolve_strategy_drl_episodes", 8)),
+                "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 20.0)),
+                "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
+            })
+
         # 5.0 P4-E1：demo 合成数据轮短路——不回退比较、不跑 OOS 部署门。
         # 交易所故障时合成数据的 OOS 几乎必为负，会触发无意义的
         # save_agent_best（覆盖 flat）+ 重新导出 Pine + _log_round("rollback")，
@@ -1450,6 +1554,10 @@ class EvolveEngine:
         # 锚点口径不可比时跳过比较：demo 合成数据留下的高分基线（实测 3.9167）真实
         # 行情一辈子也够不到，只会把每一轮都判成"退化"，进化循环事实上停摆。
         if best_agent is not None and anchor.get("comparable"):
+            identity_mismatch = _identity_mismatch(anchor, _identity)
+            if identity_mismatch:
+                self._mark_deployment_status("strategy_drl", anchor_mismatch=identity_mismatch)
+                log.info("[evolve] 策略DRL 锚点身份不可比（%s），跳过回退比较", identity_mismatch)
             oos_report = result.get("oos_report") or {}
             new_oos = float(oos_report.get("oos_ret") or 0.0) if oos_report.get("enabled") else None
             prev_oos = anchor.get("oos_ret")
@@ -1461,6 +1569,8 @@ class EvolveEngine:
                 # 旧模型缺 OOS 记录（升级前版本）：退化为训练段收益比较
                 rollback_hit = _should_rollback(new_fitness, prev_fitness, self._rollback_threshold)
                 cmp_desc = f"fitness {new_fitness:.4f} < {prev_fitness:.4f}×{self._rollback_threshold}"
+            if identity_mismatch:
+                rollback_hit = False
             if rollback_hit:
                 log.warning("[evolve] 策略DRL新模型退化 (%s)，回退到最佳版本", cmp_desc)
                 try:
@@ -1601,7 +1711,8 @@ class EvolveEngine:
             await asyncio.to_thread(self.zoo.save_agent, result["agent"], "strategy_drl",
                                     meta={"fitness": new_fitness, "timestamp": time.time(),
                                           "data_source": data_source_used,
-                                          "oos_ret": (result.get("oos_report") or {}).get("oos_ret")})
+                                          "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
+                                          **_identity})
             self._mark_deployment_status("strategy_drl", outcome="accepted",
                                          candidate_fitness=new_fitness)
         try:
@@ -1771,6 +1882,16 @@ class EvolveEngine:
         self._meta_controller_status["episode"] += 1
         self._meta_controller_status["fitness"] = round(best_ret, 5)
 
+        # 训练身份：同级策略仅同口径可比（元控制器版本同样按符号/周期/配置分桶）
+        _meta_identity = _training_identity(
+            "meta_controller", symbol, self._effective_timeframe(),
+            state_window=1,
+            factor_signature=f"subs:{sub_strategies}",
+            config={
+                "episodes": int(getattr(settings, "evolve_meta_episodes", 8)),
+                "sub_strategies": sub_strategies,
+            })
+
         # 3.4 最佳模型回退保护（P0-3 补齐：元控制器此前无回退保护；
         # P0-4 负 fitness 方向反转修复，统一走 _should_rollback；
         # 锚点口径不可比时跳过，同策略DRL/因子挖掘）
@@ -1783,6 +1904,10 @@ class EvolveEngine:
         meta_rollback_hit = False
         meta_cmp_desc = ""
         if best_agent is not None and anchor.get("comparable"):
+            _meta_mismatch = _identity_mismatch(anchor, _meta_identity)
+            if _meta_mismatch:
+                self._mark_deployment_status("meta_controller", anchor_mismatch=_meta_mismatch)
+                log.info("[evolve] 元控制器锚点身份不可比（%s），跳过回退比较", _meta_mismatch)
             _moos = result.get("oos_report") or {}
             new_moos = float(_moos.get("oos_ret") or 0.0) if _moos.get("enabled") else None
             prev_moos = anchor.get("oos_ret")
@@ -1792,6 +1917,8 @@ class EvolveEngine:
             else:
                 meta_rollback_hit = _should_rollback(best_ret, prev_fitness, self._rollback_threshold)
                 meta_cmp_desc = f"fitness {best_ret:.4f} < {prev_fitness:.4f}×{self._rollback_threshold}"
+            if _meta_mismatch:
+                meta_rollback_hit = False
         if meta_rollback_hit:
             log.warning("[evolve] 元控制器新模型退化 (%s)，回退到最佳版本", meta_cmp_desc)
             try:
@@ -1862,7 +1989,8 @@ class EvolveEngine:
             self.zoo.save_agent, result["agent"], "meta_controller",
             meta={"fitness": best_ret, "timestamp": time.time(),
                   "data_source": "exchange",
-                  "oos_ret": (result.get("oos_report") or {}).get("oos_ret")})
+                  "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
+                  **_meta_identity})
         self._mark_deployment_status("meta_controller", outcome="accepted",
                                      candidate_fitness=best_ret)
 

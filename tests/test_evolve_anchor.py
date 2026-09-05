@@ -15,6 +15,7 @@ import pytest
 
 import drl.evolve_engine as ev
 from backtest.data_loader import generate_demo
+from config.settings import settings
 from drl.agent import ACAgent
 from drl.evolve_engine import EvolveEngine
 from drl.model_zoo import ModelZoo
@@ -234,10 +235,12 @@ async def _noop_register(registered):
     registered.append("rl_evolve")
 
 
-def _seed_anchor(eng, fitness, data_source, oos_ret=None):
+def _seed_anchor(eng, fitness, data_source, oos_ret=None, identity=None):
     meta = {"fitness": fitness, "data_source": data_source}
     if oos_ret is not None:
         meta["oos_ret"] = oos_ret
+    if identity:
+        meta.update(identity)
     eng.zoo.save_agent(_agent(), "strategy_drl", meta=meta)
 
 
@@ -258,15 +261,42 @@ async def test_demo_anchor_does_not_block_a_profitable_exchange_model(engine):
 
 @pytest.mark.asyncio
 async def test_comparable_exchange_anchor_still_protects(engine):
-    """守卫不能顺手关掉回退保护：同口径（都是交易所）时劣质模型仍要被旧锚点压住。"""
+    """守卫不能顺手关掉回退保护：同口径（交易所+同训练身份）时劣质模型仍要被旧锚点压住。"""
     eng, registered, holder = engine
-    _seed_anchor(eng, 9.0, "exchange", oos_ret=0.12)
+    # 锚点必须与当前训练轮同身份（symbol/timeframe/state_window/config_fingerprint）
+    # 才会进入回退比较——缺身份字段的旧锚点按 unknown 处理，不压新模型。
+    from drl.evolve_engine import _training_identity, _strategy_drl_train_cfg
+    tf = eng._effective_timeframe()
+    sym = eng._symbols[eng._symbol_idx % len(eng._symbols)]  # 不推进轮换索引
+    cfg = _strategy_drl_train_cfg(8)
+    identity = _training_identity(
+        "strategy_drl", sym, tf,
+        state_window=int(cfg["state_window"]),
+        config={
+            "episodes": int(getattr(settings, "evolve_strategy_drl_episodes", 8)),
+            "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 20.0)),
+            "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
+        })
+    _seed_anchor(eng, 9.0, "exchange", oos_ret=0.12, identity=identity)
     holder["result"] = _result(best_ret=0.30, oos_ret=0.01)
 
     await eng._train_strategy_drl_once()
 
     assert eng.zoo.best_fitness("strategy_drl") == 9.0, "同口径退化模型不得覆盖锚点"
     assert eng.zoo.best_info("strategy_drl")["fitness"] == 9.0
+
+
+@pytest.mark.asyncio
+async def test_legacy_anchor_without_identity_does_not_block_new_model(engine):
+    """旧版本锚点缺身份字段应按 unknown 处理：不回退比较，候选凭自身 OOS 建立新基线。"""
+    eng, registered, holder = engine
+    _seed_anchor(eng, 9.0, "exchange", oos_ret=0.12)
+    holder["result"] = _result(best_ret=0.30, oos_ret=0.05)
+
+    await eng._train_strategy_drl_once()
+
+    assert eng.zoo.best_fitness("strategy_drl") == 0.30
+    assert eng._deploy_status["strategy_drl"]["anchor_mismatch"]
 
 
 @pytest.mark.asyncio

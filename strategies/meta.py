@@ -12,6 +12,7 @@
 - 元策略在子策略之上做决策，不修改子策略本身
 - 回测引擎只需要运行元策略一个策略实例
 """
+import copy
 import logging
 import math
 import os
@@ -684,6 +685,8 @@ class MetaControllerEnv:
         self._qty = 0.0
         self._entry_price: Optional[float] = None
         self._prev_equity = self.start_cash
+        self._final_equity = self.start_cash
+        self._final_position_ratio = 0.0
         self._done = False
         self._strategies_trades: dict[str, list[float]] = {n: [] for n in self.strategy_names}
         # 子策略推进游标：暖机段（0..warmup-1）也要按顺序喂进去，状态才与实盘一致
@@ -721,6 +724,8 @@ class MetaControllerEnv:
 
         equity_next = self._cash + self._qty * price_next
         ret = (equity_next / max(self._prev_equity, 1e-9)) - 1.0
+        self._final_equity = float(equity_next)
+        self._final_position_ratio = float(self._qty * price_next / max(equity_next, 1e-9))
         # 奖励 = 收益率（bp），软裁剪
         reward = float(150.0 * np.tanh(ret * 10000.0 / 150.0))
         self._prev_equity = equity_next
@@ -870,7 +875,8 @@ def train_meta_controller(df, cfg: dict,
                         row["val_max_dd"] = round(_equity_drawdown(v_eq), 4)
                     if val_ret > best_val_ret:
                         best_val_ret = val_ret
-                        best_agent = ACAgent.from_dict(agent.to_dict())
+                        # P2：JSON 往返改 deepcopy（快照不经过全量序列化）
+                        best_agent = copy.deepcopy(agent)
                 except Exception as e:  # noqa: BLE001
                     log.warning("[meta_train] 验证失败: %s", e)
 

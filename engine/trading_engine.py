@@ -1241,6 +1241,34 @@ class TradingEngine:
 
         return await asyncio.to_thread(_compute)
 
+    async def validate_and_apply_ai_params(self, name: str, proposed: dict,
+                                           current: Optional[dict] = None) -> tuple[bool, dict]:
+        """验证 AI 候选参数，且仅在验证通过后执行一次热更新。"""
+        if not isinstance(proposed, dict) or not proposed:
+            return False, {"reason": "AI 未返回可应用的参数", "applied": False}
+        async with self._strategy_lock:
+            if self.strategy.name != name:
+                return False, {"reason": f"策略已切换为 {self.strategy.name}，跳过应用",
+                                "applied": False}
+            snapshot = dict(current if current is not None else self.strategy.params)
+        if not bool(getattr(settings, "ai_optimize_validate", True)):
+            applied = await self.apply_strategy_params(name, proposed)
+            return True, {"reason": "已关闭 AI 参数性能验证门", "applied": True,
+                          "validation_bypassed": True, "applied_params": applied}
+        ok, info = await self._validate_param_update(name, proposed, snapshot)
+        info = dict(info or {})
+        if not ok:
+            info["applied"] = False
+            return False, info
+        async with self._strategy_lock:
+            if self.strategy.name != name or dict(self.strategy.params) != snapshot:
+                return False, {**info, "reason": "验证期间策略参数已变化，跳过应用",
+                                "applied": False}
+        applied = await self.apply_strategy_params(name, proposed)
+        info["applied"] = True
+        info["applied_params"] = applied
+        return True, info
+
     # ---------------- 策略管理 ----------------
     def _strategy_ma_periods(self) -> tuple[int, int]:
         """当前策略的 MA 快/慢线周期（与回测引擎同源 strategies.base.strategy_ma_periods）。"""

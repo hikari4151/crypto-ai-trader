@@ -6,9 +6,13 @@
 
 两种格式互通：最佳模型同时保存到两个路径，确保 EvolveEngine 和 DRL API 能互相看到对方的模型。
 """
+import gzip
 import json
 import logging
+import os
+import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -16,6 +20,18 @@ from typing import Any, Optional
 from .agent import ACAgent
 
 log = logging.getLogger(__name__)
+
+
+class ModelZooError(RuntimeError):
+    """模型部署快照无法安全恢复。"""
+
+
+_DEPLOYMENT_META_KEYS = (
+    "train_meta", "factor_expression", "factor_mu", "factor_sd",
+    "min_trade_zone", "pine_code", "pine_note", "cascade_factor",
+    "cascade_factor_path", "cascade_weights_path",
+)
+
 
 # 默认保留的最大版本数（若调用方未传 max_versions 时使用）
 _DEFAULT_MAX_VERSIONS = 10
@@ -34,29 +50,120 @@ class ModelZoo:
         self.max_versions = max(1, int(max_versions or _DEFAULT_MAX_VERSIONS))
         # 锚点 _meta 缓存：name -> ((best 文件 mtime_ns, size), meta dict)
         self._best_meta_cache: dict[str, tuple[tuple, dict]] = {}
+        # P2：meta.json 缓存（status() 每次轮询对三条管线各读一次 meta.json，
+        # 此前无缓存；与 _best_meta_cache 同款按文件身份 (mtime_ns, size) 键控，
+        # 文件被重写后键自然变化。唯一写口 _write_meta 按名失效）。
+        self._meta_cache: dict[str, tuple[tuple, dict]] = {}
 
     # ---- 路径管理 ----
 
+    @staticmethod
+    def _validate_name(name: str) -> str:
+        name = str(name or "")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in (".", ".."):
+            raise ValueError(f"非法模型名: {name!r}")
+        return name
+
     def _model_dir(self, name: str) -> Path:
         """模型子目录，如 data/models/factor_miner/"""
-        path = self.models_dir / name
+        name = self._validate_name(name)
+        root = self.models_dir.resolve()
+        path = (root / name).resolve()
+        if not path.is_relative_to(root):
+            raise ValueError(f"非法模型路径: {name!r}")
         path.mkdir(exist_ok=True)
         return path
+
+    def _validate_version(self, version: int) -> int:
+        if isinstance(version, bool):
+            raise ValueError(f"非法版本: {version!r}")
+        try:
+            version = int(version)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"非法版本: {version!r}") from e
+        if version < 1:
+            raise ValueError(f"非法版本: {version!r}")
+        return version
 
     def _best_path(self, name: str) -> Path:
         return self._model_dir(name) / "best.json.gz"
 
     def _version_path(self, name: str, version: int) -> Path:
-        return self._model_dir(name) / f"v{version}.json.gz"
+        return self._model_dir(name) / f"v{self._validate_version(version)}.json.gz"
 
     def _meta_path(self, name: str) -> Path:
         return self._model_dir(name) / "meta.json"
 
     def _flat_path(self, name: str) -> Path:
         """兼容格式路径：data/models/<name>.json（与 DRL API 同格式）。"""
-        return self.models_dir / f"{name}.json"
+        name = self._validate_name(name)
+        root = self.models_dir.resolve()
+        path = (root / f"{name}.json").resolve()
+        if not path.is_relative_to(root):
+            raise ValueError(f"非法模型路径: {name!r}")
+        return path
 
     # ---- 保存 ----
+
+    @staticmethod
+    def _flat_payload(data: dict) -> dict:
+        """Return the deployment payload: no ModelZoo envelope keys, with
+        deployment metadata promoted from the snapshot meta to top level."""
+        flat = {k: v for k, v in data.items() if k not in ("_meta", "_version")}
+        emeta = data.get("_meta") or {}
+        for key in _DEPLOYMENT_META_KEYS:
+            if key in emeta:
+                flat[key] = emeta[key]
+        return flat
+
+    @staticmethod
+    def _gzip_bytes(data: dict) -> bytes:
+        return gzip.compress(
+            json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"),
+            compresslevel=6,
+        )
+
+    @staticmethod
+    def _json_bytes(data: dict) -> bytes:
+        return json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
+
+    @staticmethod
+    def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+        """Write bytes beside the destination and replace it atomically."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=path.parent, prefix=f".{path.name}.",
+                suffix=".tmp", delete=False,
+            ) as tmp:
+                tmp_name = tmp.name
+                tmp.write(payload)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_name, path)
+        except Exception:
+            if tmp_name:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+            raise
+
+    def _read_version_payload(self, name: str, version: int) -> dict:
+        path = self._version_path(name, version)
+        if not path.exists():
+            raise FileNotFoundError(f"版本 v{version} 不存在")
+        try:
+            data = self._read_json_gz(path)
+        except Exception as e:
+            raise ModelZooError(f"版本 v{version} 损坏: {e}") from e
+        if not isinstance(data, dict):
+            raise ModelZooError(f"版本 v{version} 格式无效")
+        return data
+
+    def _snapshot_bytes(self, data: dict) -> tuple[bytes, bytes]:
+        return self._gzip_bytes(data), self._json_bytes(self._flat_payload(data))
 
     def save_agent(self, agent: ACAgent, name: str, *,
                    meta: Optional[dict] = None,
@@ -83,9 +190,12 @@ class ModelZoo:
         data = agent.to_dict()
         data["_meta"] = meta
         data["_version"] = version
-        self._write_json_gz(self._version_path(name, version), data)
+        version_path = self._version_path(name, version)
 
-        # 更新元数据
+        # 更新元数据（先持久化 next_version 递增，再写版本文件——P2：崩溃窗口
+        # 修复。此前先写版本文件后写 meta，崩溃在中间会让 next_version 未递增，
+        # 下一轮保存以同号覆盖刚写好的 vN（有效模型丢失）。先落 meta 后崩溃的
+        # 最坏结果是 versions 列表多一条无文件的幽灵记录，但绝不覆盖已有版本）
         current_meta["next_version"] = version + 1
         versions = current_meta.setdefault("versions", [])
         versions.append({
@@ -94,35 +204,35 @@ class ModelZoo:
             "meta": {k: v for k, v in meta.items() if isinstance(v, (int, float, str, bool))},
         })
         # 限制版本数量（P4-A5：读取实例配置而非硬编码常量）
-        # P4-E1：裁剪不许删掉 best 锚点指向的版本——否则 best_version 悬空，
-        # rollback(best) 返回 False、best_info 的 provenance 探测失配。
+        # P4-E1：裁剪不许删掉 best 锚点指向的版本——否则 best_version 悬空。
+        # 先选出要删除的旧版本，再写入新版本，避免 max_versions=1 删掉刚保存的 best。
         if len(versions) > self.max_versions:
             best_v = current_meta.get("best_version", 0)
-            while len(versions) > self.max_versions and versions:
-                cand = versions[0]
-                if cand["version"] == best_v:
-                    # 跳过锚点版本：继续找更旧的、非锚点条目裁剪
-                    versions.append(versions.pop(0))
-                    if len(versions) <= self.max_versions:
-                        break
-                    continue
-                old = versions.pop(0)
-                old_path = self._version_path(name, old["version"])
-                if old_path.exists():
-                    old_path.unlink()
-                break
+            removable = next((v for v in versions if v["version"] != best_v), None)
+            if removable is not None:
+                versions.remove(removable)
+                old_path = self._version_path(name, removable["version"])
+                try:
+                    if old_path.exists():
+                        old_path.unlink()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("[model_zoo] 版本文件删除失败 %s: %s", old_path.name, e)
+            else:
+                # 新版本将成为 best 时，保留它；否则最多保留 best 这一份历史版本。
+                versions.pop(0)
+        # 版本记录先落盘：让 next_version 的递增持久化（防崩溃窗口覆盖）
         self._write_meta(name, current_meta)
+        self._write_json_gz(version_path, data)
 
         if is_best:
             # 保存为最佳版本（压缩格式，含版本管理元数据）
             self._write_json_gz(self._best_path(name), data)
-            # 同时保存为兼容格式（与 DRL API 的 ACAgent.save() 同格式）
-            # 移除内部元数据后写入纯 JSON
-            clean = agent.to_dict()
-            self._write_flat_json(self._flat_path(name), clean)
+            # 同时保存为兼容格式（与 DRL API 保存的 flat JSON 同格式）
+            self._write_flat_json(self._flat_path(name), self._flat_payload(data))
             current_meta["best_version"] = version
             current_meta["best_fitness"] = meta.get("fitness")
             self._write_meta(name, current_meta)
+
             log.info("[model_zoo] 模型 %s v%d 设为最佳 (fitness=%s)", name, version, meta.get("fitness"))
 
         log.info("[model_zoo] 模型 %s v%d 已保存", name, version)
@@ -132,38 +242,93 @@ class ModelZoo:
                         meta: Optional[dict] = None) -> int:
         """仅保存为最佳版本（不递增版本号，覆盖旧的最佳文件）。
 
-        锚点口径信息必须跨回退存活：回退路径传来的 meta 只有 {fitness, rollback}，
-        直接覆盖会把 data_source / oos_ret 抹掉，于是"这个高分是不是 demo 刷出来的"
-        这一关键信息在第一次回退后就永久丢失（best_info 只能按 source_unknown 处理）。
-        版本号同理：不能用 max(versions)——那是最近一轮被存档的废模型，
-        会让 best_version 指向一个 fitness 完全不同的版本。
+        Prefer the deployed version payload so compatibility metadata is never
+        rebuilt from the bare agent object during a rollback.
         """
         meta = dict(meta or {})
         meta.setdefault("timestamp", time.time())
-        prev_meta = self._best_meta(name)
-        merged = {**prev_meta, **meta}
-        if prev_meta.get("timestamp"):
-            # 分数是当初跑出来的，回退只是重新部署同一份权重，不刷新建立时间
-            merged["timestamp"] = prev_meta["timestamp"]
-            merged["rolled_back_at"] = meta["timestamp"]
         current_meta = self._load_meta(name)
-        # P4-E1：版本号必须问 best 文件自己（模块既有哲学），不能用
-        # max(versions)——那是最近一轮被存档的废模型，会让 best_version 指向
-        # fitness 完全不同的版本（best_info L253-256 实测错配的根因）。
         _, best_file_version = self._best_head(name)
         version = best_file_version or current_meta.get("best_version") or 1
-        data = agent.to_dict()
+        try:
+            data = self._read_version_payload(name, version)
+        except (FileNotFoundError, ModelZooError):
+            data = agent.to_dict()
+        prev_meta = dict(data.get("_meta") or self._best_meta(name))
+        merged = {**prev_meta, **meta}
+        if prev_meta.get("timestamp"):
+            merged["timestamp"] = prev_meta["timestamp"]
+            merged["rolled_back_at"] = meta["timestamp"]
         data["_meta"] = merged
         data["_version"] = version
-        self._write_json_gz(self._best_path(name), data)
-        # 同步更新兼容格式
-        clean = agent.to_dict()
-        self._write_flat_json(self._flat_path(name), clean)
+        self._write_deployment_files(name, data)
         current_meta["best_version"] = version
         current_meta["best_fitness"] = merged.get("fitness")
         self._write_meta(name, current_meta)
         log.info("[model_zoo] 模型 %s 最佳已更新 (fitness=%s)", name, merged.get("fitness"))
         return version
+
+    def _write_deployment_files(self, name: str, data: dict) -> None:
+        """Atomically replace best and flat files from one payload."""
+        best_path = self._best_path(name)
+        flat_path = self._flat_path(name)
+        old_best = best_path.read_bytes() if best_path.exists() else None
+        old_flat = flat_path.read_bytes() if flat_path.exists() else None
+        try:
+            self._write_json_gz(best_path, data)
+            self._write_flat_json(flat_path, self._flat_payload(data))
+        except Exception as e:
+            try:
+                self._restore_file(best_path, old_best)
+                self._restore_file(flat_path, old_flat)
+            except Exception as restore_error:
+                log.error("[model_zoo] 部署文件回滚失败(%s): %s", name, restore_error)
+            raise ModelZooError(f"部署文件写入失败: {e}") from e
+
+    def _restore_file(self, path: Path, payload: Optional[bytes]) -> None:
+        if payload is None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            self._atomic_write_bytes(path, payload)
+
+    def restore_deployment(self, name: str, version: int, *,
+                           reason: str = "", outcome: str = "rollback") -> dict:
+        """Restore a complete version payload as the deployed best snapshot."""
+        data = self._read_version_payload(name, version)
+        meta = dict(data.get("_meta") or {})
+        now = time.time()
+        meta.setdefault("timestamp", now)
+        meta["rolled_back_at"] = now
+        if reason:
+            meta["rollback_reason"] = reason
+        if outcome:
+            meta["rollback_outcome"] = outcome
+        data["_meta"] = meta
+        data["_version"] = self._validate_version(version)
+
+        meta_path = self._meta_path(name)
+        old_meta = meta_path.read_bytes() if meta_path.exists() else None
+        current_meta = self._load_meta(name)
+        current_meta["best_version"] = data["_version"]
+        current_meta["best_fitness"] = meta.get("fitness")
+        try:
+            self._write_deployment_files(name, data)
+            self._write_meta(name, current_meta)
+        except Exception as e:
+            try:
+                if old_meta is None:
+                    meta_path.unlink(missing_ok=True)
+                else:
+                    self._atomic_write_bytes(meta_path, old_meta)
+            except Exception as restore_error:
+                log.error("[model_zoo] 锚点元数据回滚失败(%s): %s", name, restore_error)
+            raise ModelZooError(f"部署快照恢复失败: {e}") from e
+        return {"version": data["_version"], "meta": meta,
+                "best_path": str(self._best_path(name)),
+                "flat_path": str(self._flat_path(name))}
 
     def save_agent_archive(self, agent: ACAgent, name: str, *,
                            meta: Optional[dict] = None,
@@ -351,17 +516,14 @@ class ModelZoo:
                     shutil.copy2(src, arch_dir / f"{stamp}_{src.name}")
             except Exception as e:  # noqa: BLE001
                 log.warning("[model_zoo] 锚点留档失败 %s: %s", src.name, e)
-        # P4-E1：anchor_reset/ 只保留最近 _MAX_ARCHIVES 次重置的留档（文件名
-        # 前缀=时间序），防止每次重置都把 MB 级 best.json.gz 无限累积
+        # P4-E1：anchor_reset/ 只保留最近 _MAX_ARCHIVES 份留档（文件名前缀=时间序，
+        # 防止每次重置都把 MB 级 best.json.gz 无限累积）。
+        # P2：按"全局保留最近 N 份"裁剪——此前按文件名前缀（日期）分组、每天各
+        # 留 30 份，每天重置一次的常规用法下裁剪永不触发，跨天无界增长。
         try:
-            kept: dict[str, list] = {}
-            for p in sorted(arch_dir.glob("*")):
-                key = p.name.split("_", 1)[0]
-                kept.setdefault(key, []).append(p)
-                keep = kept[key][-_MAX_ARCHIVES:]
-                for stale in kept[key][:-_MAX_ARCHIVES]:
-                    stale.unlink(missing_ok=True)
-                kept[key] = keep
+            existing = sorted(arch_dir.glob("*"))
+            for stale in existing[:-_MAX_ARCHIVES]:
+                stale.unlink(missing_ok=True)
         except Exception as e:  # noqa: BLE001
             log.warning("[model_zoo] 锚点留档裁剪失败（不阻断重置）: %s", e)
         meta["best_version"] = 0
@@ -374,38 +536,13 @@ class ModelZoo:
         return {"cleared": cleared, "stamp": stamp, "archive_dir": str(arch_dir)}
 
     def rollback(self, name: str, version: int) -> bool:
-        """回退到指定版本，将其设为最佳。
-
-        Returns:
-            True 成功，False 版本不存在。
-        """
-        path = self._version_path(name, version)
-        if not path.exists():
-            return False
+        """回退到指定版本，将其设为最佳。"""
         try:
-            data = self._read_json_gz(path)
-            # P4-E1：与 save_agent_best 的 provenance 合并口径一致——
-            # 保留版本文件原 _meta（data_source/oos_ret/timestamp），追加
-            # rolled_back_at 标记，让 best_info 能区分"正常训练覆盖"与"手动回退"。
-            prev_meta = self._best_meta(name)
-            merged = {**prev_meta, **(data.get("_meta") or {})}
-            merged.setdefault("timestamp", time.time())
-            merged["rolled_back_at"] = time.time()
-            data["_meta"] = merged
-            self._write_json_gz(self._best_path(name), data)
-            # 同步更新兼容格式
-            clean = dict(data)
-            clean.pop("_meta", None)
-            clean.pop("_version", None)
-            self._write_flat_json(self._flat_path(name), clean)
-            meta = self._load_meta(name)
-            meta["best_version"] = version
-            meta["best_fitness"] = merged.get("fitness")
-            self._write_meta(name, meta)
-            log.info("[model_zoo] 模型 %s 已回退到 v%d (rolled_back_at=%s)",
-                     name, version, merged.get("rolled_back_at"))
+            self.restore_deployment(name, version, outcome="rollback")
             return True
-        except Exception as e:
+        except FileNotFoundError:
+            return False
+        except Exception as e:  # noqa: BLE001
             log.warning("[model_zoo] 回退模型 %s 到 v%d 失败: %s", name, version, e)
             return False
 
@@ -460,12 +597,28 @@ class ModelZoo:
         现在：1) 报错并 rename 损坏文件留证；2) 从文件系统重建 next_version
         （扫 vN.json.gz 取 max+1），保证不覆盖已有版本；3) best_version/best_fitness
         置 0/None（损坏 meta 无法恢复锚点画像，宁可让回退门重新建立）。
+
+        P2：按文件身份 (mtime_ns, size) 缓存——status() 每次轮询对三条管线
+        各读一次 meta.json，此前同步 read_text 每轮 3 次系统调用打在事件循环上。
+        写入方（_write_meta）按名失效；调用方只在随后落盘时才修改返回的 dict
+        （置入缓存前会先做磁盘读取校验），不会污染缓存。
         """
         path = self._meta_path(name)
-        if not path.exists():
+        try:
+            st = path.stat() if path.exists() else None
+        except OSError:
+            st = None
+        if st is not None:
+            key = (st.st_mtime_ns, st.st_size)
+            hit = self._meta_cache.get(name)
+            if hit and hit[0] == key:
+                return hit[1]
+        if st is None:
             return {"next_version": 1, "versions": [], "best_version": 0, "best_fitness": None}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            self._meta_cache[name] = (key, meta)
+            return meta
         except Exception as e:  # noqa: BLE001
             import time as _t
             stamp = _t.strftime("%Y%m%d_%H%M%S")
@@ -491,45 +644,49 @@ class ModelZoo:
                     "best_version": 0, "best_fitness": None}
 
     def _write_meta(self, name: str, meta: dict) -> None:
-        """写入模型元数据文件。"""
-        import tempfile
-        # 锚点任何变更都会写 meta.json：这里是缓存失效的唯一收口
-        # （Windows mtime 粒度较粗，只靠文件身份键可能读到旧锚点）
-        self._best_meta_cache.clear()
-        tmp = self._meta_path(name).with_suffix(".tmp.json")
+        """写入模型元数据文件（失败抛错，供部署层回滚判断）。"""
+        path = self._meta_path(name)
+        old = path.read_bytes() if path.exists() else None
         try:
-            tmp.write_text(json.dumps(meta, ensure_ascii=False, default=str), encoding="utf-8")
-            tmp.replace(self._meta_path(name))
+            self._atomic_write_bytes(path, self._json_bytes(meta))
         except Exception as e:
-            log.warning("[model_zoo] 写入元数据 %s 失败: %s", name, e)
+            try:
+                self._restore_file(path, old)
+            except Exception as restore_error:  # noqa: BLE001
+                log.error("[model_zoo] 元数据回滚失败(%s): %s", name, restore_error)
+            raise ModelZooError(f"写入元数据失败: {e}") from e
+        finally:
+            # 锚点任何变更都会写 meta.json：这里是缓存失效的唯一收口
+            self._meta_cache.pop(name, None)
+            self._best_meta_cache.pop(name, None)
 
     @staticmethod
     def _write_json_gz(path: Path, data: dict) -> None:
-        """写入压缩 JSON 文件。"""
-        import gzip
-        import tempfile
+        """写入压缩 JSON 文件（失败抛错）。"""
         tmp = path.with_suffix(".tmp.gz")
         try:
-            with gzip.open(tmp, "wt", encoding="utf-8") as f:
+            # P2：compresslevel=9 → 6（best.json.gz 可达 1MB+，6 档与 9 档压缩比
+            # 几乎无差但写盘快数倍；保存路径已在 evolve_engine 侧移出事件循环）
+            with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as f:
                 json.dump(data, f, ensure_ascii=False, default=str)
-            tmp.replace(path)
+            os.replace(tmp, path)
         except Exception as e:
-            log.warning("[model_zoo] 写入 %s 失败: %s", path.name, e)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ModelZooError(f"写入 {path.name} 失败: {e}") from e
 
     @staticmethod
     def _read_json_gz(path: Path) -> dict:
         """读取压缩 JSON 文件。"""
-        import gzip
         with gzip.open(path, "rt", encoding="utf-8") as f:
             return json.load(f)
 
     @staticmethod
     def _write_flat_json(path: Path, data: dict) -> None:
-        """写入兼容格式 JSON（与 DRL API 的 ACAgent.save() 同格式）。"""
-        import tempfile
-        tmp = path.with_suffix(".tmp.json")
+        """写入兼容格式 JSON（与 DRL API 的 ACAgent.save() 同格式，失败抛错）。"""
         try:
-            tmp.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
-            tmp.replace(path)
+            ModelZoo._atomic_write_bytes(path, ModelZoo._json_bytes(data))
         except Exception as e:
-            log.warning("[model_zoo] 写入兼容格式 %s 失败: %s", path.name, e)
+            raise ModelZooError(f"写入兼容格式 {path.name} 失败: {e}") from e

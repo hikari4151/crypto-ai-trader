@@ -93,17 +93,21 @@ class MLP:
                 self._v_ln_b.append(np.zeros(dims[i + 1], dtype=float))
 
     # ---------- 前向 ----------
-    def forward(self, x: np.ndarray) -> list[np.ndarray]:
+    def forward(self, x: np.ndarray, cache_for_backward: bool = True) -> list[np.ndarray]:
         """返回各层激活值 [h0=x, h1, ..., h_{L-1}=输出]。
 
         可选 LayerNorm 在 ReLU 前插入（稳定深层激活分布）。
         输出层不激活（softmax/线性在外面处理）。
         P4-B3：use_ln=True 时缓存每层 LN 的 (mu, sigma, z_norm) 供 backward 使用
         （此前 backward 完全没有 LN 梯度，开启 LN 即静默训坏：梯度错误 + gamma/beta 冻结）。
+        P2：cache_for_backward=False 时跳过 _ln_cache 写入——多线程并行收集轨迹
+        时 worker 并发调用 forward，此前共享 _ln_cache 的「重建+append」序列会被
+        线程交错污染（collect 期无人读所以没炸，但属潜在地雷）且白费分配开销。
         """
         acts = [np.asarray(x, dtype=float)]
         ln_idx = 0
-        self._ln_cache: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        if cache_for_backward:
+            self._ln_cache: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         for i in range(len(self.W)):
             z = acts[-1] @ self.W[i] + self.b[i]
             if i == len(self.W) - 1:
@@ -116,24 +120,25 @@ class MLP:
                     z_norm = (z - mu) / sigma
                     z = z_norm * self.ln_gamma[ln_idx] + self.ln_beta[ln_idx]
                     # P4-B3：缓存 (mu, sigma, z_norm) 供 backward 反传 LN 梯度
-                    self._ln_cache.append((mu, sigma, z_norm))
+                    if cache_for_backward:
+                        self._ln_cache.append((mu, sigma, z_norm))
                     ln_idx += 1
                 acts.append(np.maximum(z, 0.0))  # ReLU
         return acts
 
-    def predict_proba(self, x: np.ndarray) -> np.ndarray:
+    def predict_proba(self, x: np.ndarray, cache_for_backward: bool = True) -> np.ndarray:
         """Actor 输出：softmax 概率（n_actions）。x 可 1D 或 (batch, in)。"""
-        self._last_logits = self.forward(x)[-1]
+        self._last_logits = self.forward(x, cache_for_backward=cache_for_backward)[-1]
         return _softmax(self._last_logits)
 
-    def predict_log_proba(self, x: np.ndarray) -> np.ndarray:
+    def predict_log_proba(self, x: np.ndarray, cache_for_backward: bool = True) -> np.ndarray:
         """log_softmax 概率（数值稳定版，消除 softmax+log 下溢风险）。"""
-        logits = self.forward(x)[-1]
+        logits = self.forward(x, cache_for_backward=cache_for_backward)[-1]
         return _log_softmax(logits)
 
-    def predict_value(self, x: np.ndarray) -> np.ndarray:
+    def predict_value(self, x: np.ndarray, cache_for_backward: bool = True) -> np.ndarray:
         """Critic 输出：标量价值。"""
-        return self.forward(x)[-1].reshape(-1)
+        return self.forward(x, cache_for_backward=cache_for_backward)[-1].reshape(-1)
 
     # ---------- 反向传播 ----------
     def backward(self, acts: list[np.ndarray], dout: np.ndarray) -> tuple[list, list]:

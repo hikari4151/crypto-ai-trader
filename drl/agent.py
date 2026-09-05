@@ -10,6 +10,7 @@
 - 波动率上升且满仓 → 负奖励 → 学会降仓位
 - 趋势明朗（trend_regime/ma 特征走强）→ 保持/上调仓位
 """
+import copy
 import json
 import logging
 import math
@@ -55,6 +56,8 @@ class ReplayBuffer:
         self._rewards: list[np.ndarray] = []
         self._old_log_probs: list[np.ndarray] = []
         self._segment_lengths: list[int] = []
+        # P2：实例级 rng（sample 每调用新建 default_rng 无法复现且无必要）
+        self._rng = np.random.default_rng()
 
     def push(self, states: np.ndarray, actions: np.ndarray,
              rewards: np.ndarray, old_log_probs: np.ndarray) -> None:
@@ -87,8 +90,8 @@ class ReplayBuffer:
         n_from_buf = min(n_buf, max(1, int(batch_size * mix_ratio)))
         n_from_new = max(1, batch_size - n_from_buf)
 
-        # 从缓冲区均匀采样
-        rng = np.random.default_rng()
+        # 从缓冲区均匀采样（P2：实例级 rng——每次新建 default_rng 无法复现）
+        rng = self._rng
         idx = rng.choice(n_buf, size=min(n_from_buf, n_buf), replace=False)
 
         states = [self._states[i] for i in idx]
@@ -97,10 +100,12 @@ class ReplayBuffer:
         log_probs = [self._old_log_probs[i] for i in idx]
         seg_lens = [self._segment_lengths[i] for i in idx]
 
-        # 加入最新轨迹（队尾 n_from_new 条）
+        # 加入最新轨迹（队尾 n_from_new 条）——P2：`i not in idx` 是 O(len(idx))，
+        # 逐 i 判断累计 O(n²)；转 set 后 O(1) 判定
+        idx_set = set(idx.tolist())
         start = max(0, n_buf - n_from_new)
         for i in range(start, n_buf):
-            if i not in idx:
+            if i not in idx_set:
                 states.append(self._states[i])
                 actions.append(self._actions[i])
                 rewards.append(self._rewards[i])
@@ -214,7 +219,10 @@ class ACAgent:
         潜在竞态，破坏 seed 可复现（D1 修复）。
         """
         rng = rng or self._rng
-        logp_all = self.actor.predict_log_proba(state.reshape(1, -1))[0]
+        # P2：collect 路径前向不写 _ln_cache（多线程并行收集时共享 MLP 的
+        # 缓存写入竞态是潜在地雷；backward 需要的是 train_batch 内前向的缓存）
+        logp_all = self.actor.predict_log_proba(state.reshape(1, -1),
+                                                cache_for_backward=False)[0]
         proba = np.exp(logp_all)  # 从 log_softmax 恢复概率（exp 无下溢，因为 logp >= -inf）
         action = int(rng.choice(self.n_actions, p=proba))
         logp = float(logp_all[action])
@@ -810,7 +818,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                             _adv_scale = 1.0
                     if val_ret > best_val_ret:
                         best_val_ret = val_ret
-                        best_agent = ACAgent.from_dict(agent.to_dict())
+                        # P2：JSON 往返（to_dict→from_dict 全量序列化）改为 deepcopy
+                        best_agent = copy.deepcopy(agent)
                         no_improve_streak = 0
                     else:
                         no_improve_streak = no_improve_streak + 1
@@ -884,11 +893,14 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
             oos_rets: list = []
             oos_pos_ratios: list = []
             oos_equities_all: list = []
+            oos_segment_equities: list[list[float]] = []
             oos_final_equities: list = []
             if oos_segments > 1 and seg_len >= oos_min_bars:
                 for i in range(oos_segments):
-                    seg = oos_df.iloc[i * seg_len:(i + 1) * seg_len]
-                    seg_extra = (extra_factors_oos[i * seg_len:(i + 1) * seg_len]
+                    start = i * seg_len
+                    end = len(oos_df) if i == oos_segments - 1 else (i + 1) * seg_len
+                    seg = oos_df.iloc[start:end]
+                    seg_extra = (extra_factors_oos[start:end]
                                  if extra_factors_oos is not None else None)
                     seg_env = TradingEnv(seg, start_cash=float(cfg.get("start_cash", 10000.0)),
                                          fee_rate=float(cfg.get("fee_rate", 0.001)),
@@ -903,8 +915,9 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     oos_rets.append(float(seg_traj["total_ret"]))
                     oos_pos_ratios.append(float(seg_traj["final_position_ratio"]))
                     oos_final_equities.append(float(seg_traj["final_equity"]))
-                    oos_equities_all.extend(info.get("equity") for info in seg_traj.get("infos", [])
-                                            if info.get("equity") is not None)
+                    seg_equities = [info.get("equity") for info in seg_traj.get("infos", [])
+                                    if info.get("equity") is not None]
+                    oos_segment_equities.append(seg_equities)
                 oos_ret = float(np.median(oos_rets))  # 中位数收益：对单段运气更稳健
                 oos_position_ratio = float(np.median(oos_pos_ratios))
                 oos_equity_final = float(np.median(oos_final_equities))
@@ -926,7 +939,15 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                                     if info.get("equity") is not None]
                 oos_rets = [oos_ret]
                 oos_pos_ratios = [oos_position_ratio]
-            oos_equities = oos_equities_all
+            if oos_segment_equities:
+                oos_equity_metrics = _aggregate_oos_segment_metrics(oos_segment_equities)
+            else:
+                oos_equity_metrics = {
+                    "sharpe": _equity_sharpe(oos_equities_all)
+                    if len(oos_equities_all) > 2 else 0.0,
+                    "max_drawdown": _equity_drawdown(oos_equities_all)
+                    if len(oos_equities_all) > 2 else 0.0,
+                }
             # 训练段代表收益（用验证段 best 或训练段末收益）
             train_ref = best_train_ret if best_train_ret > -1e8 else float(total_ret)
             # 过拟合判断：OOS 收益相对训练段收益的衰减（D3，语义见 _oos_decay）
@@ -956,8 +977,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                 "overfit_likely": bool(decay > 0.5),  # OOS 收益衰减过半 → 疑似过拟合
                 "oos_equity_final": round(oos_equity_final, 2),
                 "oos_position_ratio": round(oos_position_ratio, 4),
-                "oos_sharpe": round(_equity_sharpe(oos_equities), 4) if len(oos_equities) > 2 else 0.0,
-                "oos_max_drawdown": round(_equity_drawdown(oos_equities), 4) if len(oos_equities) > 2 else 0.0,
+                "oos_sharpe": round(oos_equity_metrics["sharpe"], 4),
+                "oos_max_drawdown": round(oos_equity_metrics["max_drawdown"], 4),
                 # P1-7：regime 对比
                 "train_vol": round(_train_vol, 6),
                 "oos_vol": round(_oos_vol, 6),
@@ -1068,6 +1089,17 @@ def _equity_drawdown(equities: list) -> float:
     peak = _np.maximum.accumulate(eq)
     dd = (peak - eq) / (peak + 1e-9)
     return float(dd.max())
+
+
+def _aggregate_oos_segment_metrics(segments: list[list[float]]) -> dict[str, float]:
+    """按独立 OOS 段聚合权益指标，避免段间重置造成虚假跳点。"""
+    import numpy as _np
+    sharpes = [_equity_sharpe(eq) for eq in segments if len(eq) > 2]
+    drawdowns = [_equity_drawdown(eq) for eq in segments if len(eq) > 1]
+    return {
+        "sharpe": float(_np.median(sharpes)) if sharpes else 0.0,
+        "max_drawdown": float(_np.median(drawdowns)) if drawdowns else 0.0,
+    }
 
 
 def evaluate_agent(agent: ACAgent, df, cfg=None) -> dict:

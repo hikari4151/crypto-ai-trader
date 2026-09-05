@@ -15,6 +15,7 @@
 - composite: 组合因子序列（全量，供回测/实盘消费）
 - report: OOS 段安检报告（valid/rank_ic/icir/turnover/fitness）
 """
+import copy
 import logging
 import random
 import time
@@ -83,10 +84,20 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
     oos_df = df.iloc[n_val:]
     oos_mat = mat.iloc[n_val:] if len(oos_df) >= 60 else None
 
+    # 并行收集：预计算一次 IC/ICIR 矩阵（避免每个 worker 重复 84ms 的 _rolling_ic）。
+    # P2：提前到共享 env 构造之前——共享 env 此前漏传 precomputed_*，_greedy_fitness
+    # /_greedy_select 每轮会重算 0.27s 的全列 IC 矩阵；传入后与 worker 同源同值。
+    from factors.analysis import _rolling_ic
+    _ics = pd.DataFrame({c: _rolling_ic(mat[c], close, h=h, method="rank", window=ic_window)
+                          for c in mat.columns}, index=mat.index).shift(h).ffill()
+    _icir = _ics.rolling(ic_window * 5, min_periods=ic_window * 2).mean() / (
+        _ics.rolling(ic_window * 5, min_periods=ic_window * 2).std() + 1e-12)
+
     env = FactorMiningEnv(mat, close, h=h, ic_window=ic_window,
                           max_steps=max_steps,
                           train_ratio=train_ratio, val_ratio=val_ratio,
-                          corr_threshold=corr_threshold, seed=seed)
+                          corr_threshold=corr_threshold, seed=seed,
+                          precomputed_ics=_ics, precomputed_icir=_icir)
     agent = ACAgent(env.state_dim, env.n_actions, hidden=hidden,
                     lr_actor=float(cfg.get("lr_actor", 3e-3)),
                     lr_critic=float(cfg.get("lr_critic", 6e-3)),
@@ -97,12 +108,6 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
     history: list[dict] = []
     best_fitness = -1e9
     best_agent: Optional[ACAgent] = None
-    # 并行收集：预计算一次 IC/ICIR 矩阵（避免每个 worker 重复 84ms 的 _rolling_ic）
-    from factors.analysis import _rolling_ic
-    _ics = pd.DataFrame({c: _rolling_ic(mat[c], close, h=h, method="rank", window=ic_window)
-                          for c in mat.columns}, index=mat.index).shift(h).ffill()
-    _icir = _ics.rolling(ic_window * 5, min_periods=ic_window * 2).mean() / (
-        _ics.rolling(ic_window * 5, min_periods=ic_window * 2).std() + 1e-12)
     from concurrent.futures import ThreadPoolExecutor
 
     def _collect_one(args: tuple) -> dict:
@@ -136,7 +141,8 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
             fit = _greedy_fitness(agent, env)
             if fit > best_fitness:
                 best_fitness = fit
-                best_agent = ACAgent.from_dict(agent.to_dict())
+                # P2：JSON 往返改为 deepcopy（to_dict→from_dict 要序列化全部权重）
+                best_agent = copy.deepcopy(agent)
             row = {
                 "episode": ep,
                 "fitness": round(fit, 5),
@@ -146,17 +152,17 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
                 "steps": int(np.mean([t["steps"] for t in trajs])),
             }
             history.append(row)
-        if on_progress:
-            try:
-                on_progress({
-                    "episode": ep, "episodes": episodes,
-                    "fitness": row["fitness"],
-                    "best_fitness": row["best_fitness"],
-                    "policy_loss": stats["policy_loss"],
-                    "elapsed_sec": round(time.time() - t0, 1),
-                })
-            except Exception as e:  # noqa: BLE001
-                log.warning("[factor_miner] 进度回调异常: %s", e)
+            if on_progress:
+                try:
+                    on_progress({
+                        "episode": ep, "episodes": episodes,
+                        "fitness": row["fitness"],
+                        "best_fitness": row["best_fitness"],
+                        "policy_loss": stats["policy_loss"],
+                        "elapsed_sec": round(time.time() - t0, 1),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    log.warning("[factor_miner] 进度回调异常: %s", e)
 
     final_agent = best_agent or agent
 

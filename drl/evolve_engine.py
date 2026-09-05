@@ -16,9 +16,11 @@
     await evolve.stop()
 """
 import asyncio
+import concurrent.futures
 import json
 import logging
 import random
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -46,6 +48,14 @@ DEFAULT_META_SUBS = "dual_ma,factor_signal,price_action,rl_evolve"
 
 # P4-E1：K线数据缓存键上限（symbol×timeframe 组合只增不减，超限淘汰最旧）
 _DATA_CACHE_MAX_KEYS = 16
+
+
+class InsufficientDataError(RuntimeError):
+    """数据不足的业务分支（非崩溃）：_run_loop 用 warning 记日志、不带全栈。
+
+    此前以裸 RuntimeError 表达，落在通用 except 里 log.exception 每 5 分钟
+    刷一屏 traceback，且把「数据不足」与真正的训练崩溃混在同一语义。
+    """
 
 
 def _strategy_drl_train_cfg(episodes: int) -> dict:
@@ -230,6 +240,15 @@ class EvolveEngine:
         self._symbol_idx = 0
         # 当前标的已训练完成的管线集合（三管线齐全后切换标的）
         self._cycle_pipelines_done: set[str] = set()
+        # 专用训练线程池（单 worker）：训练本体串行执行；stop/set_enabled(False)
+        # 通过 _training_done 事件等待在跑的训练跑完——取消协程只会中断 await，
+        # executor 线程会继续烧 CPU，等待后"禁用/停止"语义才名副其实
+        self._train_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="evolve-train")
+        self._training_done = threading.Event()
+        self._training_done.set()
+        # 拉数串行锁：三管线 + 跨标 OOS 并发打交易所会放大 429，统一串行化
+        self._fetch_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """启动后台训练循环。"""
@@ -269,7 +288,17 @@ class EvolveEngine:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        # 等在跑的 to_thread 训练跑完（取消只停协程；executor 线程会跑到底）。
+        # 用 to_thread 等 threading.Event，避免阻塞事件循环；超时仅告警不阻断。
+        await self._wait_training_done()
         log.info("[evolve] 持续进化引擎已停止")
+
+    async def _wait_training_done(self, timeout: float = 180.0) -> None:
+        """等待专用训练线程池里当前训练结束（无训练在跑时立即返回）。"""
+        try:
+            await asyncio.to_thread(self._training_done.wait, timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            log.warning("[evolve] 等待训练线程结束超时（>%.0fs），可能仍在后台训练", timeout)
 
     # ---- 策略注册（训练成功 / 启动恢复共用同一套规格，保证各模块看到的口径一致） ----
 
@@ -302,8 +331,9 @@ class EvolveEngine:
 
     async def _register_rl_evolve(self) -> None:
         """把当前 strategy_drl 最佳（flat）模型注册为 rl_evolve 策略并落库。"""
-        episodes = getattr(settings, "evolve_strategy_drl_episodes", 20)
-        pine_code, pine_note = self._export_rl_evolve_pine()
+        episodes = getattr(settings, "evolve_strategy_drl_episodes", 8)
+        # Pine 导出是同步文件读 + 字符串拼装（潜在几百 KB），放线程池防阻塞事件循环
+        pine_code, pine_note = await asyncio.to_thread(self._export_rl_evolve_pine)
         if pine_note:
             log.warning("[evolve] rl_evolve 无法导出 Pine：%s", pine_note)
         spec = {
@@ -372,10 +402,18 @@ class EvolveEngine:
                     cutoffs[m] = datetime.fromtimestamp(
                         rst["timestamp"], tz=timezone.utc).replace(tzinfo=None)
             async with self.db.session() as s:
-                hist = (await s.execute(
-                    select(EvolveRound.model, EvolveRound.status, EvolveRound.round_no,
-                           EvolveRound.ts)
-                    .order_by(EvolveRound.round_no.desc()))).all()
+                # P2-9：按模型分查 + LIMIT（连续 streak 在第 1 条 ok/锚点重置处即终止，
+                # 每模型最多需要 stall_rounds+1 条；此前无 WHERE/LIMIT 全表载入，长期
+                # 运行后重启耗时会随 evolve_rounds 表增长）
+                hist: list[Any] = []
+                for m in self._models:
+                    rows_m = (await s.execute(
+                        select(EvolveRound.model, EvolveRound.status, EvolveRound.round_no,
+                               EvolveRound.ts)
+                        .where(EvolveRound.model == m)
+                        .order_by(EvolveRound.round_no.desc())
+                        .limit(int(self._stall_rounds) + 1))).all()
+                    hist.extend(rows_m)
             seen: set[str] = set()
             streaks: dict[str, int] = {m: 0 for m in self._models}
             for model, st, _rn, ts in hist:  # 已按 round_no 倒序
@@ -413,10 +451,12 @@ class EvolveEngine:
             self._tasks.append(asyncio.create_task(self._meta_controller_loop(), name="evolve_meta_controller"))
             log.info("[evolve] 持续进化已启用（因子挖掘/策略DRL/元策略 三管线均恢复）")
         elif not enabled:
-            # 禁用：取消所有训练循环（正在训练的任务会被取消）
+            # 禁用：取消所有训练循环（正在训练的任务会被取消，但 executor 线程
+            # 会跑完——等待其结束再返回，避免"已禁用仍在后台烧 CPU"）
             for t in self._tasks:
                 t.cancel()
             self._tasks.clear()
+            await self._wait_training_done()
             log.info("[evolve] 持续进化已禁用")
 
     async def pause(self) -> None:
@@ -433,12 +473,20 @@ class EvolveEngine:
         """手动触发一次因子挖掘训练（同步执行，不阻塞太久需容忍）。"""
         if not self._running:
             return {"ok": False, "reason": "持续进化引擎未运行"}
+        # P2：忙态守卫——另一条训练正在进行时直接拒绝（此前连点会在
+        # _train_lock 上排队，连续执行数轮完整训练）
+        if self._train_lock.locked():
+            return {"ok": False, "busy": True, "reason": "另一条训练正在进行中，请稍后再试"}
         async with self._train_lock:
             self._factor_miner_status["active"] = True
             try:
                 self._factor_miner_status["last_error"] = ""
-                await self._train_factor_miner_once(force=True)
+                _res = await self._train_factor_miner_once(force=True)
                 self._factor_miner_status["last_run"] = time.time()
+                if _res == "demo":
+                    # 演示数据轮：降级不算成功（last_error 已写明故障）
+                    self._factor_miner_status["last_success"] = False
+                    return {"ok": True, "model": "factor_miner", "demo": True}
                 self._factor_miner_status["last_success"] = True
                 return {"ok": True, "model": "factor_miner"}
             except asyncio.CancelledError:
@@ -455,12 +503,18 @@ class EvolveEngine:
         """手动触发一次策略 DRL 训练（同步执行）。"""
         if not self._running:
             return {"ok": False, "reason": "持续进化引擎未运行"}
+        # P2：忙态守卫——另一条训练正在进行时直接拒绝（防连点排队执行多轮）
+        if self._train_lock.locked():
+            return {"ok": False, "busy": True, "reason": "另一条训练正在进行中，请稍后再试"}
         async with self._train_lock:
             self._strategy_drl_status["active"] = True
             try:
                 self._strategy_drl_status["last_error"] = ""
-                await self._train_strategy_drl_once(force=True)
+                _res = await self._train_strategy_drl_once(force=True)
                 self._strategy_drl_status["last_run"] = time.time()
+                if _res == "demo":
+                    self._strategy_drl_status["last_success"] = False
+                    return {"ok": True, "model": "strategy_drl", "demo": True}
                 self._strategy_drl_status["last_success"] = True
                 return {"ok": True, "model": "strategy_drl"}
             except asyncio.CancelledError:
@@ -477,13 +531,16 @@ class EvolveEngine:
         """手动触发一次元策略控制器训练（同步执行）。"""
         if not self._running:
             return {"ok": False, "reason": "持续进化引擎未运行"}
+        # P2：忙态守卫——另一条训练正在进行时直接拒绝（防连点排队执行多轮）
+        if self._train_lock.locked():
+            return {"ok": False, "busy": True, "reason": "另一条训练正在进行中，请稍后再试"}
         async with self._train_lock:
             self._meta_controller_status["active"] = True
             try:
                 self._meta_controller_status["last_error"] = ""
-                await self._train_meta_controller_once(force=True)
+                _res = await self._train_meta_controller_once(force=True)
                 self._meta_controller_status["last_run"] = time.time()
-                self._meta_controller_status["last_success"] = True
+                self._meta_controller_status["last_success"] = _res is not False
                 return {"ok": True, "model": "meta_controller"}
             except asyncio.CancelledError:
                 raise
@@ -600,7 +657,7 @@ class EvolveEngine:
             "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 20.0)),
             "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
             "cross_symbol_oos": bool(getattr(settings, "evolve_cross_symbol_oos", True)),
-            "min_new_bars": int(getattr(settings, "evolve_min_new_bars", 50)),
+            "min_new_bars": int(getattr(settings, "evolve_min_new_bars", 2)),
         }
 
     async def apply_config(self, changes: dict) -> dict:
@@ -609,48 +666,71 @@ class EvolveEngine:
 
         'symbols'：允许单元素列表 → 固定品种训练（替代默认轮换）。
         'timeframe'：训练时间周期（空/缺省时回落 settings.default_timeframe）。
-        返回 {ok, applied: {...}}。
+        返回 {ok, applied: {...}, persisted: bool}。
+
+        事务性（P1-1/P1-2 修复）：先对全部变更做校验（含 timeframe 白名单），
+        全部通过后才一次性写入 settings/引擎属性并持久化；任何一项失败返回
+        错误且不产生副作用——此前 symbols/timeframe 先赋值、后续字段校验失败
+        不回滚，造成「前端提示失败但引擎已在用新配置」的状态分裂。
         """
         import shutil
+        from backtest.data_loader import _BINANCE_TF  # 合法周期白名单（唯一权威来源）
         applied: dict = {}
+        allowed = set(self.config_keys)
+        unknown = sorted(set(changes) - allowed)
+        if unknown:
+            return {"ok": False, "error": f"未知配置项: {', '.join(unknown)}",
+                    "applied": applied}
+        # 1) 全部校验 → pending 清单（不产生任何副作用）
+        pending: list[tuple[str, Any, Optional[str] | None]] = []  # (settings_attr, value, engine_attr)
 
         # 训练标的池：支持"单元素 = 固定品种训练"。
         # P4-E1：空数组视为非法输入（清空标的池会让三管线无从取数），
         # 明确报错而不是静默 no-op；此前 `if changes["symbols"]:` 把空池整体跳过，
         # 前端却提示"保存成功"。
         if "symbols" in changes:
-            if not changes["symbols"]:
-                return {"ok": False, "error": "训练标的池不能为空（请至少保留一个标的）",
+            raw_symbols = changes["symbols"]
+            if not isinstance(raw_symbols, list) or not raw_symbols or len(raw_symbols) > 50:
+                return {"ok": False, "error": "symbols 必须是 1-50 个交易对的列表",
                         "applied": applied}
-            syms = [str(s).strip().upper() for s in changes["symbols"] if str(s).strip()]
-            if not syms:
-                return {"ok": False, "error": "训练标的池不能为空（列表均为空字符串）",
-                        "applied": applied}
-            self._symbols = syms
-            self._symbol_idx = 0  # 重置轮换起点
-            self._cycle_pipelines_done.clear()  # P4-A1：标的池变更后重新记 cycle
-            setattr(settings, "evolve_symbols", syms)
-            applied["evolve_symbols"] = syms
+            syms = []
+            for raw_symbol in raw_symbols:
+                if not isinstance(raw_symbol, str):
+                    return {"ok": False, "error": "symbols 必须全部是字符串",
+                            "applied": applied}
+                symbol = raw_symbol.strip().upper()
+                if not symbol or "/" not in symbol or len(symbol) > 40:
+                    return {"ok": False, "error": f"非法交易对: {raw_symbol!r}",
+                            "applied": applied}
+                syms.append(symbol)
+            pending.append(("evolve_symbols", syms, "_symbols"))
         # 训练时间周期：independent of default_timeframe（P2-12 用户主诉求落地）。
         # P4-E1：timeframe 为 null/空串 = 前端「跟随默认」——清除独立周期、回落
         # default_timeframe。此前 str(None)="None" 恒真值，把 "none" 写进 settings，
         # 非法周期导致拉数失败退化 demo 且面板永久显示错误周期。
+        # P1-2：非法周期在这里用 _BINANCE_TF 白名单拦截（此前注释声称"持久化前
+        # 兜底"但全仓库根本不存在该白名单，非法值被静默持久化，重启后整个进化
+        # 链路持续 demo 空转）。
         if "timeframe" in changes:
             tf_raw = changes.get("timeframe")
             tf = str(tf_raw).strip().lower() if tf_raw not in (None, "") else ""
             if tf:
-                setattr(settings, "evolve_timeframe", tf)
-                applied["evolve_timeframe"] = tf
+                if tf not in _BINANCE_TF:
+                    return {"ok": False,
+                            "error": f"不支持的训练时间周期 {tf!r}，可选：{'/'.join(sorted(_BINANCE_TF))}",
+                            "applied": applied}
+                pending.append(("evolve_timeframe", tf, None))
             else:
                 # 显式清除：回落默认周期
-                setattr(settings, "evolve_timeframe", "")
-                applied["evolve_timeframe"] = ""
+                pending.append(("evolve_timeframe", "", None))
 
-        def _set(name: str, settings_attr: str, engine_attr: str = None,
-                 conv=None, min_v: float = None, max_v: float = None) -> None:
+        def _check(name: str, settings_attr: str, engine_attr: str = None,
+                   conv=None, min_v: float = None, max_v: float = None) -> None:
             if name not in changes or changes[name] is None:
                 return
             val = changes[name]
+            if isinstance(val, bool) and conv is not None:
+                raise ValueError(f"{name} 必须是数字，收到: {changes[name]!r}")
             if conv is not None:
                 try:
                     val = conv(val)
@@ -660,36 +740,49 @@ class EvolveEngine:
                 raise ValueError(f"{name} 不能小于 {min_v}，收到: {val}")
             if max_v is not None and val > max_v:
                 raise ValueError(f"{name} 不能大于 {max_v}，收到: {val}")
-            setattr(settings, settings_attr, val)
-            if engine_attr is not None:
-                setattr(self, engine_attr, val)
-            applied[settings_attr] = val
+            pending.append((settings_attr, val, engine_attr))
 
         try:
-            _set("factor_miner_interval", "evolve_factor_miner_interval", "_factor_miner_interval",
-                 conv=int, min_v=1)
-            _set("strategy_drl_interval", "evolve_strategy_drl_interval", "_strategy_drl_interval",
-                 conv=int, min_v=1)
-            _set("rolling_window", "evolve_rolling_window", "_rolling_window",
-                 conv=lambda v: max(1000, int(v)), min_v=1000)
-            _set("rollback_threshold", "evolve_rollback_threshold", "_rollback_threshold",
-                 conv=float, min_v=0.0, max_v=1.0)
-            _set("factor_miner_episodes", "evolve_factor_miner_episodes", conv=int, min_v=1)
-            _set("strategy_drl_episodes", "evolve_strategy_drl_episodes", conv=int, min_v=1)
-            _set("meta_episodes", "evolve_meta_episodes", conv=int, min_v=1)
-            _set("vol_penalty", "evolve_vol_penalty", conv=float, min_v=0.0)
-            _set("oos_min_bars", "evolve_oos_min_bars", conv=int, min_v=50)
-            _set("min_new_bars", "evolve_min_new_bars", conv=int, min_v=0)
+            _check("factor_miner_interval", "evolve_factor_miner_interval", "_factor_miner_interval",
+                   conv=int, min_v=1)
+            _check("strategy_drl_interval", "evolve_strategy_drl_interval", "_strategy_drl_interval",
+                   conv=int, min_v=1)
+            _check("rolling_window", "evolve_rolling_window", "_rolling_window",
+                   conv=lambda v: max(1000, int(v)), min_v=1000)
+            _check("rollback_threshold", "evolve_rollback_threshold", "_rollback_threshold",
+                   conv=float, min_v=0.0, max_v=1.0)
+            _check("factor_miner_episodes", "evolve_factor_miner_episodes", conv=int, min_v=1, max_v=500)
+            _check("strategy_drl_episodes", "evolve_strategy_drl_episodes", conv=int, min_v=1, max_v=500)
+            _check("meta_episodes", "evolve_meta_episodes", conv=int, min_v=1, max_v=500)
+            _check("vol_penalty", "evolve_vol_penalty", conv=float, min_v=0.0, max_v=1000.0)
+            _check("oos_min_bars", "evolve_oos_min_bars", conv=int, min_v=50, max_v=100000)
+            _check("min_new_bars", "evolve_min_new_bars", conv=int, min_v=0, max_v=100000)
             if "cross_symbol_oos" in changes and changes["cross_symbol_oos"] is not None:
-                setattr(settings, "evolve_cross_symbol_oos", bool(changes["cross_symbol_oos"]))
-                applied["evolve_cross_symbol_oos"] = bool(changes["cross_symbol_oos"])
-            # 非法周期值：由后续持久化前的白名单兜底，这里先做基本非空校验
+                if not isinstance(changes["cross_symbol_oos"], bool):
+                    raise ValueError("cross_symbol_oos 必须是布尔值")
+                pending.append(("evolve_cross_symbol_oos", changes["cross_symbol_oos"], None))
         except ValueError as e:
             log.warning("[evolve] 配置校验拒绝: %s", e)
             return {"ok": False, "error": str(e), "applied": applied}
 
-        # 持久化回 config.yaml（扁平结构，键名与 Settings 字段同名）：
-        # 逐键更新顶层文档，备份后原子写入（失败不致命，仅内存生效）
+        # 2) 全部通过后一次性生效
+        for settings_attr, val, engine_attr in pending:
+            setattr(settings, settings_attr, val)
+            if engine_attr is not None:
+                setattr(self, engine_attr, val)
+            applied[settings_attr] = val
+        if "evolve_symbols" in applied:
+            # 标的池变更：重置轮换起点与 cycle 记账（P4-A1）
+            self._symbol_idx = 0
+            self._cycle_pipelines_done.clear()
+            self._last_tail_ts.clear()  # 旧键对新池无意义，防跨池误判
+        if "evolve_timeframe" in applied:
+            self._last_tail_ts.clear()  # 增量门键含周期，切周期后旧键作废
+
+        # 3) 持久化回 config.yaml（扁平结构，键名与 Settings 字段同名）：
+        # 逐键更新顶层文档，备份后原子写入（失败不致命，仅内存生效）。
+        # P1-1：此前 open("w") 直写非原子，写一半崩溃会损坏配置；改 tmp+rename。
+        persisted = False
         from config.settings import ROOT as _SETTINGS_ROOT
         yaml_cfg_path = _SETTINGS_ROOT / "config" / "config.yaml"
         if yaml_cfg_path.exists():
@@ -702,8 +795,11 @@ class EvolveEngine:
                     shutil.copy2(str(yaml_cfg_path), str(yaml_cfg_path) + ".bak")
                 except Exception:  # noqa: BLE001
                     pass
-                with open(str(yaml_cfg_path), "w", encoding="utf-8") as f:
+                tmp_path = yaml_cfg_path.with_name(yaml_cfg_path.name + ".tmp")
+                with open(str(tmp_path), "w", encoding="utf-8") as f:
                     yaml.safe_dump(doc, f, allow_unicode=True, sort_keys=False)
+                tmp_path.replace(yaml_cfg_path)
+                persisted = True
                 log.info("[evolve] 配置已持久化到 config.yaml: %s", applied)
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 配置持久化失败（仅内存生效）: %s", e)
@@ -711,7 +807,7 @@ class EvolveEngine:
             log.warning("[evolve] 未找到 config.yaml，配置仅内存生效")
 
         log.info("[evolve] 应用配置变更: %s", applied)
-        return {"ok": True, "applied": applied}
+        return {"ok": True, "applied": applied, "persisted": persisted}
 
     def _effective_timeframe(self) -> str:
         """训练时间周期：面板独立配置优先，缺省回落 default_timeframe。"""
@@ -721,6 +817,24 @@ class EvolveEngine:
 
     # 训练失败后的快速重试间隔（秒）：避免失败后等 7 天/1 天才重试
     _RETRY_INTERVAL = 300  # 5 分钟
+
+    def _run_train(self, train_callable: Callable) -> asyncio.Future:
+        """在专用单线程 executor 里执行训练本体，并置位训练完成事件。
+
+        - 单 worker 保证即便手动触发与周期循环并发，训练也绝不并行（双保险，
+          与 _train_lock 同一目的）；取消协程不会中断 executor 线程（线程无法
+          被 kill），训练+写盘必然完整执行，事件标志在 finally 里置位，
+          stop()/set_enabled(False) 据此等待真正的训练结束。
+        """
+        self._training_done.clear()
+
+        def _wrap():
+            try:
+                return train_callable()
+            finally:
+                self._training_done.set()
+
+        return asyncio.get_running_loop().run_in_executor(self._train_executor, _wrap)
 
     async def _run_loop(self, status: dict, train_fn: Callable, interval: int, name: str,
                         start_delay: int = 15, pipeline: str = "",
@@ -739,11 +853,9 @@ class EvolveEngine:
         # 首次训练前等待：等待引擎初始化、WebSocket 建立连接、基础数据就位
         # 两个训练循环错峰启动，避免同时开始吃满 CPU
         try:
-            await asyncio.wait_for(asyncio.sleep(start_delay), timeout=start_delay)
+            await asyncio.sleep(start_delay)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
-            pass
         status["next_run"] = time.time() + start_delay
         while self._running:
             try:
@@ -773,11 +885,19 @@ class EvolveEngine:
                     status["last_error"] = ""
                     # P2-11：train_fn 返回 False 表示"数据无新增 K 线，本轮跳过"
                     # （增量门），不更新上次训练时间/成功标志，保持等待。
-                    if await train_fn() is False:
-                        log.info("[evolve] %s：无新增K线，跳过本轮", name)
+                    # "demo" = 交易所故障期的演示数据轮：训练发生了但属降级，
+                    # 不记 last_success（与 last_error 并存自相矛盾），也不把
+                    # demo 轮算进 reject_streak（_log_round 对 demo_blocked 已特殊处理）。
+                    _res = await train_fn()
+                    if _res is False:
+                        log.debug("[evolve] %s：无新增K线，跳过本轮", name)
                     else:
                         status["last_run"] = time.time()
-                        status["last_success"] = True
+                        if _res == "demo":
+                            status["last_success"] = False
+                            log.warning("[evolve] %s：交易所故障，本轮为演示数据训练（不记成功）", name)
+                        else:
+                            status["last_success"] = True
                         # 真实训练尝试完成 → 标记当前标的该管线已训练（P4-A1）
                         if pipeline:
                             self._mark_pipeline_done(pipeline)
@@ -796,6 +916,19 @@ class EvolveEngine:
                 status["_fail_streak"] = 0
             except asyncio.CancelledError:
                 raise
+            except InsufficientDataError as e:
+                # 数据不足是预期业务分支：不带全栈刷屏，仍按失败退避节奏重试
+                err = str(e)[:200]
+                log.warning("[evolve] %s 数据不足，进入失败退避: %s", name, err)
+                status["last_error"] = err
+                status["last_success"] = False
+                _fs = int(status.get("_fail_streak", 0) or 0) + 1
+                status["_fail_streak"] = _fs
+                retry_interval = min(self._RETRY_INTERVAL * (2 ** min(_fs - 1, 3)), 1800)
+                log.info("[evolve] %s 连续数据不足 %d 次，%d 秒后重试", name, _fs, retry_interval)
+                # 异常也算一次训练尝试（防单管线长期失败导致标的永卡，P4-A1）
+                if pipeline:
+                    self._mark_pipeline_done(pipeline)
             except Exception as e:  # noqa: BLE001
                 err = str(e)[:200]
                 log.exception("[evolve] %s 训练异常: %s", name, err)
@@ -854,7 +987,7 @@ class EvolveEngine:
             else:
                 self._factor_miner_status["last_error"] = f"数据不足（{len(df)} < {int(self._rolling_window * 0.1)}），5分钟后重试"
                 log.info("[evolve] 因子挖掘（%s）：数据不足（%d < %d），5分钟后重试", symbol, len(df), int(self._rolling_window * 0.1))
-                raise RuntimeError(f"数据不足: {len(df)} < {int(self._rolling_window * 0.1)}")
+                raise InsufficientDataError(f"数据不足: {len(df)} < {int(self._rolling_window * 0.1)}")
         else:
             # 真实交易所数据：清零连续 demo 计数（恢复正常训练节奏）
             self._factor_miner_status["_demo_streak"] = 0
@@ -864,8 +997,9 @@ class EvolveEngine:
             df = df.iloc[-self._rolling_window:]
 
         # P2-11 增量门：数据无新增 K 线（末根时间戳未变化）则跳过本轮，
-        # 避免 60s 间隔 + 5 分钟数据缓存下的空转重训。
-        if not force and not self._data_incremented("factor_miner", df, symbol=symbol):
+        # 避免 60s 间隔 + 5 分钟数据缓存下的空转重训。demo 轮直接放行且不写 prev。
+        if not force and not self._data_incremented("factor_miner", df, symbol=symbol,
+                                                    is_demo=(data_source_used == "demo")):
             return False
 
         # 3. 加载上次最佳模型
@@ -897,7 +1031,7 @@ class EvolveEngine:
                 # 不传 on_progress 避免回调跨线程
             )
 
-        result = await asyncio.to_thread(_train)
+        result = await self._run_train(_train)
         new_fitness = result["history"][-1]["best_fitness"]
         self._factor_miner_status["episode"] += 1
         self._factor_miner_status["fitness"] = round(new_fitness, 5)
@@ -910,16 +1044,16 @@ class EvolveEngine:
         if data_source_used == "demo":
             log.warning("[evolve] 因子挖掘（%s）demo 数据轮：跳过回退/落库，存档留证", symbol)
             try:
-                self.zoo.save_agent_archive(result["agent"], "factor_miner",
-                                            meta={"fitness": new_fitness, "timestamp": time.time(),
-                                                  "data_source": "demo", "demo_blocked": True})
+                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "factor_miner",
+                                        meta={"fitness": new_fitness, "timestamp": time.time(),
+                                              "data_source": "demo", "demo_blocked": True})
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 因子挖掘 demo 存档失败: %s", e)
             await self._log_round("factor_miner", symbol, self._effective_timeframe(),
                                   "demo", new_fitness, status="demo_blocked")
             # demo 轮不发布组合因子（防污染下游），状态里标记
             self._factor_miner_status["oos_rejected"] = "演示数据训练，禁止级联发布"
-            return
+            return "demo"
 
         # 6. 最佳模型回退保护（P0-4：旧 fitness 非正时“×阈值”方向反转，统一走 _should_rollback）
         # 锚点口径不可比时（如 demo 合成数据留下的 3.9 分）跳过：真实数据永远够不着
@@ -938,8 +1072,8 @@ class EvolveEngine:
                 except Exception:  # noqa: BLE001
                     pass
                 # 覆盖保存最佳（不递增版本号）
-                self.zoo.save_agent_best(best_agent, "factor_miner",
-                                         meta={"fitness": old_fitness, "rollback": True})
+                await asyncio.to_thread(self.zoo.save_agent_best, best_agent, "factor_miner",
+                                        meta={"fitness": old_fitness, "rollback": True})
                 # P2-13：回退轮次也要落库（此前回退路径漏记，曲线因此长期空白）
                 await self._log_round(
                     "factor_miner", symbol, self._effective_timeframe(),
@@ -960,11 +1094,13 @@ class EvolveEngine:
         # 7. 保存最佳模型（标记数据源：demo/真实交易所）
         # P0-2：演示数据训练的模型不写 best（is_best=False 只存档），
         # 否则合成数据的"伪提升"会覆盖真实最佳模型、污染后续续训与部署。
+        # 写盘（gzip+JSON）在事件循环外执行（P2-4：接受轮阻塞几十~几百 ms）
         is_best = data_source_used != "demo"
-        self.zoo.save_agent(result["agent"], "factor_miner",
-                            meta={"fitness": new_fitness, "timestamp": time.time(),
-                                  "data_source": data_source_used},
-                            is_best=is_best)
+        await asyncio.to_thread(
+            self.zoo.save_agent, result["agent"], "factor_miner",
+            meta={"fitness": new_fitness, "timestamp": time.time(),
+                  "data_source": data_source_used},
+            is_best=is_best)
         try:
             from core.notify import notify
             # P4-E1：old_fitness 只在上方 comparable 分支内绑定；锚点不可比路径
@@ -1065,7 +1201,7 @@ class EvolveEngine:
             else:
                 self._strategy_drl_status["last_error"] = f"数据不足（{len(df)} < {int(self._rolling_window * 0.1)}），5分钟后重试"
                 log.info("[evolve] 策略DRL（%s）：数据不足（%d < %d），5分钟后重试", symbol, len(df), int(self._rolling_window * 0.1))
-                raise RuntimeError(f"数据不足: {len(df)} < {int(self._rolling_window * 0.1)}")
+                raise InsufficientDataError(f"数据不足: {len(df)} < {int(self._rolling_window * 0.1)}")
         else:
             # 真实交易所数据：清零连续 demo 计数（恢复正常训练节奏）
             self._strategy_drl_status["_demo_streak"] = 0
@@ -1074,8 +1210,10 @@ class EvolveEngine:
         if len(df) > self._rolling_window:
             df = df.iloc[-self._rolling_window:]
 
-        # P2-11 增量门：数据无新增 K 线则跳过本轮（仅连续训练生效，手动触发总执行）
-        if not force and not self._data_incremented("strategy_drl", df, symbol=symbol):
+        # P2-11 增量门：数据无新增 K 线则跳过本轮（仅连续训练生效，手动触发总执行）。
+        # demo 轮直接放行且不写 prev（合成数据尾戳 ≈now 会污染真实数据增量判定）。
+        if not force and not self._data_incremented("strategy_drl", df, symbol=symbol,
+                                                    is_demo=(data_source_used == "demo")):
             return False
 
         # 3. 加载上次最佳模型（续训）
@@ -1099,7 +1237,7 @@ class EvolveEngine:
                 log.info("[evolve] 已注入级联组合因子到策略 DRL 训练")
             return train_drl(df, train_cfg, on_progress=None)
 
-        result = await asyncio.to_thread(_train)
+        result = await self._run_train(_train)
         # 取最后一条历史记录的收益
         history = result.get("history", [])
         if not history:
@@ -1127,14 +1265,14 @@ class EvolveEngine:
         if data_source_used == "demo":
             log.warning("[evolve] 策略DRL（%s）demo 数据轮：跳过回退/OOS 门，存档留证", symbol)
             try:
-                self.zoo.save_agent_archive(result["agent"], "strategy_drl",
-                                            meta={"fitness": new_fitness, "timestamp": time.time(),
-                                                  "data_source": "demo", "demo_blocked": True})
+                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "strategy_drl",
+                                        meta={"fitness": new_fitness, "timestamp": time.time(),
+                                              "data_source": "demo", "demo_blocked": True})
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 策略DRL demo 存档失败: %s", e)
             await self._log_round("strategy_drl", symbol, self._effective_timeframe(),
                                   "demo", new_fitness, status="demo_blocked")
-            return
+            return "demo"
 
         # 5. 最佳模型回退保护（P0-4 负 fitness 方向反转修复；
         # P1-6 回退判据统一为 OOS 收益——与部署门同口径，不再用训练段收益比较）
@@ -1160,7 +1298,7 @@ class EvolveEngine:
                                  f"策略DRL新模型退化（{cmp_desc}），已回退最佳版本")
                 except Exception:  # noqa: BLE001
                     pass
-                self.zoo.save_agent_best(best_agent, "strategy_drl",
+                await asyncio.to_thread(self.zoo.save_agent_best, best_agent, "strategy_drl",
                                          meta={"fitness": prev_fitness, "rollback": True})
                 # P2-13：回退轮次也要落库（此前回退路径漏记，曲线因此长期空白）
                 _oos_report_rb = result.get("oos_report") or {}
@@ -1199,10 +1337,10 @@ class EvolveEngine:
             # 模型多了会把真改进版挤出版本历史。
             log.warning("[evolve] 策略DRL 未通过 OOS 硬门，保留原最佳模型：%s", gate_reason)
             try:
-                self.zoo.save_agent_archive(result["agent"], "strategy_drl",
-                                            meta={"fitness": new_fitness, "timestamp": time.time(),
-                                                  "data_source": data_source_used,
-                                                  "oos_rejected": gate_reason})
+                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "strategy_drl",
+                                        meta={"fitness": new_fitness, "timestamp": time.time(),
+                                              "data_source": data_source_used,
+                                              "oos_rejected": gate_reason})
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 被拦截模型存档失败: %s", e)
             try:
@@ -1243,13 +1381,13 @@ class EvolveEngine:
                         cross_oos.get("symbol"), cross_oos.get("ret", 0.0))
             try:
                 # P4-C2：仅存档不占版本名额（跨标被拦模型非有效改进）
-                self.zoo.save_agent_archive(result["agent"], "strategy_drl",
-                                            meta={"fitness": new_fitness, "timestamp": time.time(),
-                                                  "data_source": data_source_used,
-                                                  "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
-                                                  "cross_oos_rejected": True,
-                                                  "cross_symbol": cross_oos.get("symbol"),
-                                                  "cross_oos_ret": cross_oos.get("ret", 0.0)})
+                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "strategy_drl",
+                                        meta={"fitness": new_fitness, "timestamp": time.time(),
+                                              "data_source": data_source_used,
+                                              "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
+                                              "cross_oos_rejected": True,
+                                              "cross_symbol": cross_oos.get("symbol"),
+                                              "cross_oos_ret": cross_oos.get("ret", 0.0)})
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 跨标被拦模型存档失败: %s", e)
             try:
@@ -1281,19 +1419,19 @@ class EvolveEngine:
         if data_source_used == "demo":
             try:
                 # P4-C2：demo 模型仅存档不占版本名额（合成数据模型非真实改进）
-                self.zoo.save_agent_archive(result["agent"], "strategy_drl",
-                                            meta={"fitness": new_fitness, "timestamp": time.time(),
-                                                  "data_source": data_source_used,
-                                                  "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
-                                                  "demo_blocked": True})
+                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "strategy_drl",
+                                        meta={"fitness": new_fitness, "timestamp": time.time(),
+                                              "data_source": data_source_used,
+                                              "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
+                                              "demo_blocked": True})
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] demo 模型存档失败: %s", e)
             log.warning("[evolve] 策略DRL使用演示数据训练，仅存档不部署（防实盘被未验证模型接管）")
         else:
-            self.zoo.save_agent(result["agent"], "strategy_drl",
-                                meta={"fitness": new_fitness, "timestamp": time.time(),
-                                      "data_source": data_source_used,
-                                      "oos_ret": (result.get("oos_report") or {}).get("oos_ret")})
+            await asyncio.to_thread(self.zoo.save_agent, result["agent"], "strategy_drl",
+                                    meta={"fitness": new_fitness, "timestamp": time.time(),
+                                          "data_source": data_source_used,
+                                          "oos_ret": (result.get("oos_report") or {}).get("oos_ret")})
         try:
             from core.notify import notify
             _oos = (result.get("oos_report") or {}).get("oos_ret")
@@ -1322,26 +1460,30 @@ class EvolveEngine:
                 flat_path = self.zoo._flat_path("strategy_drl")
                 if flat_path.exists():
                     import json
-                    with open(flat_path, "r", encoding="utf-8") as f:
-                        _md = json.load(f)
-                    _md["train_meta"] = {
-                        "data_source": data_source_used,
-                        "symbol": symbol,
-                        "timeframe": self._effective_timeframe(),
-                        "limit": self._rolling_window,
-                        "episodes": getattr(settings, "evolve_strategy_drl_episodes", 20),
-                        "best_ret": result.get("best_ret"),
-                        "best_val_ret": result.get("best_val_ret"),
-                        "oos_report": result.get("oos_report"),
-                    }
-                    _md["factor_expression"] = result.get("factor_expression", "")
-                    _md["factor_mu"] = float(result.get("factor_mu", 0.0))
-                    _md["factor_sd"] = float(result.get("factor_sd", 1.0))
-                    _md["min_trade_zone"] = 0.05
-                    _md["pine_code"] = result.get("pine_code", "")
-                    _md["pine_note"] = result.get("pine_note", "")
-                    with open(flat_path, "w", encoding="utf-8") as f:
-                        json.dump(_md, f, ensure_ascii=False)
+
+                    def _write_flat_meta() -> None:
+                        with open(flat_path, "r", encoding="utf-8") as f:
+                            _md = json.load(f)
+                        _md["train_meta"] = {
+                            "data_source": data_source_used,
+                            "symbol": symbol,
+                            "timeframe": self._effective_timeframe(),
+                            "limit": self._rolling_window,
+                            "episodes": getattr(settings, "evolve_strategy_drl_episodes", 8),
+                            "best_ret": result.get("best_ret"),
+                            "best_val_ret": result.get("best_val_ret"),
+                            "oos_report": result.get("oos_report"),
+                        }
+                        _md["factor_expression"] = result.get("factor_expression", "")
+                        _md["factor_mu"] = float(result.get("factor_mu", 0.0))
+                        _md["factor_sd"] = float(result.get("factor_sd", 1.0))
+                        _md["min_trade_zone"] = 0.05
+                        _md["pine_code"] = result.get("pine_code", "")
+                        _md["pine_note"] = result.get("pine_note", "")
+                        with open(flat_path, "w", encoding="utf-8") as f:
+                            json.dump(_md, f, ensure_ascii=False)
+
+                    await asyncio.to_thread(_write_flat_meta)
             except Exception as e:
                 log.warning("[evolve] 模型元数据写入失败: %s", e)
 
@@ -1398,7 +1540,7 @@ class EvolveEngine:
                 log.warning("[evolve] 元策略：交易所数据不可达，跳过本轮")
                 return False
             self._meta_controller_status["last_error"] = f"数据不足（{len(df)} < {int(self._rolling_window * 0.1)}）"
-            raise RuntimeError(f"数据不足: {len(df)} < {int(self._rolling_window * 0.1)}")
+            raise InsufficientDataError(f"数据不足: {len(df)} < {int(self._rolling_window * 0.1)}")
         else:
             # 真实交易所数据：清零连续 demo 计数（恢复正常训练节奏）
             self._meta_controller_status["_demo_streak"] = 0
@@ -1407,7 +1549,8 @@ class EvolveEngine:
             df = df.iloc[-self._rolling_window:]
 
         # P2-11 增量门：数据无新增 K 线则跳过本轮（仅连续训练生效，手动触发总执行）
-        if not force and not self._data_incremented("meta_controller", df, symbol=symbol):
+        if not force and not self._data_incremented("meta_controller", df, symbol=symbol,
+                                                    is_demo=False):
             return False
 
         # 2. 子策略池：用户在「统一策略」中为 meta_controller 选定的子策略优先
@@ -1431,7 +1574,7 @@ class EvolveEngine:
                 on_progress=None,
             )
 
-        result = await asyncio.to_thread(_train)
+        result = await self._run_train(_train)
         history = result.get("history", [])
         if not history:
             raise RuntimeError("元策略训练无历史记录")
@@ -1443,6 +1586,9 @@ class EvolveEngine:
         if cur_pool != sub_strategies:
             log.info("[evolve] 训练期间子策略池已被用户改为 %s，本轮结果作废（下轮按新池重训）", cur_pool)
             # P4-E1：返回 False（本轮未训练，不推进 last_success/标的轮换）
+            # 作废轮在上面的增量门已消费了"新数据额度"，这里回退该记录，
+            # 下轮仍按真实数据增量判定（否则作废轮会白吃掉一批新 K 线）
+            self._last_tail_ts.pop(f"meta_controller:{symbol}:{self._effective_timeframe()}", None)
             return False
 
         # P4-E1：不能用 `or` 链——best_ret=0.0 是 falsy，会被 history 末行数值
@@ -1479,11 +1625,10 @@ class EvolveEngine:
             try:
                 from core.notify import notify
                 await notify(self.db, "进化引擎：模型回退",
-                             f"元控制器新模型退化（new={best_ret:.4f} < "
-                             f"old={prev_fitness:.4f}×{self._rollback_threshold}），已回退最佳版本")
+                             f"元控制器新模型退化（{meta_cmp_desc}），已回退最佳版本")
             except Exception:  # noqa: BLE001
                 pass
-            self.zoo.save_agent_best(best_agent, "meta_controller",
+            await asyncio.to_thread(self.zoo.save_agent_best, best_agent, "meta_controller",
                                      meta={"fitness": prev_fitness, "rollback": True})
             # P2-13：回退轮次也要落库（此前回退路径漏记，曲线因此长期空白）
             await self._log_round(
@@ -1506,10 +1651,10 @@ class EvolveEngine:
             log.warning("[evolve] 元控制器未通过 OOS 硬门，保留原最佳模型：%s", gate_reason)
             try:
                 # P4-C2：仅存档不占版本名额（被 OOS 拦截的元模型非有效改进）
-                self.zoo.save_agent_archive(result["agent"], "meta_controller",
-                                            meta={"fitness": best_ret, "timestamp": time.time(),
-                                                  "data_source": "exchange",
-                                                  "oos_rejected": gate_reason})
+                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "meta_controller",
+                                        meta={"fitness": best_ret, "timestamp": time.time(),
+                                              "data_source": "exchange",
+                                              "oos_rejected": gate_reason})
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 被拦截元模型存档失败: %s", e)
             try:
@@ -1537,10 +1682,11 @@ class EvolveEngine:
 
         # 4. 保存元模型
         import json as _json
-        self.zoo.save_agent(result["agent"], "meta_controller",
-                            meta={"fitness": best_ret, "timestamp": time.time(),
-                                  "data_source": "exchange",
-                                  "oos_ret": (result.get("oos_report") or {}).get("oos_ret")})
+        await asyncio.to_thread(
+            self.zoo.save_agent, result["agent"], "meta_controller",
+            meta={"fitness": best_ret, "timestamp": time.time(),
+                  "data_source": "exchange",
+                  "oos_ret": (result.get("oos_report") or {}).get("oos_ret")})
 
         # 5. 注册为可用策略
         try:
@@ -1608,7 +1754,8 @@ class EvolveEngine:
 
     # ---- 数据获取 ----
 
-    def _data_incremented(self, name: str, df, symbol: str = "") -> bool:
+    def _data_incremented(self, name: str, df, symbol: str = "",
+                          is_demo: bool = False) -> bool:
         """P2-11 增量门：比较数据末尾时间戳是否较上次训练有新变化。
 
         返回 False 表示"数据无足够新增 K 线，应跳过本轮训练"（连续训练场景下
@@ -1620,7 +1767,12 @@ class EvolveEngine:
           tail 比较，min_new_bars 阈值被跨标时间戳绕开（阈值形同虚设）。
         - P4-E1：尾时间戳倒退（数据源清空/截断/跨源切换）视为数据源重置——
           更新记录并放行本轮，避免管线因 prev 永不回落而无限跳过。
+        - is_demo：演示数据轮直接放行且**不更新** prev（合成数据的尾时间戳
+          ≈now 会污染 prev，导致故障恢复后的首个真实训练被推迟最多
+          min_new_bars 根；同周期连续 demo 轮尾戳相同还会触发自身限频）。
         """
+        if is_demo:
+            return True  # demo 轮不参与增量门、不写 prev
         try:
             idx = df.index
             # 按索引自身单位换算成 epoch 秒：pandas 3 起 DatetimeIndex 可以是
@@ -1632,7 +1784,8 @@ class EvolveEngine:
             tail_ts = float(sec[-1])
         except (AttributeError, IndexError, TypeError, ValueError):
             return True  # 无法取时间戳，不拦截
-        key = f"{name}:{symbol}" if symbol else name
+        tf = self._effective_timeframe()
+        key = f"{name}:{symbol}:{tf}" if symbol else name
         prev = self._last_tail_ts.get(key)
         if prev is None:
             self._last_tail_ts[key] = tail_ts
@@ -1668,11 +1821,15 @@ class EvolveEngine:
         self._rounds_total[model] = int(self._rounds_total.get(model, 0)) + 1
         if status == "ok":
             self._reject_streak[model] = 0
+        elif status == "demo_blocked":
+            # 交易所故障的演示数据轮是"降级训练"不是"模型被拒绝"：
+            # 计入 streak 会让故障期误报锁死、诱导用户重置锚点（P1-3）
+            pass
         else:
             self._reject_streak[model] = int(self._reject_streak.get(model, 0)) + 1
         try:
             from core.database import EvolveRound
-            from sqlalchemy import select, func
+            from sqlalchemy import select, func, delete
             if round_no is None:
                 async with self.db.session() as s:
                     cur_max = (await s.execute(
@@ -1688,6 +1845,18 @@ class EvolveEngine:
                     selected_factors=str(list(selected_factors or [])),
                     status=status,
                 ))
+                # P2-9：每模型保留最近 N 轮（含 demo/oos_rejected/rollback），
+                # 防止 evolve_rounds 表长期运行无界增长、重启全表扫描变慢
+                keep = max(100, int(getattr(settings, "evolve_rounds_keep", 500)))
+                cutoff_id = (await s.execute(
+                    select(EvolveRound.id)
+                    .where(EvolveRound.model == model)
+                    .order_by(EvolveRound.id.desc())
+                    .offset(keep).limit(1))).scalar_one_or_none()
+                if cutoff_id is not None:
+                    await s.execute(delete(EvolveRound)
+                                    .where(EvolveRound.model == model,
+                                           EvolveRound.id < cutoff_id))
                 await s.commit()
         except Exception as e:  # noqa: BLE001
             log.warning("[evolve] 训练轮次落库失败(%s): %s", model, e)
@@ -1868,7 +2037,7 @@ class EvolveEngine:
         if cache_key in self._data_cache:
             cached_ts, cached_df = self._data_cache[cache_key]
             if now - cached_ts < self._data_cache_ttl:
-                log.info("[evolve] 使用缓存数据（%ds 前获取）", now - cached_ts)
+                log.debug("[evolve] 使用缓存数据（%ds 前获取）", now - cached_ts)
                 return cached_df
 
         # P0-1：修复窗口上限 bug——原先 min(max(rolling_window,1000),3000) 把配置的
@@ -1877,9 +2046,12 @@ class EvolveEngine:
         limit = max(int(self._rolling_window), 1000)
         max_candles = max(int(self._rolling_window), 1000)
 
+        # P4-E1：拉数串行锁——三管线 + 跨标 OOS 并发打交易所会放大 429；
+        # 统一串行化后同一时刻只有一条 fetch 在飞（429 重试逻辑见 data_loader）。
         try:
-            df = await load_klines_cached(settings.default_exchange, symbol, timeframe,
-                                          limit=limit, max_candles=max_candles)
+            async with self._fetch_lock:
+                df = await load_klines_cached(settings.default_exchange, symbol, timeframe,
+                                              limit=limit, max_candles=max_candles)
             if df is not None and not df.empty:
                 log.info("[evolve] K线数据获取成功：%d 根K线 (%s %s)",
                          len(df), symbol, timeframe)

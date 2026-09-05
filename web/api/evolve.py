@@ -1,11 +1,27 @@
 """持续进化引擎控制 API。"""
 from datetime import timezone
+import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from web.deps import get_engine
 
 router = APIRouter(prefix="/api/evolve", tags=["evolve"])
+_MODEL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+$")
+_CONFIG_KEYS = {
+    "symbols", "timeframe", "factor_miner_interval", "strategy_drl_interval",
+    "rolling_window", "rollback_threshold", "factor_miner_episodes",
+    "strategy_drl_episodes", "meta_episodes", "vol_penalty", "oos_min_bars",
+    "cross_symbol_oos", "min_new_bars",
+}
+_SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]*/[A-Z0-9][A-Z0-9._-]*(?::[A-Z0-9][A-Z0-9._-]*)?$")
+
+
+def _validate_model_name(name: str) -> str:
+    name = str(name or "")
+    if not _MODEL_NAME_RE.fullmatch(name) or name in (".", ".."):
+        raise HTTPException(status_code=400, detail="非法模型名")
+    return name
 
 
 def _get_evolve(request: Request):
@@ -53,8 +69,10 @@ async def trigger_factor_miner(request: Request):
     """手动触发一次因子挖掘训练（立即执行，等待完成）。"""
     evolve = _get_evolve(request)
     result = await evolve.trigger_factor_miner()
+    if result.get("busy"):
+        raise HTTPException(status_code=409, detail=result.get("reason", "另一条训练正在进行中"))
     if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error", "训练失败"))
+        raise HTTPException(status_code=400, detail=result.get("error") or result.get("reason") or "训练失败")
     return {"ok": True, **result}
 
 
@@ -63,8 +81,10 @@ async def trigger_meta_controller(request: Request):
     """手动触发一次元策略控制器训练（立即执行，等待完成）。"""
     evolve = _get_evolve(request)
     result = await evolve.trigger_meta_controller()
+    if result.get("busy"):
+        raise HTTPException(status_code=409, detail=result.get("reason", "另一条训练正在进行中"))
     if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error", "训练失败"))
+        raise HTTPException(status_code=400, detail=result.get("error") or result.get("reason") or "训练失败")
     return {"ok": True, **result}
 
 
@@ -73,8 +93,10 @@ async def trigger_strategy_drl(request: Request):
     """手动触发一次策略 DRL 训练（立即执行，等待完成）。"""
     evolve = _get_evolve(request)
     result = await evolve.trigger_strategy_drl()
+    if result.get("busy"):
+        raise HTTPException(status_code=409, detail=result.get("reason", "另一条训练正在进行中"))
     if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error", "训练失败"))
+        raise HTTPException(status_code=400, detail=result.get("error") or result.get("reason") or "训练失败")
     return {"ok": True, **result}
 
 
@@ -96,6 +118,25 @@ async def get_config(request: Request):
 async def post_config(changes: dict, request: Request):
     """热更新持续进化配置（训练标的池/时间周期/间隔/窗口/超参），
     写 settings + 引擎缓存属性并持久化回 config.yaml。"""
+    unknown = sorted(set(changes) - _CONFIG_KEYS)
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"未知配置项: {', '.join(unknown)}")
+    if "symbols" in changes:
+        symbols = changes["symbols"]
+        if not isinstance(symbols, list) or not symbols or len(symbols) > 50:
+            raise HTTPException(status_code=422, detail="symbols 必须是 1-50 个交易对的列表")
+        normalized = []
+        for symbol in symbols:
+            if not isinstance(symbol, str):
+                raise HTTPException(status_code=422, detail="symbols 必须全部是字符串")
+            symbol = symbol.strip().upper()
+            if not _SYMBOL_RE.fullmatch(symbol):
+                raise HTTPException(status_code=422, detail=f"非法交易对: {symbol!r}")
+            normalized.append(symbol)
+        changes = {**changes, "symbols": normalized}
+    if "cross_symbol_oos" in changes and changes["cross_symbol_oos"] is not None:
+        if not isinstance(changes["cross_symbol_oos"], bool):
+            raise HTTPException(status_code=422, detail="cross_symbol_oos 必须是布尔值")
     evolve = _get_evolve(request)
     result = await evolve.apply_config(changes)
     if not result.get("ok"):
@@ -104,12 +145,15 @@ async def post_config(changes: dict, request: Request):
 
 
 @router.get("/rounds")
-async def rounds(model: str = "strategy_drl", limit: int = 200, request: Request = None):
+async def rounds(model: str = "strategy_drl",
+                 limit: int = Query(200, ge=1, le=1000),
+                 request: Request = None):
     """训练轮次历史（P2-13 落库回看，供前端 fitness 曲线）。
 
     P4-E1：model 枚举校验（防任意字符串静默返回空数据）；运行时异常重新
     抛出为 500（此前全部吞掉返回 200 空列表，前端无法区分"无数据"与"出错"）；
     total 返回真实计数（此前是 limit 截断后的行数，分页语义错误）。
+    P2：limit 用 FastAPI Query 校验（此前裸 int() 对非法输入抛 ValueError → 500）。
     """
     from sqlalchemy import select, func
     from core.database import EvolveRound
@@ -127,7 +171,7 @@ async def rounds(model: str = "strategy_drl", limit: int = 200, request: Request
                 select(EvolveRound)
                 .where(EvolveRound.model == model)
                 .order_by(EvolveRound.id.desc())
-                .limit(min(max(int(limit), 1), 1000)))).scalars().all()
+                .limit(limit))).scalars().all()
             for r in reversed(rows):  # 升序返回
                 out.append({
                     "id": r.id,
@@ -150,14 +194,16 @@ async def rounds(model: str = "strategy_drl", limit: int = 200, request: Request
         raise
     except Exception as e:  # noqa: BLE001
         import logging
-        logging.getLogger(__name__).warning("[evolve] 读取训练轮次失败: %s", e)
-        raise HTTPException(status_code=500, detail=f"读取训练轮次失败: {e}")
+        logging.getLogger("evolve").exception("[evolve] 读取训练轮次失败")
+        raise HTTPException(status_code=500, detail="读取训练轮次失败，请稍后重试")
+
     return {"model": model, "rounds": out, "total": total}
 
 
 @router.get("/versions")
 async def versions(name: str = "factor_miner", request: Request = None):
     """列出指定模型的版本。"""
+    name = _validate_model_name(name)
     evolve = _get_evolve(request)
     return {"versions": evolve.zoo.list_versions(name),
             "best_version": evolve.zoo.best_version(name),
@@ -165,7 +211,7 @@ async def versions(name: str = "factor_miner", request: Request = None):
 
 
 @router.post("/rollback")
-async def rollback(name: str, version: int, request: Request):
+async def rollback(name: str, version: int = Query(..., ge=1), request: Request = None):
     """回退到指定版本。
 
     P4-E1：与训练写路径互斥（_train_lock）——后台 save_agent/save_agent_best
@@ -174,6 +220,7 @@ async def rollback(name: str, version: int, request: Request):
     放 to_thread 防阻塞事件循环。
     """
     import asyncio
+    name = _validate_model_name(name)
     evolve = _get_evolve(request)
     async with evolve._train_lock:
         ok = await asyncio.to_thread(evolve.zoo.rollback, name, version)

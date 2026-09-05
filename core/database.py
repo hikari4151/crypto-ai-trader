@@ -130,6 +130,17 @@ class Database:
                 await conn.execute(text("PRAGMA synchronous=NORMAL"))
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        # P2：evolve_rounds 查询热路径是 WHERE model=? ORDER BY id/round_no DESC
+        # （fitness 曲线 + 重启 streak 恢复），单列索引走不了复合覆盖。
+        # 已存在的表 create_all 不会补索引，用幂等 DDL 显式建（SQLite 语义）。
+        if self.engine.url.drivername.startswith("sqlite"):
+            async with self.engine.begin() as conn:
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_evolve_rounds_model_id "
+                    "ON evolve_rounds (model, id DESC)"))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_evolve_rounds_model_round_no "
+                    "ON evolve_rounds (model, round_no DESC)"))
         log.info("数据库初始化完成: %s", self.engine.url.render_as_string(hide_password=True))
 
     async def close(self) -> None:

@@ -74,6 +74,18 @@ class TradingEnv:
         closes = df["close"].to_numpy(float)
         self.n = len(closes)
         self._closes = closes
+        # P2：预计算最近 5 根已实现波动率序列（ddof=1，与特征列 vol_5 的
+        # pandas rolling(5).std() 同口径——此前逐 step 用 np.std(ddof=0) 重算
+        # 且与特征口径不一致）。首 3 根不足窗口期为 0（与原实现 len<3→0 一致）
+        _rets = np.zeros_like(closes)
+        if self.n > 1:
+            _rets[1:] = np.diff(closes) / closes[:-1]
+        _vol5 = np.zeros(self.n)
+        for _i in range(self.n):
+            _seg = _rets[max(0, _i - 4):_i + 1]
+            if len(_seg) >= 3:
+                _vol5[_i] = float(np.std(_seg, ddof=1) * 100.0)
+        self._vol5_series = _vol5
         # P2-12：成交量序列（参与率约束用；缺 volume 列则视为无限流动性）
         if "volume" in df.columns:
             self._volumes = df["volume"].to_numpy(float)
@@ -84,6 +96,17 @@ class TradingEnv:
             self._features = precomputed_features
         else:
             self._features = _precompute_features(df, backend=backend)  # (n, feat_dim)
+        # P2：state_window>1 时预计算堆叠状态矩阵——_state_feats 每步切片+拼接+
+        # reshape 是训练热路径（每 env×每 step 一次），改为一次性查表。
+        # 头部零填充语义与原实现完全一致（t<w-1 时补零）
+        if self.state_window > 1:
+            _w = self.state_window
+            _pad = np.zeros((_w - 1, self._features.shape[1]))
+            _padded = np.vstack([_pad, self._features])
+            _win = np.lib.stride_tricks.sliding_window_view(_padded, _w, axis=0)
+            self._state_stack = np.ascontiguousarray(_win).reshape(self.n, -1)
+        else:
+            self._state_stack = None
         # 外部因子信号列（如模型因子/自定义表达式因子），追加到状态末端：
         # 训练与部署使用同一表达式计算（见 train_drl / rl_adaptive），保证状态口径一致
         if extra_factors is not None:
@@ -133,9 +156,15 @@ class TradingEnv:
         return self._build_state()
 
     def _state_feats(self) -> np.ndarray:
-        """当前时点的特征向量：state_window>1 时堆叠最近 N 根（早期零填充）。"""
+        """当前时点的特征向量：state_window>1 时堆叠最近 N 根（早期零填充）。
+
+        P2：state_window>1 时直接查 __init__ 预计算的堆叠矩阵（行=逐时点展开）。
+        """
         if self.state_window <= 1:
             return self._features[self._t]
+        if self._state_stack is not None:
+            return self._state_stack[self._t]
+        # 兜底（理论不可达）：与原实现一致的逐次拼接
         t = self._t
         w = self.state_window
         start = max(0, t - w + 1)
@@ -168,13 +197,14 @@ class TradingEnv:
         return self._cash + self._qty * price
 
     def _recent_vol_5(self) -> float:
-        """最近 5 根K线的已实现波动率（%），快速反映波动率 regime。"""
-        lo = max(0, self._t - 4)
-        seg = self._closes[lo:self._t + 1]
-        if len(seg) < 3:
+        """最近 5 根K线的已实现波动率（%），快速反映波动率 regime。
+
+        P2：改为查询 __init__ 预计算的序列（值不变，ddof=1 已与特征列 vol_5
+        对齐），逐 step 重算 np.diff+np.std 被移除（奖励路径每步调用）。
+        """
+        if self.n == 0:
             return 0.0
-        rets = np.diff(seg) / seg[:-1]
-        return float(np.std(rets) * 100.0)
+        return float(self._vol5_series[self._t])
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, dict]:
         """执行动作，推进一根K线。

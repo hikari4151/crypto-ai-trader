@@ -103,6 +103,61 @@ def test_best_info_on_empty_zoo(zoo):
     assert info["data_source"] == ""
 
 
+def test_restore_deployment_preserves_all_deployment_metadata(zoo):
+    agent = _agent()
+    zoo.save_agent(
+        agent, "strategy_drl",
+        meta={
+            "fitness": 0.42, "data_source": "exchange", "oos_ret": 0.08,
+            "symbol": "BTC/USDT", "timeframe": "1h", "state_window": 3,
+            "factor_expression": "rsi(close, 14)", "factor_mu": 1.25,
+            "factor_sd": 0.5, "min_trade_zone": 0.05,
+            "pine_code": "//@version=5\\nstrategy('x')",
+        },
+    )
+    zoo.save_agent(agent, "strategy_drl", meta={"fitness": 0.10}, is_best=False)
+
+    result = zoo.restore_deployment("strategy_drl", 1, reason="test")
+
+    assert result["version"] == 1
+    data = zoo._read_json_gz(zoo._best_path("strategy_drl"))
+    assert data["_meta"]["factor_expression"] == "rsi(close, 14)"
+    assert data["_meta"]["factor_mu"] == 1.25
+    assert data["_meta"]["pine_code"].startswith("//@version")
+    flat = json.loads(zoo._flat_path("strategy_drl").read_text(encoding="utf-8"))
+    assert flat["factor_expression"] == "rsi(close, 14)"
+    assert flat["min_trade_zone"] == 0.05
+
+
+def test_restore_deployment_failure_keeps_previous_deployment(zoo, monkeypatch):
+    agent = _agent()
+    zoo.save_agent(agent, "m", meta={"fitness": 0.8, "data_source": "exchange"})
+    zoo.save_agent(agent, "m", meta={"fitness": 0.9, "data_source": "exchange"})
+    best_before = zoo._best_path("m").read_bytes()
+    flat_before = zoo._flat_path("m").read_bytes()
+    meta_before = zoo._meta_path("m").read_bytes()
+
+    def fail_write(*args, **kwargs):
+        raise OSError("injected flat write failure")
+
+    monkeypatch.setattr(zoo, "_write_flat_json", fail_write)
+    with pytest.raises(Exception):
+        zoo.restore_deployment("m", 1, reason="test")
+
+    assert zoo._best_path("m").read_bytes() == best_before
+    assert zoo._flat_path("m").read_bytes() == flat_before
+    assert zoo._meta_path("m").read_bytes() == meta_before
+
+
+def test_max_versions_one_keeps_best_version_file(zoo):
+    limited = ModelZoo(zoo.models_dir, max_versions=1)
+    for fitness in (1.0, 2.0, 3.0):
+        limited.save_agent(_agent(), "m", meta={"fitness": fitness})
+        best = limited.best_version("m")
+        assert best > 0
+        assert limited._version_path("m", best).exists()
+
+
 def test_reset_anchor_archives_and_clears_without_touching_weights(zoo):
     """解锁必须可回滚：meta.json 归档一份带时间戳的副本，权重文件原样保留
     （删权重会让实盘/纸面在下一轮接受前无模型可用）。"""

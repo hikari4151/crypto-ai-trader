@@ -650,14 +650,14 @@ class EvolveEngine:
             from strategies import get_dynamic
             sub_strategies = resolve_meta_sub_strategies(
                 (get_dynamic("meta_controller") or {}).get("params"))
-            from strategies.meta import MetaControllerStrategy
+            from strategies.meta import MetaController as _MetaControllerCls
             spec = {
                 "name": "meta_controller",
                 "title": "元策略控制器",
                 "description": "DRL 元控制器：在子策略间按学习到的置信度动态选择",
                 "logic": "元级 PPO，状态含子策略信号+置信度+历史胜率",
                 "executor": "meta_controller",
-                "param_schema": MetaControllerStrategy.param_schema,
+                "param_schema": _MetaControllerCls.param_schema,
                 "params": {
                     "sub_strategies": sub_strategies,
                     "mode": ((get_dynamic("meta_controller") or {})

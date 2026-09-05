@@ -48,6 +48,7 @@ tests/e2e_*.py
 
 # 并行开发 worktree 残留（data/_wt* 为完整项目副本，误提交会造成体积污染）
 data/_wt*/
+.worktrees/
 
 # 测试报告产物
 reports/

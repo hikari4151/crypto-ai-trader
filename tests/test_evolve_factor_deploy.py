@@ -107,11 +107,12 @@ class _StubAgent:
 
 
 def _factor_result(weights=None, valid=True):
+    _w = weights if weights is not None else {"vol_ratio": 0.5}
     return {
         "agent": _StubAgent(),
         "history": [{"best_fitness": 0.02}],
-        "selected_factors": list((weights or {"vol_ratio": 0.5}).keys()),
-        "weights": weights or {"vol_ratio": 0.5},
+        "selected_factors": list(_w.keys()),
+        "weights": _w,
         "composite": None,   # 跳过级联 npy 保存，聚焦部署断言
         "report": {"enabled": True, "valid": valid, "rank_ic": 0.04,
                    "icir": 1.2, "reason": ""},
@@ -189,3 +190,57 @@ async def test_rejected_factor_miner_does_not_deploy(tmp_path, monkeypatch):
     assert eng._factor_miner_status["combo_strategy"] == ""
     _symbol = eng._factor_miner_status["symbol"]
     assert get_dynamic(f"evolve_combo_{_symbol.replace('/', '_')}") is None
+
+
+async def test_empty_weights_skips_deploy_with_error(tmp_path, monkeypatch):
+    import drl.evolve_engine as ev
+    from backtest.data_loader import generate_demo
+    eng = _engine(tmp_path)
+    eng._rolling_window = 200
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    async def _stub_fetch(symbol=""):
+        return df
+    monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
+    holder = {"result": _factor_result(weights={})}
+    monkeypatch.setattr(ev, "train_factor_miner",
+                        lambda df_, mat=None, cfg=None, on_progress=None: holder["result"])
+    monkeypatch.setattr(eng.zoo, "save_agent",
+                        lambda agent, name, *, meta=None, is_best=True: None)
+
+    await eng._train_factor_miner_once(force=True)
+    # 无回测任务被创建；保持一致让出一次事件循环（无害）
+    await asyncio.sleep(0)
+
+    assert eng._factor_miner_status["combo_deploy_error"] != ""
+    assert "权重缺失" in eng._factor_miner_status["combo_deploy_error"]
+    assert eng._factor_miner_status["combo_strategy"] == ""
+
+
+async def test_deploy_exception_does_not_break_training(tmp_path, monkeypatch):
+    import drl.evolve_engine as ev
+    from backtest.data_loader import generate_demo
+    eng = _engine(tmp_path)
+    eng._rolling_window = 200
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    async def _stub_fetch(symbol=""):
+        return df
+    monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
+    holder = {"result": _factor_result()}
+    monkeypatch.setattr(ev, "train_factor_miner",
+                        lambda df_, mat=None, cfg=None, on_progress=None: holder["result"])
+    monkeypatch.setattr(eng.zoo, "save_agent",
+                        lambda agent, name, *, meta=None, is_best=True: None)
+
+    async def _boom(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(eng, "_deploy_factor_strategy", _boom)
+
+    await eng._train_factor_miner_once(force=True)
+    # 无回测任务被创建（异常发生在 create_task 之前）；保持一致让出一次事件循环
+    await asyncio.sleep(0)
+
+    assert eng._factor_miner_status["combo_deploy_error"] != ""
+    assert "自动部署失败" in eng._factor_miner_status["combo_deploy_error"]
+    # 核心安全约束：部署异常不阻断训练——训练主体已完成，fitness 已更新
+    assert eng._factor_miner_status["combo_strategy"] == ""
+    assert eng._factor_miner_status["fitness"] == 0.02

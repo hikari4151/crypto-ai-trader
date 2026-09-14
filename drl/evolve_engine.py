@@ -1834,7 +1834,12 @@ class EvolveEngine:
         # 部署失败只记 combo_deploy_error，不阻断训练流程（训练主体已完成并落库）。
         try:
             _weights = result.get("weights") or {}
-            if _weights:
+            if not _weights:
+                # 权重缺失：显式记错并跳过部署，不更新已有部署状态
+                # （注册表里已部署的策略仍有效，组合策略相关键保持上一轮值不动）
+                self._factor_miner_status["combo_deploy_error"] = "权重缺失，跳过自动部署"
+                log.warning("[evolve] 组合因子策略自动部署跳过(%s): 权重缺失", symbol)
+            else:
                 _meta = {
                     "fitness": float(new_fitness),
                     "selected_factors": result.get("selected_factors", []),

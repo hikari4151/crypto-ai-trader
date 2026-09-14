@@ -296,7 +296,7 @@ class EvolveEngine:
                                      # 避开 _pipeline_view/_mark_deployment_status 的 deployed_* 键覆盖）
                                      "combo_strategy": "", "combo_version": "",
                                      "combo_deployed_at": 0, "combo_deploy_error": "",
-                                     "combo_backtest": None}
+                                     "combo_backtest": None, "combo_backtest_error": ""}
         self._strategy_drl_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
                                      "last_error": "", "next_run": 0, "last_success": False,
                                      "oos_rejected": "", "_demo_streak": 0,
@@ -532,12 +532,21 @@ class EvolveEngine:
         return {"name": name, "version": version, "spec": spec}
 
     async def _refresh_factor_strategy_backtest(self, name: str, symbol: str,
-                                                df) -> None:
+                                                df, version: str) -> None:
         """后台跑一次部署策略的回测，把摘要写回 factor_miner 状态（仅展示用）。
 
-        用训练轮同一份 df（rolling_window 根K线）+ 部署策略参数回测；
-        异常自吞只记 combo_deploy_error，不影响部署状态与训练流程。
+        用训练轮同一份 df（rolling_window 根K线）+ 部署策略参数回测。
+        跨轮竞态守卫：写回时校验 combo_strategy/combo_version 仍是本轮部署
+        （防旧轮慢任务清掉新一轮部署错误、用旧摘要覆盖新摘要）；不归属则丢弃。
+        异常自吞，只记独立键 combo_backtest_error（与部署语义 combo_deploy_error 分离）。
         """
+
+        def _owned_now() -> bool:
+            # 状态必须在写回时刻读取：任务可能跨过多轮部署，开头读一次不够
+            cur_name = self._factor_miner_status.get("combo_strategy")
+            cur_ver = self._factor_miner_status.get("combo_version")
+            return cur_name == name and cur_ver == version
+
         try:
             from backtest.engine import BacktestConfig, run_backtest
             spec = get_dynamic(name) or {}
@@ -558,12 +567,18 @@ class EvolveEngine:
                 "benchmark_ret": float((res.get("benchmark") or {}).get("buy_hold_ret", 0.0)),
                 "at": time.time(),
             }
-            self._factor_miner_status["combo_backtest"] = summary
-            self._factor_miner_status["combo_deploy_error"] = ""
-            log.info("[evolve] %s 回测摘要已刷新: %s", name, summary)
+            if _owned_now():
+                self._factor_miner_status["combo_backtest"] = summary
+                self._factor_miner_status["combo_backtest_error"] = ""
+                log.info("[evolve] %s 回测摘要已刷新: %s", name, summary)
+            else:
+                log.debug("[evolve] %s v%s 回测摘要过期（当前部署非本轮），丢弃", name, version)
         except Exception as e:  # noqa: BLE001
-            self._factor_miner_status["combo_deploy_error"] = f"回测摘要失败: {e}"
-            log.warning("[evolve] %s 回测摘要失败: %s", name, e)
+            if _owned_now():
+                self._factor_miner_status["combo_backtest_error"] = f"回测摘要失败: {e}"
+                log.warning("[evolve] %s 回测摘要失败: %s", name, e)
+            else:
+                log.debug("[evolve] %s v%s 回测失败但部署已换代，丢弃错误", name, version)
 
     async def _restore_evolve_strategies(self) -> None:
         """启动时按已训练模型补齐动态策略注册（幂等）。
@@ -1775,6 +1790,22 @@ class EvolveEngine:
         import numpy as np
         composite_series = result.get("composite")
         self._factor_miner_status["oos_rejected"] = ""
+        # 组合因子权重（combo_spec）落盘不依赖 composite：手动重新部署只读权重
+        # 文件，composite 为 None（跳过级联 npy 保存）时权重仍需持久化（M-5）。
+        weights = result.get("weights", {})
+        if weights:
+            import json as _json
+            cascade_weights_path = self.zoo.models_dir / f"_cascade_weights_{symbol.replace('/', '_')}.json"
+            with open(str(cascade_weights_path), "w", encoding="utf-8") as f:
+                _json.dump(weights, f, ensure_ascii=False)
+            log.info("[evolve] 组合因子权重已保存到 %s", cascade_weights_path)
+        # 清理旧格式单文件（兼容升级前的遗留），防止被误加载
+        legacy = self.zoo.models_dir / "_cascade_factor_values.npy"
+        if legacy.exists():
+            try:
+                legacy.unlink()
+            except OSError:  # noqa: BLE001
+                pass
         if composite_series is not None:
             import pandas as pd
             # 对齐到原始 df 的索引（factor_miner 内部可能截断或排序）
@@ -1801,21 +1832,6 @@ class EvolveEngine:
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 级联因子时间戳元数据写入失败（不影响 npy 保存）: %s", e)
             log.info("[evolve] 组合因子已保存到 %s，供策略 DRL 级联注入", cascade_path)
-            # 同时保存组合因子权重（combo_spec），供部署端使用
-            weights = result.get("weights", {})
-            if weights:
-                import json as _json
-                cascade_weights_path = self.zoo.models_dir / f"_cascade_weights_{symbol.replace('/', '_')}.json"
-                with open(str(cascade_weights_path), "w", encoding="utf-8") as f:
-                    _json.dump(weights, f, ensure_ascii=False)
-                log.info("[evolve] 组合因子权重已保存到 %s", cascade_weights_path)
-            # 清理旧格式单文件（兼容升级前的遗留），防止被误加载
-            legacy = self.zoo.models_dir / "_cascade_factor_values.npy"
-            if legacy.exists():
-                try:
-                    legacy.unlink()
-                except OSError:  # noqa: BLE001
-                    pass
 
         # 8. 发布系统事件
         # P2-13：训练轮次落库（fitness/选中因子/数据源）
@@ -1853,7 +1869,7 @@ class EvolveEngine:
                 self._factor_miner_status["combo_deploy_error"] = ""
                 # 后台回测摘要（fire-and-forget，不阻塞训练循环；持有任务引用防 GC）
                 _task = asyncio.create_task(
-                    self._refresh_factor_strategy_backtest(_dep["name"], symbol, df))
+                    self._refresh_factor_strategy_backtest(_dep["name"], symbol, df, _dep["version"]))
                 self._backtest_tasks[_dep["name"]] = _task
                 _task.add_done_callback(
                     lambda t, n=_dep["name"]: self._backtest_tasks.pop(n, None))

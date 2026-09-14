@@ -77,6 +77,9 @@ def test_backtest_summary_written_to_status(tmp_path, monkeypatch):
     from backtest.data_loader import generate_demo
     eng = _engine(tmp_path)
     df = generate_demo(timeframe="1h", n=400, seed=42)
+    # 归属守卫：当前部署必须等于回测对象（name+version），否则写回被丢弃
+    eng._factor_miner_status["combo_strategy"] = "evolve_combo_BTC_USDT"
+    eng._factor_miner_status["combo_version"] = "v1"
     captured = {}
 
     def _fake_run(df_, cfg, **kw):
@@ -88,7 +91,7 @@ def test_backtest_summary_written_to_status(tmp_path, monkeypatch):
 
     async def _go():
         await eng._refresh_factor_strategy_backtest(
-            "evolve_combo_BTC_USDT", "BTC/USDT", df)
+            "evolve_combo_BTC_USDT", "BTC/USDT", df, "v1")
 
     asyncio.run(_go())
     summary = eng._factor_miner_status["combo_backtest"]
@@ -98,7 +101,54 @@ def test_backtest_summary_written_to_status(tmp_path, monkeypatch):
     assert summary["trades"] == 7
     assert summary["benchmark_ret"] == 0.03
     assert captured["cfg"].strategy_name == "evolve_combo_BTC_USDT"
-    assert eng._factor_miner_status["combo_deploy_error"] == ""
+    assert eng._factor_miner_status["combo_backtest_error"] == ""
+
+
+def test_backtest_failure_sets_backtest_error(tmp_path, monkeypatch):
+    import backtest.engine as be
+    from backtest.data_loader import generate_demo
+    eng = _engine(tmp_path)
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    eng._factor_miner_status["combo_strategy"] = "evolve_combo_BTC_USDT"
+    eng._factor_miner_status["combo_version"] = "v1"
+    # 预置旧摘要：失败只写错误键，不得覆盖旧摘要
+    eng._factor_miner_status["combo_backtest"] = {"total_ret": 0.5, "at": 1.0}
+
+    def _boom_run(df_, cfg, **kw):
+        raise RuntimeError("backtest boom")
+    monkeypatch.setattr(be, "run_backtest", _boom_run)
+
+    async def _go():
+        await eng._refresh_factor_strategy_backtest(
+            "evolve_combo_BTC_USDT", "BTC/USDT", df, "v1")
+
+    asyncio.run(_go())
+    assert eng._factor_miner_status["combo_backtest_error"] != ""
+    assert "回测摘要失败" in eng._factor_miner_status["combo_backtest_error"]
+    assert eng._factor_miner_status["combo_backtest"] == {"total_ret": 0.5, "at": 1.0}
+
+
+def test_stale_backtest_dropped_by_ownership_guard(tmp_path, monkeypatch):
+    import backtest.engine as be
+    from backtest.data_loader import generate_demo
+    eng = _engine(tmp_path)
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    # 当前部署已是 v2：v1 的旧轮慢任务写回必须被归属守卫丢弃
+    eng._factor_miner_status["combo_strategy"] = "evolve_combo_ETH_USDT"
+    eng._factor_miner_status["combo_version"] = "v2"
+
+    def _fake_run(df_, cfg, **kw):
+        return {"metrics": {"total_return": 0.99},
+                "benchmark": {"buy_hold_ret": 0.01}}
+    monkeypatch.setattr(be, "run_backtest", _fake_run)
+
+    async def _go():
+        await eng._refresh_factor_strategy_backtest(
+            "evolve_combo_ETH_USDT", "ETH/USDT", df, "v1")
+
+    asyncio.run(_go())
+    assert eng._factor_miner_status.get("combo_backtest") is None
+    assert eng._factor_miner_status.get("combo_backtest_error") == ""
 
 
 class _StubAgent:
@@ -137,8 +187,8 @@ async def test_passing_factor_miner_auto_deploys(tmp_path, monkeypatch):
     monkeypatch.setattr(eng.zoo, "save_agent",
                         lambda agent, name, *, meta=None, is_best=True: saved.append(name))
     calls = []
-    async def _stub_refresh(name, symbol, df_):
-        calls.append((name, symbol))
+    async def _stub_refresh(name, symbol, df_, version):
+        calls.append((name, symbol, version))
     monkeypatch.setattr(eng, "_refresh_factor_strategy_backtest", _stub_refresh)
 
     try:
@@ -158,7 +208,7 @@ async def test_passing_factor_miner_auto_deploys(tmp_path, monkeypatch):
         assert eng._factor_miner_status["combo_deploy_error"] == ""
         spec = get_dynamic(_strat)
         assert spec is not None and spec["executor"] == "factor_signal"
-        assert calls == [(_strat, _symbol)]
+        assert calls == [(_strat, _symbol, "v1")]
         # 状态键经 _pipeline_view 透传（前端消费入口）
         view = eng.status()["factor_miner"]
         assert view["combo_strategy"] == _strat

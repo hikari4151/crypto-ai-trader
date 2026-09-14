@@ -3022,6 +3022,33 @@
             <div v-if="evolveModel(m.key).next_run" class="text-[12px] text-slate-500 mt-1">
               下次训练：{{fmtTs(evolveModel(m.key).next_run * 1000)}}
             </div>
+            <!-- 因子挖掘独有：进化组合因子部署状态（Task 5） -->
+            <div v-if="m.key==='factor_miner'" class="mt-1 grid gap-1 text-[12px] text-slate-400">
+              <!-- 错误横幅独立展示：空权重/部署异常/回测失败时与「已部署」并存，不被后者隐藏（Task 3 修复轮结论） -->
+              <div v-if="evolveModel(m.key).combo_deploy_error" class="evolve-model-warning">
+                <span>⚠</span>
+                <span>{{evolveModel(m.key).combo_deploy_error}}</span>
+              </div>
+              <div v-if="evolveModel(m.key).combo_strategy" class="flex items-center gap-2 flex-wrap">
+                <span class="pill" style="background:rgba(48,209,88,.15);color:#30d158">已部署</span>
+                <span class="font-mono">{{evolveModel(m.key).combo_strategy}} {{evolveModel(m.key).combo_version}}</span>
+                <span v-if="evolveModel(m.key).combo_deployed_at">{{fmtTs(evolveModel(m.key).combo_deployed_at*1000)}}</span>
+              </div>
+              <div v-else-if="!evolveModel(m.key).combo_deploy_error" class="text-slate-500">尚未部署 · OOS 安检通过后自动部署</div>
+              <div v-if="evolveModel(m.key).combo_backtest" class="flex items-center gap-x-3 gap-y-0.5 flex-wrap">
+                <span>回测收益 <span class="font-mono" :class="(evolveModel(m.key).combo_backtest.total_ret||0)>=0?'pos':'neg'">{{((evolveModel(m.key).combo_backtest.total_ret||0)*100).toFixed(2)}}%</span></span>
+                <span>回撤 <span class="font-mono">{{((evolveModel(m.key).combo_backtest.max_drawdown||0)*100).toFixed(2)}}%</span></span>
+                <span>夏普 <span class="font-mono">{{(evolveModel(m.key).combo_backtest.sharpe||0).toFixed(2)}}</span></span>
+                <span>交易 {{evolveModel(m.key).combo_backtest.trades||0}} 笔</span>
+              </div>
+              <div class="flex items-center gap-2 mt-1">
+                <button class="mac-btn text-[12px]" style="padding:3px 10px"
+                        @click="deployEvolveFactor(evolveModel(m.key).symbol)"
+                        :disabled="!evolveModel(m.key).symbol">部署为因子策略</button>
+                <button v-if="evolveModel(m.key).combo_strategy" class="mac-btn text-[12px]" style="padding:3px 10px"
+                        @click="goEvolveComboBacktest(evolveModel(m.key).combo_strategy)">去回测</button>
+              </div>
+            </div>
           </div>
           </div>
         </div>
@@ -4019,6 +4046,25 @@ const app = createApp({
         if (lastEvolveOkTs.value > 0) evolveFailStreak.value++;
         console.warn('[evolve] 状态轮询失败', e);
       }
+    }
+    // ---- 进化组合因子部署（Task 5）----
+    const evolveComboStrategies = ref([]);
+    async function loadEvolveFactorStrategies() {
+      try { const d = await api('/evolve/factor-strategies'); evolveComboStrategies.value = d.strategies||[]; } catch(e){}
+    }
+    async function deployEvolveFactor(symbol) {
+      if (!symbol) { toast('暂无训练标的，无法部署','warn'); return; }
+      try {
+        const d = await api('/evolve/factor/deploy?symbol='+encodeURIComponent(symbol), {method:'POST', body:'{}'});
+        toast('已部署进化组合因子策略：'+d.name+' '+d.version,'ok');
+        fetchEvolveStatus(); loadEvolveFactorStrategies();
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
+    function goEvolveComboBacktest(name) {
+      bt.strategy_name = name;
+      bt.strategy_params = {};
+      switchView('backtest');
+      nextTick(()=>{ runBacktest(); });
     }
     async function evolvePause() {
       try { await api('/evolve/pause', {method:'POST'}); await fetchEvolveStatus(); toast('持续训练已暂停','ok'); }
@@ -5234,7 +5280,7 @@ const app = createApp({
       nextTick(()=>{
         if (k==='strategy') loadWorkshopChart();   // 工坊右栏实时图表
         if (k==='allstrategies') { loadAllStrategies(); }  // 全部策略页（二级菜单，含族谱图）
-        if (k==='evolve') { fetchEvolveStatus(); fetchEvolveConfig(); fetchEvolveRounds(evolveCurveModel.value); renderEvolveCurve(); }
+        if (k==='evolve') { fetchEvolveStatus(); loadEvolveFactorStrategies(); fetchEvolveConfig(); fetchEvolveRounds(evolveCurveModel.value); renderEvolveCurve(); }
         if (k==='backtest') loadDataSeries();
       });
     }
@@ -6438,6 +6484,7 @@ const app = createApp({
       loadFactorLibrary(); loadDrlModels(); loadAllStrategies();
       fetchEvolveStatus();
       fetchEvolveConfig();
+      loadEvolveFactorStrategies();
       fetchEvolveRounds('factor_miner'); fetchEvolveRounds('strategy_drl'); fetchEvolveRounds('meta_controller');
       if (view.value==='evolve') renderEvolveCurve();
       await loadAll();

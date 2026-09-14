@@ -10,7 +10,7 @@
 """
 import logging
 import math
-from typing import Callable, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -23,15 +23,48 @@ def forward_returns(close: pd.Series, h: int = 1) -> pd.Series:
     return close.shift(-h) / close - 1.0
 
 
+def _numpy_rank(a: np.ndarray) -> np.ndarray:
+    """平均秩，与 pandas Series.rank(method='average', na_option='keep') 逐位一致。
+
+    run4 E1：numpy 原生替代 pd.Series(a).rank()（-34%）；run4 E2：并列分组
+    向量化（flatnonzero 边界 + np.repeat 赋秩，去掉 Python while 扫描）。
+    .optim/verify_fm_e2_rank_vec.py 1000 组随机/并列/NaN/全同 逐位 PASS。
+    NaN 保持 NaN、不参与秩分配（na_option='keep'）。
+    """
+    a = np.asarray(a, dtype=float)
+    n = a.size
+    ranks = np.empty(n, dtype=float)
+    if n == 0:
+        return ranks
+    nan_mask = np.isnan(a)
+    finite_idx = np.flatnonzero(~nan_mask)
+    nf = finite_idx.size
+    ranks[:] = np.nan
+    if nf == 0:
+        return ranks
+    vals = a[finite_idx]
+    order = np.argsort(vals, kind="mergesort")
+    sv = vals[order]
+    b = np.flatnonzero(np.concatenate(([True], sv[1:] != sv[:-1], [True])))
+    avg = (b[:-1] + b[1:] - 1) / 2.0 + 1.0  # 1-based 平均秩
+    counts = b[1:] - b[:-1]
+    pos = np.empty(nf, dtype=float)
+    pos[order] = np.repeat(avg, counts)
+    ranks[finite_idx] = pos
+    return ranks
+
+
 def _spearman(a: np.ndarray, b: np.ndarray) -> float:
     """秩相关（有 NaN 则剔除后计算）。"""
     mask = np.isfinite(a) & np.isfinite(b)
     if mask.sum() < 10:
         return 0.0
     a, b = a[mask], b[mask]
-    ra = pd.Series(a).rank().to_numpy()
-    rb = pd.Series(b).rank().to_numpy()
-    if np.std(ra) < 1e-12 or np.std(rb) < 1e-12:
+    ra = _numpy_rank(a)
+    rb = _numpy_rank(b)
+    # E2：std 守卫等价替换——rank 值若不全同则 std≥0.5（>1e-12），
+    # 全同则 std=0；np.all(ra==ra[0]) 与之同判且省两次 _var。
+    if np.all(ra == ra[0]) or np.all(rb == rb[0]):
         return 0.0
     return float(np.corrcoef(ra, rb)[0, 1])
 
@@ -82,18 +115,26 @@ def _newey_west_std(series: np.ndarray, max_lags: int = None) -> float:
 
 
 def factor_ic(factor_series: pd.Series, close: pd.Series, h: int = 1,
-              method: str = "rank") -> dict:
+              method: str = "rank", fwd=None) -> dict:
     """单个因子的 IC 分析。
 
     返回: {ic, rank_ic, icir, ic_mean, ic_std, ic_win_rate, n}
+    fwd: 可选预计算的 forward_returns(close, h)。批量场景（factor_ic_table /
+    mining 逐因子循环）由上层算一次传入，避免每因子重复两次 O(n) shift/除法；
+    默认 None 时自算，行为与旧版完全一致。
     """
     f = factor_series.to_numpy(dtype=float)
-    fwd = forward_returns(close, h).to_numpy(dtype=float)
+    if fwd is None:
+        fwd = forward_returns(close, h).to_numpy(dtype=float)
+    elif hasattr(fwd, "to_numpy"):
+        fwd = fwd.to_numpy(dtype=float)
+    else:
+        fwd = np.asarray(fwd, dtype=float)
     ic = _pearson(f, fwd)
     rank_ic = _spearman(f, fwd)
 
 # 滑动 IC 序列（滚动 30 期）算 ICIR
-    ic_series = _rolling_ic(factor_series, close, h=h, method=method, window=30)
+    ic_series = _rolling_ic(factor_series, close, h=h, method=method, window=30, fwd=fwd)
     ics = ic_series[ic_series.notna()]
     ic_std = float(ics.std()) if len(ics) else 0.0
     # Newey-West 修正：IC 序列自相关导致样本 std 低估波动 → ICIR 高估。
@@ -118,39 +159,50 @@ def factor_ic(factor_series: pd.Series, close: pd.Series, h: int = 1,
 
 
 def _rolling_ic(factor_series: pd.Series, close: pd.Series, h: int = 1,
-                method: str = "rank", window: int = 30, step: int = None) -> pd.Series:
+                method: str = "rank", window: int = 30, step: int = None,
+                fwd=None) -> pd.Series:
     """滚动窗口 IC 序列（对过去 window 期求 IC，每 step 期采样一次）。
 
     step 默认等于 window（非重叠窗）：重叠窗会引入 IC 序列的自相关，
     std 被低估 → ICIR 系统性高估，因子选择门槛失真。非重叠窗的 IC
     序列样本独立，ICIR 才是因子稳定性的可靠度量。
+    fwd: 可选预计算的 forward_returns(close, h)（factor_ic 传入，避免重复计算）。
     """
     if step is None:
         step = window
     f = factor_series.astype(float)
-    fwd = forward_returns(close, h)
+    if fwd is None:
+        fwd = forward_returns(close, h)
+    fwds = fwd.to_numpy(dtype=float) if hasattr(fwd, "to_numpy") else np.asarray(fwd, dtype=float)
     out = pd.Series(np.nan, index=factor_series.index)
     vals = f.to_numpy(dtype=float)
-    fwds = fwd.to_numpy(dtype=float)
     idx = factor_series.index
-    for i in range(window, len(vals), step):
-        a = vals[i - window:i]
-        b = fwds[i - window:i]
-        if method == "rank":
-            out.iloc[i] = _spearman(a, b)
-        else:
-            out.iloc[i] = _pearson(a, b)
-    return out
+    # E3（run4）：预分配 numpy 数组承接窗口结果，最后一次性构造 Series——
+    # 原实现循环内 out.iloc[i]= 逐点赋值触发 pandas iloc setitem/__finalize__
+    # 调度开销（factor_miner 训练链路 26 因子 × 41 窗 × 多环境构造，profile
+    # Series 构造+finalize 占 wall 大头）；numpy 数组赋值后同一 Series 构造，
+    # 输出值与索引逐位一致（.optim/verify_fm_e3_rolling.py 60 组×3 窗口 PASS）。
+    out_arr = np.full(len(vals), np.nan, dtype=float)
+    if method == "rank":
+        for i in range(window, len(vals), step):
+            out_arr[i] = _spearman(vals[i - window:i], fwds[i - window:i])
+    else:
+        for i in range(window, len(vals), step):
+            out_arr[i] = _pearson(vals[i - window:i], fwds[i - window:i])
+    return pd.Series(out_arr, index=idx)
 
 
 def factor_ic_table(mat: pd.DataFrame, close: pd.Series, h: int = 1,
                     method: str = "rank") -> list[dict]:
     """批量因子 IC 分析表，按 |IC| 排序。"""
     rows = []
+    # forward_returns 只依赖 close/h、与因子无关：批量前算一次全部因子共享，
+    # 每因子由 2 次 O(n) shift/除法降为 0 次（factor_ic 与 _rolling_ic 各省一次）
+    fwd = forward_returns(close, h)
     for col in mat.columns:
         s = mat[col]
         try:
-            r = factor_ic(s, close, h=h, method=method)
+            r = factor_ic(s, close, h=h, method=method, fwd=fwd)
             r["key"] = col
             rows.append(r)
         except (ValueError, TypeError):  # IC 分析：值/类型错误属于已知异常类型
@@ -251,13 +303,20 @@ def factor_turnover(factor_series: pd.Series) -> float:
     借鉴 BRAIN turnover 语义，针对单标的时序因子做适配：
     统计因子符号在相邻两期发生翻转的比例（0=方向恒定，1=每期都翻=纯噪音）。
     高换手意味着高交易成本，fitness 评分会显著惩罚。
+
+    run5 E2：numpy 化（原 pandas sign/diff/abs/dropna/mean 全链路；
+    profile 显示 factor_miner 训练回合内 2038 次调用 cumtime 3.3s）。
+    与 pandas 版逐位一致（.optim/verify_evolve_e2_turnover.py 2000 组
+    含 0/NaN/常数 PASS）：replace(0,nan) → np.where；diff 首元素 NaN 被
+    drop 等价；除以 2 为精确位运算；mean 归约同序。
     """
-    s = factor_series.astype(float).replace(0.0, np.nan)  # 0 值不参与方向判定
-    signs = np.sign(s)
-    flips = signs.diff().abs().dropna()
-    if flips.empty:
+    v = factor_series.to_numpy(dtype=float)
+    v = np.where(v == 0.0, np.nan, v)  # 0 值不参与方向判定
+    d = np.abs(np.diff(np.sign(v)))
+    d = d[np.isfinite(d)]
+    if d.size == 0:
         return 0.0
-    return float((flips / 2.0).mean())
+    return float((d / 2.0).mean())
 
 
 def factor_fitness(rank_ic: float, turnover: float, min_turnover: float = 0.125) -> float:

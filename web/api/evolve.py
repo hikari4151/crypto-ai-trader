@@ -5,7 +5,6 @@ import re
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from web.deps import get_engine
 
 router = APIRouter(prefix="/api/evolve", tags=["evolve"])
 _MODEL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+$")

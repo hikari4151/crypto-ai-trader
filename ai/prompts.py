@@ -10,7 +10,7 @@
 配合 ai/client.py 的按功能参数预设（温度/token）与 chat_json_validated 校验重试机制。
 """
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 # ============ 输出纪律（所有任务共用） ============
 _OUTPUT_RULE = (
@@ -75,7 +75,15 @@ def _snapshot_block(snap: dict) -> str:
 
 def _sr_pa_block(snap: dict) -> str:
     ind = snap.get("indicators", {})
-    sr, pa = ind.get("sr", {}), ind.get("pa", {})
+    sr, pa = ind.get("sr"), ind.get("pa")
+    if not sr and not pa:
+        # 快照没算关键位/价格行为时，不能输出 "支撑位: None" 让 AI 对着空值设计——
+        # 明确告知数据不可用，要求 AI 基于 K 线结构自行识别并说明依据（反幻觉规则兜底）
+        return ("- 关键位与价格行为数据当前不可用（快照未计算 S/R 与 PA）。\n"
+                "  请直接基于最近K线的结构（HH/HL、突破/回调、量能、上下影线）自行识别支撑/阻力，\n"
+                "  并在结论中说明识别依据；禁止引用输入中不存在的关键位数值。")
+    sr = sr or {}
+    pa = pa or {}
     return (f"- 支撑位: {sr.get('support')}  阻力位: {sr.get('resistance')}\n"
             f"- 距支撑: {sr.get('distance_to_support')}  距阻力: {sr.get('distance_to_resistance')}\n"
             f"- 近期支撑带: {sr.get('support_levels')}  近期阻力带: {sr.get('resistance_levels')}\n"
@@ -398,10 +406,10 @@ def design_strategy_messages(snap: dict, recent_trades: list[dict],
     feedback_block = ""
     if feedback and feedback.strip():
         feedback_block = (
-            "【上一版未通过注册前校验（必须针对性修正后重新设计）】\n"
+            "【以下版本未通过注册前校验（必须逐条修正后重新设计）】\n"
             f"{feedback.strip()}\n"
-            "注意：上一版被系统拒绝、没有进入策略库，也不是可用策略。"
-            "本次必须按上面的原因逐条修正（信号密度或过拟合指标都要达标），"
+            "注意：这些版本被系统拒绝、没有进入策略库，也不是可用策略。"
+            "本次必须按上面的原因逐条修正（信号密度、过拟合指标、样本证据都要达标），"
             "不要沿用同一组参数，也不要只改名字和文案。\n\n")
 
     user = (f"{feedback_block}{req_block}【当前市场快照】\n{_snapshot_block(snap)}\n\n"
@@ -459,7 +467,8 @@ def iteration_messages(strategy, performance: dict, snap: dict,
                        backtests: Optional[list] = None,
                        previous: Optional[list] = None,
                        goal: str = "",
-                       overfit_feedback: str = "") -> list[dict]:
+                       overfit_feedback: str = "",
+                       validation_feedback: str = "") -> list[dict]:
     from .price_action_kb import add_price_action_knowledge
     sys = (
         "你是顶级量化策略评审与迭代专家，对现有策略做批判性深度反思并给出改进版。\n"
@@ -490,16 +499,28 @@ def iteration_messages(strategy, performance: dict, snap: dict,
     goal_txt = f"\n【本次迭代目标（用户指定，请优先围绕它改进）】{goal}\n" if goal else ""
     ofb = ""
     if overfit_feedback and overfit_feedback.strip():
-        ofb = ("【上一版迭代未通过过拟合检测（必须针对性修正后重新迭代）】\n"
+        ofb = ("【上一版迭代未通过注册前校验（必须针对性修正后重新迭代）】\n"
                f"{overfit_feedback.strip()}\n"
-               "注意：上一版迭代被标记严重过拟合、未注册为可用策略。"
-               "本次必须按上面的原因逐条修正（降低参数自由度/收敛范围/简化逻辑，"
-               "以样本外稳健性优先），不要沿用同一组参数，也不要只改名字和文案。\n\n")
-    user = (f"{ofb}【当前策略】名称: {strategy.name}\n"
+               "注意：上一版迭代未通过注册、未入库。本次必须按上面的原因逐条修正"
+               "（降低参数自由度/收敛范围/简化逻辑，以样本外稳健性优先），"
+               "不要沿用同一组参数，也不要只改名字和文案。\n\n")
+    vfb = ""
+    if validation_feedback and validation_feedback.strip():
+        vfb = ("【上一版迭代未通过同数据回测验证门（必须针对性修正后重新迭代）】\n"
+               f"{validation_feedback.strip()}\n"
+               "注意：上一版迭代未超越上一代、未入库。本次必须按验证门给出的实测"
+               "新旧指标针对性调整逻辑/参数，不要沿用同一组参数，也不要只改文案。\n\n")
+    perf_extra = ""
+    if isinstance(performance, dict) and performance.get("daily_pnl"):
+        daily = (performance.get("daily_pnl") or [])[-30:]
+        perf_extra = ("【近期每日盈亏（按日聚合，重点观察策略是否正在退化）】\n"
+                      + "\n".join(f"- {d.get('date')}: {d.get('pnl')}" for d in daily) + "\n")
+    user = (f"{vfb}{ofb}【当前策略】名称: {strategy.name}\n"
             f"描述: {strategy.description}\n"
             f"参数schema: {strategy.param_schema}\n"
             f"当前参数: {strategy.params}\n"
             f"【近期表现】{performance}\n"
+            f"{perf_extra}"
             f"{goal_txt}"
             f"{_previous_block(previous)}"
             f"{_backtests_block(backtests or [])}"
@@ -510,7 +531,8 @@ def iteration_messages(strategy, performance: dict, snap: dict,
 
 
 # ============ 6. 交易复盘（温度 0.2 / token 4096） ============
-def review_messages(trades: list[dict], summary: dict) -> list[dict]:
+def review_messages(trades: list[dict], summary: dict,
+                    previous_review: Optional[dict] = None) -> list[dict]:
     sys = (
         "你是量化交易复盘教练，帮助交易者从实盘中提炼可复用的改进。\n"
         "你的评分会被自动校验：亏损且胜率低时不能打高分（禁止谄媚）。\n\n"
@@ -518,7 +540,10 @@ def review_messages(trades: list[dict], summary: dict) -> list[dict]:
         "1. 量化评估：胜率/盈亏比/交易频率，评估整体质量（score 依据必须与实际数据一致）\n"
         "2. 归因：盈利单和亏损单分别有什么共同特征（入场时机/持仓时间/止损执行/是否逆势）\n"
         "3. 问题定位：最大亏损来源是策略问题还是执行问题\n"
-        "4. 改进：给出 2-4 条可落地行动项，每条具体到行为\n\n"
+        "4. 改进：给出 2-4 条可落地行动项，每条具体到行为\n"
+        "5. 跨轮跟进：若提供【上次复盘行动项】，必须逐条核对其是否已被执行、"
+        "是否有效——执行且有效→保持；执行但无效→调整方案；未执行→追问原因并重申。"
+        "禁止无视上轮结论重新开题\n\n"
         "【输出 schema】\n"
         '{"score": 0-100, "strengths": ["做得好的数组"], "problems": ["问题数组"],\n'
         ' "action_items": ["具体可执行改进，每条一句话"], "summary": "中文总结120字内"}\n'
@@ -529,10 +554,16 @@ def review_messages(trades: list[dict], summary: dict) -> list[dict]:
         + _NO_HALLUCINATION + "\n"
         + _OUTPUT_RULE
     )
+    prev_block = ""
+    if previous_review and previous_review.get("action_items"):
+        items = "\n".join(f"- {a}" for a in previous_review["action_items"])
+        prev_block = (f"【上次复盘行动项（先核对其是否被执行/是否有效，再输出本轮结论）】\n"
+                      f"上次评分: {previous_review.get('score')}\n{items}\n\n")
     user = (f"交易总数: {summary.get('total_trades', 0)}\n"
             f"胜率: {summary.get('win_rate')}\n"
             f"总盈亏: {summary.get('total_pnl')}\n"
             f"交易记录(最多60条,单行压缩):\n{_trades_block(trades, limit=60)}\n\n"
+            f"{prev_block}"
             "请先深度思考再输出 JSON。")
     return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
 

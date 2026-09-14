@@ -118,6 +118,41 @@ def pine_shorttitle(code: str) -> str:
     return m.group(1) if m else ""
 
 
+def check_pine_consistency(code: str, executor: str, params: dict) -> dict:
+    """AI 设计通道的 Pine 一致性预检（只报告，不阻塞注册）。
+
+    - price_action：input 变量名按 PINE_PARAM_TYPES 映射后必须覆盖 params 键
+      （该执行器有与本地逐参数同源的模板，变量名可程序化校验）；
+    - 其他执行器（dual_ma/factor_signal/grid）：AI 手写 Pine 的变量名自由，
+      只查结构要求（版本声明/strategy 声明/仓位口径），不假装能逐键校验。
+
+    返回 {"ok", "missing": 缺失项列表, "notes": 提示列表}。
+    """
+    notes: list[str] = []
+    missing: list[str] = []
+    if not code or not code.strip():
+        return {"ok": False, "missing": ["无 Pine 代码"], "notes": []}
+    if "//@version=5" not in code:
+        missing.append("//@version=5 版本声明")
+    if not re.search(r"\bstrategy\s*\(", code):
+        missing.append("strategy() 声明")
+    if "default_qty_type=strategy.percent_of_equity" not in code:
+        notes.append("strategy() 缺少 default_qty_type=strategy.percent_of_equity（仓位口径）")
+    if executor == "price_action":
+        declared: set[str] = set()
+        for m in re.finditer(r"(\w+)\s*=\s*input\.(?:int|float|bool|string)\(", code):
+            var = m.group(1)
+            if var in PINE_PARAM_TYPES:
+                declared.add(PINE_PARAM_TYPES[var][0])
+        # mode 不走 PINE_PARAM_TYPES（parse_pine_params 单独解析 input.string），单独认声明
+        if re.search(r"mode\s*=\s*input\.string\(", code):
+            declared.add("mode")
+        for k in (params or {}):
+            if k not in declared:
+                missing.append(f"params.{k} 无对应 input 声明")
+    return {"ok": not missing, "missing": missing, "notes": notes}
+
+
 # price_action 执行器的 Pine 参数默认值（与 strategies/price_action.py 一致）
 _PA_DEFAULTS = {
     "mode": "breakout", "breakout_pct": 0.001,

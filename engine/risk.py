@@ -8,12 +8,12 @@
 - 每日盈亏持久化：跨重启保留日盈亏状态
 """
 import asyncio
+import bisect
 import logging
 import math
 import time
-from collections import deque
-from dataclasses import asdict, dataclass
-from typing import Any, Iterable, Optional
+from dataclasses import dataclass
+from typing import Iterable, Optional
 
 from core.database import Database
 
@@ -72,7 +72,7 @@ class RiskManager:
     _cooldown_until: float = 0.0     # 冷却截止时间戳
     # 闪崩保护状态
     _flash_cooldown_until: float = 0.0
-    _price_history: deque = None  # deque of (timestamp, price); 保留 48h，O(1) 两端操作
+    _price_history: list = None  # list of (timestamp, price); 保留 48h，有序升序，bisect 定位窗口
     # 每日盈亏持久化
     _daily_pnl: float = 0.0
     _daily_pnl_date: str = ""
@@ -90,7 +90,7 @@ class RiskManager:
         if self._recent_pnls is None:
             self._recent_pnls = []
         if self._price_history is None:
-            self._price_history = deque()
+            self._price_history = []
         # 每日盈亏在引擎启动时通过 get_daily_pnl() 异步加载（DB 是 async 接口）
 
     async def _rollover(self, today: str) -> None:
@@ -314,29 +314,30 @@ class RiskManager:
 
         - 节流：至少间隔 5 秒采一个点（ticker 事件约每秒一次，避免列表无限膨胀）
         - 保留 48 小时：支撑 24h 窗口检测（此前只留 2h，1h 周期下样本永远凑不满）
-        - 使用 deque 实现 O(1) 两端操作，避免 O(n) 全量重建
+        - list 按 ts 升序：bisect 定位过期边界一次切片修剪（O(log n) 定位 + 头切）
         """
         now = time.time()
         if self._price_history and now - self._price_history[-1][0] < 5.0:
             return
         self._price_history.append((now, price))
         cutoff = now - 172800
-        while self._price_history and self._price_history[0][0] < cutoff:
-            self._price_history.popleft()
+        idx = bisect.bisect_left(self._price_history, cutoff, key=lambda x: x[0])
+        if idx > 0:
+            del self._price_history[:idx]
 
     def _check_flash_crash(self, rules: dict) -> Optional[str]:
         """检测闪崩/暴涨，返回原因字符串（异常则返回），正常返回 None。"""
         if len(self._price_history) < 5:
             return None
         now = time.time()
-        # 5分钟前的价格
+        # 5分钟前的价格：bisect 定位 5min 切点（_price_history 按 ts 升序），
+        # 避免全量列表推导（样本量 ~34.5k 时每次信号 O(n) 拖慢热路径）
         cutoff_5m = now - 300
-        old_prices = [p for t, p in self._price_history if t <= cutoff_5m]
-        recent_prices = [p for t, p in self._price_history if t > cutoff_5m]
-        if not old_prices or not recent_prices:
+        idx = bisect.bisect_right(self._price_history, cutoff_5m, key=lambda x: x[0])
+        if idx == 0 or idx == len(self._price_history):
             return None
-        old_price = old_prices[-1]
-        new_price = recent_prices[-1]
+        old_price = self._price_history[idx - 1][1]
+        new_price = self._price_history[-1][1]
         if old_price <= 0:
             return None
         drop_pct = (old_price - new_price) / old_price
@@ -396,7 +397,9 @@ class RiskManager:
         if len(self._price_history) < 30:
             return None
         cutoff = time.time() - lookback_hours * 3600.0
-        pts = [(t, p) for t, p in self._price_history if t >= cutoff and p > 0]
+        # bisect 定位 lookback 起点，避免全量遍历（样本 ~34.5k 时 O(n) 拖慢热路径）
+        idx = bisect.bisect_left(self._price_history, cutoff, key=lambda x: x[0])
+        pts = [(t, p) for t, p in self._price_history[idx:] if p > 0]
         if len(pts) < 30 or pts[-1][0] - pts[0][0] < 900:
             return None
         rets = []
@@ -460,9 +463,12 @@ class RiskManager:
             return False, f"闪崩冷却中，剩余 {remaining}s"
         flash_reason = self._check_flash_crash(rules)
         if flash_reason and not closing:
-            cooldown_min = int(rules.get("flash_cooldown_minutes", 30))
+            # P1-BUGFIX：曾用 int() 截断冷却时长——0.5 分钟被截成 0，冷却区间为
+            # 空（风控静默失效），而日志仍打印"触发 0.5 分钟冷却"。
+            # _RULE_BOUNDS 明确放行 (0.0, 1440.0) 的小数，故此处必须保留小数。
+            cooldown_min = float(rules.get("flash_cooldown_minutes", 30))
             self._flash_cooldown_until = time.time() + cooldown_min * 60
-            log.warning("[risk] %s，触发 %d 分钟冷却", flash_reason, cooldown_min)
+            log.warning("[risk] %s，触发 %g 分钟冷却", flash_reason, cooldown_min)
             try:
                 from core.notify import notify
                 await notify(self.db, "风控熔断：闪崩保护",
@@ -498,7 +504,9 @@ class RiskManager:
             self._manual_recovery = False
         losses = self._consecutive_losses()
         if losses >= int(rules.get("max_consecutive_losses", 3)) and not closing:
-            self._cooldown_until = time.time() + int(rules.get("cooldown_minutes", 15)) * 60
+            # P1-BUGFIX：同上——int() 会把 <1 分钟的冷却截断为 0 秒（风控静默失效），
+            # 且日志仍按原始值打印"触发冷却 0.5 分钟"，与实际生效区间矛盾。
+            self._cooldown_until = time.time() + float(rules.get("cooldown_minutes", 15)) * 60
             self._manual_recovery = bool(rules.get("risk_manual_recovery", False))
             log.warning("[risk] 连续 %d 笔亏损，触发 %s 分钟冷却%s",
                         losses, rules.get("cooldown_minutes", 15),
@@ -549,7 +557,9 @@ class RiskManager:
         # 7) 24小时跌幅检测（仅限新开仓）
         now = time.time()
         cutoff_24h = now - 86400
-        prices_24h = [p for t, p in self._price_history if t >= cutoff_24h]
+        # bisect 定位 24h 窗口起点，避免全量遍历（样本 ~34.5k 时 O(n) 拖慢热路径）
+        idx24 = bisect.bisect_left(self._price_history, cutoff_24h, key=lambda x: x[0])
+        prices_24h = [p for _t, p in self._price_history[idx24:]]
         # 最小时间跨度约束：曾只数样本数（5s 节流 50 秒就凑够 10 个），
         # 刚启动的新实例会把"2 分钟跌 25%"误判为 24 小时跌幅触发冷却
         # 时间跨度取自 _price_history 元组首尾 ts（_price_history 保留 48h）——
@@ -559,7 +569,8 @@ class RiskManager:
             drop_24h = (prices_24h[0] - prices_24h[-1]) / prices_24h[0]
             threshold_24h = rules.get("flash_crash_24h_drop_pct", 0.25)
             if drop_24h >= threshold_24h:
-                cooldown_min = int(rules.get("flash_cooldown_minutes", 30))
+                # P1-BUGFIX：同闪崩分支，保留小数冷却时长（int() 会把 <1 分钟截成 0）
+                cooldown_min = float(rules.get("flash_cooldown_minutes", 30))
                 self._flash_cooldown_until = time.time() + cooldown_min * 60
                 log.warning("[risk] 24小时跌幅 %.1f%% >= %.0f%%，触发冷却", drop_24h * 100, threshold_24h * 100)
                 try:

@@ -53,11 +53,18 @@ def run_cost_scan(df: pd.DataFrame, cfg: CostScanConfig,
         raise ValueError("扫描数据为空")
 
     run_fn = cfg.run_backtest
+    prepared: Optional[dict] = None
     if run_fn is None:
-        from .fast_engine import run_backtest_fast
+        from .fast_engine import run_backtest_fast, prepare_backtest_fast
+
+        # run11 E1：同一 df、同一策略参数扫描多组合，清洗+指标预计算与成本
+        # 无关 → prepare 一次循环复用（单次省 ~6.6ms，12 组合扫描总量 -32%，
+        # 输出与逐次独立调用逐位一致——.optim/probe_costscan_prep.py 验证）。
+        prepared = prepare_backtest_fast(df, cfg)
 
         def run_fn(data: pd.DataFrame, bcfg) -> dict:
-            return run_backtest_fast(data, bcfg, bootstrap=False)  # P2-13 成本扫描只消费基础指标
+            return run_backtest_fast(data, bcfg, bootstrap=False, _prepared=prepared)
+            # P2-13 成本扫描只消费基础指标
 
     base_metrics = None
     rows: list[dict] = []

@@ -10,7 +10,7 @@
 - 计算必须可重复（无随机）
 """
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable
 
 import pandas as pd
 

@@ -12,9 +12,8 @@
 如果 OOS 收益为负或 PBO 过高，给出"疑似过拟合"红旗并建议放弃或减少参数。
 """
 import logging
-import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -24,6 +23,23 @@ log = logging.getLogger(__name__)
 # 判定所需的最小样本外交易样本数：低于此值认为统计证据不足，
 # 一律判“无法判定”而非“严重过拟合”（避免误拦低频 AI 设计策略）。
 _MIN_TRADES_FOR_VERDICT = 3
+
+# 判定"严重过拟合"的证据档位：样本外平均成交低于此值且收益为负时，
+# 负收益更可能是成交样本不足/行情不适配的噪声，而非"参数过拟合"。
+# 校准依据（真实数据探针）：内置默认策略（dual_ma/factor_signal/grid）
+# 在近 7 个月真实 1h K线上 OOS 收益为负时，avg_oos_trades 仅 3~12 笔，
+# 此前全部被判"严重过拟合"→ 设计通道"经常严重过拟合"的相当一部分是
+# 判定误标（负收益=噪声）而非策略真过拟合。avg>=8（每折约 2 笔以上）
+# 才认为收益符号有统计意义，维持"OOS 转负 → 严重过拟合"的既有语义。
+# （回归用例将 avg=8 视为"交易充分"，证据线取严格小于 8。）
+_TRADES_EVIDENCE_OK = 8
+
+# PBO/DSR 的候选参数个数。原实现在 CSCV 内层只用 8 个"提交点 ±10% 抖动"候选
+# （+当前参数共 9 个），候选都贴着 AI 已选中的点 → 度量不到参数选择偏差。
+# 改为按 param_schema 全范围采样 32 个候选，使 PBO 真正反映"从候选集里挑最优"。
+# 代价：CSCV 组合数 × 候选数 的回测次数上升（splits=6 时 20×33×2 ≈ 1320 次），
+# 数据分块后单次回测很快；若嫌慢可下调本常量而不是回到抖动式候选。
+_PBO_CANDIDATES = 32
 
 
 @dataclass
@@ -77,25 +93,37 @@ class OverfitReport:
 
 
 def _run_backtest_on(df: pd.DataFrame, cfg: OverfitConfig,
-                     strategy_name: str, strategy_params: dict) -> dict:
-    """在指定数据段上跑向量化回测，返回 metrics。"""
+                     strategy_name: str, strategy_params: dict,
+                     _external_clean: Optional[pd.DataFrame] = None) -> dict:
+    """在指定数据段上跑向量化回测，返回 metrics。
+
+    _external_clean: 已清洗的同一 df（CSCV 多候选共用一段数据时只清洗一次，
+    见 _cscv_pbo 的 _rets_for 缓存；clean 幂等，输出与独立调用逐位一致）。
+    """
     from .fast_engine import run_backtest_fast
     from .engine import BacktestConfig
     bc = BacktestConfig(symbol=cfg.symbol, timeframe=cfg.timeframe,
                         strategy_name=strategy_name, strategy_params=strategy_params,
                         start_cash=cfg.start_cash, fee_rate=cfg.fee_rate,
                         slippage=cfg.slippage)
-    result = run_backtest_fast(df, bc, bootstrap=False)  # P2-13 统计显著性由 detect_overfit 自身计算
+    result = run_backtest_fast(df, bc, bootstrap=False,
+                               _external_clean=_external_clean)  # P2-13 统计显著性由 detect_overfit 自身计算
     return result["metrics"]
 
 
 def detect_overfit(df: pd.DataFrame, strategy_name: str, strategy_params: dict,
                    cfg: Optional[OverfitConfig] = None,
-                   neighbor_params: Optional[list[dict]] = None) -> OverfitReport:
+                   neighbor_params: Optional[list[dict]] = None,
+                   prior_trials: int = 0) -> OverfitReport:
     """对策略做完整过拟合检测。
 
-    neighbor_params: 参数邻域候选（供 PBO 分析）。若为 None 则自动基于
-        strategy_params 生成小幅扰动邻域（按参数 schema 采样）。
+    neighbor_params: 参数候选集（供 PBO/DSR 分析）。若为 None 则按 param_schema
+        **全范围**生成固定网格候选（不再是"提交点 ±10% 抖动"——后者只检验单点
+        稳定性，度量不到"从众多候选里挑最优"的选择偏差）。
+    prior_trials: 该参数在本策略上**已经试过的配置数**（AI 回炉次数 × 候选数、
+        迭代链累积代次等）。它进 DSR 的多重检验校正基数：原实现把 trials 固定成
+        候选数（≈9），与真实搜索规模脱钩，会让 DSR 系统性偏乐观。
+        调用方给不出确切值时给保守下限（宁大勿小），0 = 未知/不校正。
     """
     cfg = cfg or OverfitConfig()
     if df.empty or len(df) < cfg.min_is_len * 2:
@@ -155,34 +183,65 @@ def detect_overfit(df: pd.DataFrame, strategy_name: str, strategy_params: dict,
     report.decay = round(1.0 - report.oos_ret / report.is_ret, 4) if report.is_ret > 0 else round(report.oos_ret, 4)
 
     # ---- 3. PBO 过拟合概率（CSCV 组合对称交叉验证，Bailey & López de Prado） ----
+    # 候选集按 param_schema 全范围生成（取不到 schema 时退化回 ±10% 抖动）
+    schema = _param_schema_for(strategy_name)
     if cfg.cscv_splits >= 4:
-        report.pbo = round(_cscv_pbo(df, cfg, strategy_name, strategy_params,
-                                     neighbor_params) or 0.5, 4)
+        _pbo = _cscv_pbo(df, cfg, strategy_name, strategy_params,
+                         neighbor_params, schema)
+        # run24 修复：_cscv_pbo 返回 None（数据不足）与 0.0（零过拟合）必须区分——
+        # 原 `or 0.5` 把合法的 PBO=0.0 也吞成 0.5（0.0 为 falsy），健康度少 20 分
+        report.pbo = round(0.5 if _pbo is None else _pbo, 4)
     else:
         # 兼容旧路径：walk-forward 邻域法
         report.pbo = round(_estimate_pbo(df, cfg, strategy_name, strategy_params,
-                                         neighbor_params, report.folds), 4)
+                                         neighbor_params, report.folds, schema), 4)
 
     # ---- 3.5 统计显著性：DSR（多重测试校正）+ Bootstrap 夏普 CI ----
-    # DSR 校正的"试验数"= 本报告评估的参数候选数（当前参数 + PBO 邻域），
-    # 反映"从这么多个候选里挑最优"引入的选择偏差。
-    if neighbor_params:
-        _n_candidates = 1 + len(neighbor_params)
-    elif cfg.cscv_splits >= 4:
-        _n_candidates = 9  # CSCV 内部默认候选 = 当前参数 + 8 邻域
-    else:
-        _n_candidates = 1
+    # DSR 校正的"试验数"口径（2026-09-12 校正）：
+    #   = 本次评估的候选集大小（schema 全范围网格）
+    #   + prior_trials（调用方告知的历史搜索规模：AI 回炉次数 × 候选数、
+    #     迭代链累积代次、被拒设计数……）
+    # 原实现把 trials 固定成"候选数"（≈9），与真实搜索规模完全脱钩：
+    # 实测同一策略同一数据，候选集定义一变 DSR 的 trials 就从 9 变 31
+    # （见 .optim/bughunt/REPORT_overfit_source.md）。校正基数偏小 → DSR 偏乐观，
+    # 使"扣掉运气后并不显著"的策略也能拿到"通过"。
+    _cand_params = ([dict(strategy_params)]
+                    + [dict(p) for p in (neighbor_params or _generate_neighbors(
+                        strategy_params, count=_PBO_CANDIDATES, schema=schema))])
+    _cand_params = _cand_params[: _PBO_CANDIDATES + 1]
+    _n_candidates = max(1, len(_cand_params) + max(0, int(prior_trials)))
     try:
         from .fast_engine import run_backtest_fast
         from .engine import BacktestConfig
         from .metrics import PERIODS_PER_YEAR, bootstrap_sharpe_ci, deflated_sharpe_ratio, equity_returns
-        bc = BacktestConfig(symbol=cfg.symbol, timeframe=cfg.timeframe,
-                            strategy_name=strategy_name, strategy_params=strategy_params,
-                            start_cash=cfg.start_cash, fee_rate=cfg.fee_rate,
-                            slippage=cfg.slippage)
-        full = run_backtest_fast(df, bc, bootstrap=False)  # P2-13 同 OOS 口径
+
+        def _cfg_for(params: dict) -> "BacktestConfig":
+            return BacktestConfig(symbol=cfg.symbol, timeframe=cfg.timeframe,
+                                  strategy_name=strategy_name, strategy_params=params,
+                                  start_cash=cfg.start_cash, fee_rate=cfg.fee_rate,
+                                  slippage=cfg.slippage)
+
+        full = run_backtest_fast(df, _cfg_for(strategy_params), bootstrap=False)  # P2-13 同 OOS 口径
         rets = equity_returns(full.get("equity_curve") or [])
-        d = deflated_sharpe_ratio(rets, trials=max(1, _n_candidates))
+        # 候选集各自的**单周期**样本夏普 → DSR 据此估计 SR 跨试验方差（比 H0 近似更贴合实际）。
+        # 必须是单周期口径（deflated_sharpe_ratio 内部 sr=mu/sigma 不年化），
+        # 传年化夏普会把 sr0 放大 sqrt(periods_per_year) 倍、DIRECTION 完全错掉。
+        trial_sharpes: list[float] = []
+        for _p in _cand_params:
+            try:
+                _r = equity_returns(run_backtest_fast(df, _cfg_for(_p),
+                                                     bootstrap=False).get("equity_curve") or [])
+                _r = _r[np.isfinite(_r)]
+                if len(_r) < 20:
+                    continue
+                _sd = float(_r.std(ddof=0))
+                if _sd > 1e-12:
+                    trial_sharpes.append(float(_r.mean() / _sd))
+            except Exception:  # noqa: BLE001
+                continue
+        d = deflated_sharpe_ratio(
+            rets, trials=max(1, _n_candidates),
+            trial_sharpes=trial_sharpes if len(trial_sharpes) >= 2 else None)
         report.dsr = d["dsr"]
         report.dsr_trials = d["trials"]
         ppy = PERIODS_PER_YEAR.get(cfg.timeframe, 8760)
@@ -199,7 +258,8 @@ def detect_overfit(df: pd.DataFrame, strategy_name: str, strategy_params: dict,
 
 
 def _cscv_pbo(df: pd.DataFrame, cfg: OverfitConfig, strategy_name: str,
-              strategy_params: dict, neighbor_params: Optional[list[dict]]) -> Optional[float]:
+              strategy_params: dict, neighbor_params: Optional[list[dict]],
+              schema: Optional[dict] = None) -> Optional[float]:
     """CSCV 组合对称交叉验证 PBO（Bailey, Borwein, López de Prado & Zhu 2015）。
 
     方法：把样本按时间顺序分成 S 块，枚举全部"取 S/2 块训练、其余测试"的组合：
@@ -213,8 +273,12 @@ def _cscv_pbo(df: pd.DataFrame, cfg: OverfitConfig, strategy_name: str,
     """
     import itertools
 
-    cand = [dict(strategy_params)] + [dict(p) for p in (neighbor_params or _generate_neighbors(strategy_params, count=8))]
-    cand = cand[:9]
+    cand = ([dict(strategy_params)]
+            + [dict(p) for p in (neighbor_params
+                                 or _generate_neighbors(strategy_params,
+                                                        count=_PBO_CANDIDATES,
+                                                        schema=schema))])
+    cand = cand[: _PBO_CANDIDATES + 1]
     if len(cand) < 4:
         return None
     n = len(df)
@@ -230,30 +294,46 @@ def _cscv_pbo(df: pd.DataFrame, cfg: OverfitConfig, strategy_name: str,
     half = len(blocks) // 2
 
     ranks: list[float] = []
-    for train_idx in itertools.combinations(range(len(blocks)), half):
-        test_idx = [i for i in range(len(blocks)) if i not in train_idx]
-        train_df = pd.concat([blocks[i] for i in sorted(train_idx)])
-        test_df = pd.concat([blocks[i] for i in sorted(test_idx)])
+    # 记忆化（4× 加速、不改统计量）：C(S, S/2) 枚举出的每个组合，其测试集
+    # 恰好是互补组合的训练集 —— 同一段数据会被反复回测两次。
+    # 按"块集合"缓存每候选的收益，S=6 时唯一分段从 20×2 降到 10，
+    # 回测次数从 20×2×N 降到 10×N。
+    # 清洗复用：每唯一分段只 OHLCVSanitizer 清洗一次（clean 与策略参数无关且
+    # 幂等，probe_sanitize_idem PASS），全部候选共享——CSCV 是验证门主要耗时，
+    # 清洗约占总回测 25% 的重复开销。
+    ret_cache: dict[frozenset, list[float]] = {}
+    clean_cache: dict[frozenset, "pd.DataFrame"] = {}
 
-        # 训练块上选 IS 最优参数
-        is_rets: list[float] = []
+    def _rets_for(idx) -> list[float]:
+        key = frozenset(idx)
+        cached = ret_cache.get(key)
+        if cached is not None:
+            return cached
+        sub = pd.concat([blocks[i] for i in sorted(idx)])
+        cleaned = clean_cache.get(key)
+        if cleaned is None:
+            from .data_loader import OHLCVSanitizer
+            cleaned = OHLCVSanitizer().clean(sub.copy(), mode="mark")
+            clean_cache[key] = cleaned
+        out: list[float] = []
         for p in cand:
             try:
-                m = _run_backtest_on(train_df, cfg, strategy_name, p)
-                is_rets.append(float(m.get("total_return", 0.0)))
+                m = _run_backtest_on(sub, cfg, strategy_name, p,
+                                     _external_clean=cleaned)
+                out.append(float(m.get("total_return", 0.0)))
             except Exception as e:  # noqa: BLE001
-                log.warning("[overfit] CSCV 训练段回测失败: %s", e)
-                is_rets.append(float("-inf"))
-        best = int(np.argmax(is_rets))
+                log.warning("[overfit] CSCV 分段回测失败: %s", e)
+                out.append(float("-inf"))
+        ret_cache[key] = out
+        return out
 
+    for train_idx in itertools.combinations(range(len(blocks)), half):
+        test_idx = tuple(i for i in range(len(blocks)) if i not in train_idx)
+        # 训练块上选 IS 最优参数
+        is_rets = _rets_for(train_idx)
+        best = int(np.argmax(is_rets))
         # 最优参数在测试块上的排名（1=最好）
-        oos_rets: list[float] = []
-        for p in cand:
-            try:
-                m = _run_backtest_on(test_df, cfg, strategy_name, p)
-                oos_rets.append(float(m.get("total_return", 0.0)))
-            except Exception:  # noqa: BLE001
-                oos_rets.append(float("-inf"))
+        oos_rets = _rets_for(test_idx)
         rank = int((np.asarray(oos_rets) > oos_rets[best]).sum()) + 1
         ranks.append(rank / len(cand))
 
@@ -265,7 +345,8 @@ def _cscv_pbo(df: pd.DataFrame, cfg: OverfitConfig, strategy_name: str,
 
 def _estimate_pbo(df: pd.DataFrame, cfg: OverfitConfig, strategy_name: str,
                   strategy_params: dict, neighbor_params: Optional[list[dict]],
-                  folds: list[FoldResult]) -> float:
+                  folds: list[FoldResult],
+                  schema: Optional[dict] = None) -> float:
     """估计 PBO（过拟合概率）。
 
     方法：对每个前推折，若参数 A 在训练段最优、但在验证段排名掉到后 50%，
@@ -273,7 +354,8 @@ def _estimate_pbo(df: pd.DataFrame, cfg: OverfitConfig, strategy_name: str,
     若没提供邻域，基于最优参数自动生成扰动邻域。
     """
     if not neighbor_params or len(neighbor_params) < 5:
-        neighbor_params = _generate_neighbors(strategy_params, count=12)
+        neighbor_params = _generate_neighbors(strategy_params, count=_PBO_CANDIDATES,
+                                             schema=schema)
     if not neighbor_params:
         return 0.5  # 无法评估时给中性值
 
@@ -319,26 +401,73 @@ def _estimate_pbo(df: pd.DataFrame, cfg: OverfitConfig, strategy_name: str,
     return pbo
 
 
-def _generate_neighbors(params: dict, count: int = 12) -> list[dict]:
-    """基于参数 schema 生成小幅扰动邻域（±5%/±10%），数值类型才扰动。"""
+def _generate_neighbors(params: dict, count: int = 12,
+                        schema: Optional[dict] = None) -> list[dict]:
+    """生成 PBO/DSR 用的参数候选集。
+
+    ⚠️ 语义要点（2026-09-12 校正）：PBO 要回答的是
+    **"从一个候选集里挑出的样本内最优，在样本外是否掉到后 50%"**——
+    它度量的是**参数选择偏差**。原实现只用"提交点 ±10% 抖动"，
+    候选全部贴着 AI 已经选中的那个点，于是它实际只回答了
+    "这一个点稳不稳"，而不是"你是不是在众多候选里过拟合地挑了最优"。
+    实测（BTC/USDT 1h，同一策略同一数据）：候选集定义一变，
+    PBO 就在 0.00 ↔ 0.30 之间跳（见 .optim/bughunt/REPORT_overfit_source.md）。
+
+    因此：schema 给了 min/max 的键 → 在**全 schema 范围**内采样（真正的候选搜索空间，
+    与提交点无关、可复现）；schema 缺失或键不在 schema 内 → 退回 ±10% 抖动（兼容旧行为）。
+    """
     if not params:
         return []
-    neighbors = []
     numeric_keys = [k for k, v in params.items() if isinstance(v, (int, float)) and not isinstance(v, bool)]
     if not numeric_keys:
         return []
+    schema = schema or {}
     rng = np.random.default_rng(42)
+    neighbors = []
     for _ in range(count):
         p = dict(params)
         for k in numeric_keys:
             v = params[k]
-            delta = rng.uniform(-0.1, 0.1) * abs(v) + 1e-9
-            if isinstance(v, int):
-                p[k] = max(1, int(round(v + delta)))
+            spec = schema.get(k) or {}
+            lo, hi = spec.get("min"), spec.get("max")
+            if lo is not None and hi is not None and float(hi) > float(lo):
+                if isinstance(v, int) and not isinstance(v, bool):
+                    p[k] = int(rng.integers(int(lo), int(hi) + 1))
+                else:
+                    p[k] = round(float(rng.uniform(float(lo), float(hi))), 6)
             else:
-                p[k] = round(v + delta, 6)
+                delta = rng.uniform(-0.1, 0.1) * abs(v) + 1e-9
+                if isinstance(v, int):
+                    p[k] = max(1, int(round(v + delta)))
+                else:
+                    p[k] = round(v + delta, 6)
         neighbors.append(p)
     return neighbors
+
+
+def _param_schema_for(strategy_name: str) -> dict:
+    """取某执行器的 param_schema；取不到返回 {}（调用方退回 ±10% 抖动）。"""
+    try:
+        from strategies import _REGISTRY
+        cls = _REGISTRY.get(strategy_name)
+        return dict(getattr(cls, "param_schema", {}) or {}) if cls is not None else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _is_statistically_significant(report: OverfitReport) -> bool:
+    """"通过"的必要条件：扣除多重检验的运气成分后仍显著。
+
+    - Bootstrap 年化夏普 95% CI 下界 > 0 → 显著（表现不可能由抽样噪声解释）
+    - 缩水夏普 DSR ≥ 0.95（Bailey & López de Prado 惯例）→ 显著
+    - 两者都拿不到（样本太短、方差为零）→ 无法证明，返回 False（证据不足不等于通过）
+    """
+    ci = report.sharpe_ci
+    if ci is not None and len(ci) == 2 and float(ci[0]) > 0:
+        return True
+    if report.dsr is not None:
+        return float(report.dsr) >= 0.95
+    return False
 
 
 def _score_and_verdict(report: OverfitReport) -> OverfitReport:
@@ -416,26 +545,40 @@ def _score_and_verdict(report: OverfitReport) -> OverfitReport:
     # 统一降级为“无法判定”。它不拦注册（数据不够不该怪策略），
     # 但也不等于通过：自动接管实盘的通道把它当作"未证明可用"直接拒绝。
     # 交易充分且 OOS 转负 / PBO 高 → 仍判“严重过拟合”拦截。
+    # 证据档位（_TRADES_EVIDENCE_OK）：3~7 笔成交仍不足以支撑"参数过拟合"
+    # 结论——此时 OOS 为负只能说明"这段行情没赚到钱"（噪声/行情不适配），
+    # 判"无法判定"而非"严重过拟合"，同样禁止自动接管（安全语义不变）。
     if avg_trades < _MIN_TRADES_FOR_VERDICT:
         report.verdict = "无法判定"
         flags.append({"level": "warn",
                       "msg": f"样本外平均交易仅 {avg_trades:.1f} 笔，证据不足，判定为无法判定"
                              "（可注册，但禁止自动接管实盘）"})
+    elif report.oos_ret <= 0 and avg_trades < _TRADES_EVIDENCE_OK:
+        report.verdict = "无法判定"
+        flags.append({"level": "warn",
+                      "msg": f"样本外平均成交仅 {avg_trades:.1f} 笔且收益为负（{report.oos_ret:.2%}）——"
+                             "负收益更可能是成交样本不足/行情不适配的噪声，不足以判定参数过拟合"
+                             "（可注册，但禁止自动接管实盘）"})
     elif report.score >= 60:
-        report.verdict = "通过"
+        # "通过"的必要条件（2026-09-12 校正）：扣除多重检验的运气成分后仍显著。
+        # 此前 DSR/Bootstrap 只作 ±10 分的微调，于是 score 靠"OOS 正收益 + PBO 低 +
+        # 有成交"就能堆到 90 并判"通过"，而 DSR≈0（与运气不可区分）照样放行。
+        # 实测：BTC/USDT 1h 近 3000 根上，四个内置执行器默认参数的 DSR 全部落在
+        # 0.0002~0.13、bootstrap 夏普 95% CI 下界全为负 —— 即"检测不出任何技术优势"。
+        # 这类结果不该被标成"通过"，故降级为"疑似过拟合"并显式写明原因。
+        if _is_statistically_significant(report):
+            report.verdict = "通过"
+        else:
+            report.verdict = "疑似过拟合"
+            _ci = (None if report.sharpe_ci is None
+                   else [round(float(x), 2) for x in report.sharpe_ci])
+            flags.append({"level": "warn",
+                          "msg": f"综合评分达标，但统计显著性不足（DSR={report.dsr}，"
+                                 f"夏普 95% CI={_ci}）：扣除 {report.dsr_trials} 次搜索的"
+                                 "运气成分后与随机不可区分，或样本期太短无法判定 —— 不判通过"})
     elif report.score >= 40:
         report.verdict = "疑似过拟合"
     else:
         report.verdict = "严重过拟合"
     report.flags = flags
     return report
-
-
-def ai_strategy_guard(df: pd.DataFrame, strategy_name: str, strategy_params: dict,
-                      cfg: Optional[OverfitConfig] = None) -> OverfitReport:
-    """AI 策略落地守卫：AI 设计/迭代出的策略在注册前强制过拟合检测。
-
-    与 detect_overfit 等价，但语义强调"防 AI 作弊"。调用方可据此拒绝
-    verdict != "通过" 的策略。
-    """
-    return detect_overfit(df, strategy_name, strategy_params, cfg)

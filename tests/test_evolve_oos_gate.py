@@ -45,6 +45,44 @@ def test_gate_passes_with_profitable_oos():
     assert ok is True and reason == ""
 
 
+def test_gate_rejects_when_oos_trades_zero():
+    """P4-E2：报告带 oos_trades=0 → 判"样本外未交易"（优先于段末持仓比例）。"""
+    ok, reason = _strategy_deploy_gate({
+        "deployment_blocked": False,
+        "oos_report": {"enabled": True, "oos_ret": -0.001, "oos_trades": 0,
+                       "oos_position_ratio": 0.0},
+    })
+    assert ok is False and "未交易" in reason
+
+
+def test_gate_traded_but_lost_reports_nonpositive():
+    """P4-E2：OOS 有交易但段末平仓（position_ratio=0）+ 收益为负 → 判"真亏损"而非"未交易"。
+
+    回归：元策略 OOS 策略"交易后段末平仓"会被段末持仓比例误判为从未交易；
+    有了 oos_trades 计数后必须给出诚实的"非正"结论。
+    """
+    ok, reason = _strategy_deploy_gate({
+        "deployment_blocked": False,
+        "oos_report": {"enabled": True, "oos_ret": -0.02, "oos_trades": 7,
+                       "oos_position_ratio": 0.0},
+    })
+    assert ok is False and "未交易" not in reason and "非正" in reason
+
+
+def test_gate_falls_back_to_position_ratio_without_trades():
+    """P4-E2：老报告无 oos_trades → 回退段末持仓比例（旧行为保持不变）。"""
+    ok, reason = _strategy_deploy_gate({
+        "deployment_blocked": False,
+        "oos_report": {"enabled": True, "oos_ret": -0.001, "oos_position_ratio": 0.01},
+    })
+    assert ok is False and "未交易" in reason
+    ok2, reason2 = _strategy_deploy_gate({
+        "deployment_blocked": False,
+        "oos_report": {"enabled": True, "oos_ret": -0.001, "oos_position_ratio": 0.5},
+    })
+    assert ok2 is False and "非正" in reason2
+
+
 @pytest.mark.parametrize("report,expected", [
     ({"enabled": True, "valid": True}, True),
     ({"enabled": False}, False),

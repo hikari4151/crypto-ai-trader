@@ -67,7 +67,8 @@ def _designer(result, monkeypatch):
     """构造 designer 并把过拟合守卫换成记录调用的替身（守卫本身要跑数百次回测）。"""
     calls = []
 
-    async def _fake_guard(name, params, snap, executor="price_action", guard_candles=None):
+    async def _fake_guard(name, params, snap, executor="price_action", guard_candles=None,
+                          **_kw):
         calls.append({"name": name, "executor": executor, "params": dict(params)})
         return None
 
@@ -293,11 +294,19 @@ async def test_price_action_still_reads_params_back_from_pine(monkeypatch):
 # ---------------- 5. 注册前信号密度门 ----------------
 
 def _density_result(trades, available=True):
-    passed = (not available) or trades >= sd._DENSITY_MIN_TRADES
-    return {"available": available, "passed": passed,
+    """密度门替身结果：达标与否走**真实**的归一化判定（`sd._judge_density`）。
+
+    替身自己再写一套判据会跟真门漂移：L2 把门槛从"绝对 5 笔"改成"≥15 笔/1000 根"时，
+    写死的 `trades >= sd._DENSITY_MIN_TRADES` 让 9/12 笔的替身突然变成"不过"，
+    把 4 个链路测试一起带崩——链路测试关心的是"过 / 不过之后怎么办"，不是门槛数值。
+    """
+    j = sd._judge_density(trades if available else 0, sd._DENSITY_CANDLES)
+    return {"available": available, "passed": (not available) or j["passed"],
             "trades": trades if available else None,
             "candles": sd._DENSITY_CANDLES, "required_candles": sd._DENSITY_CANDLES,
-            "min_trades": sd._DENSITY_MIN_TRADES, "symbol": "BTC/USDT",
+            "min_trades": j["min_trades"], "trades_per_1000": j["trades_per_1000"],
+            "min_trades_per_1000": sd._DENSITY_MIN_TRADES_PER_1000,
+            "symbol": "BTC/USDT",
             "timeframe": "1h", "reason": ""}
 
 
@@ -366,7 +375,7 @@ async def test_density_failure_is_fed_back_with_real_knobs(monkeypatch):
 
 async def test_retry_that_passes_the_gate_gets_registered(monkeypatch):
     designer, client, calls = _designer(PA_RESULT, monkeypatch)
-    _fake_density(monkeypatch, [_density_result(0), _density_result(12)])
+    _fake_density(monkeypatch, [_density_result(0), _density_result(16)])
 
     spec = await designer.design(SNAP, [], [], strategy_type="breakout")
 
@@ -392,7 +401,7 @@ async def test_gate_measures_the_final_params_not_the_ai_echo(monkeypatch):
     ])
     result = {**PA_RESULT, "name": "sr_live", "pine_code": pine}
     designer, _, calls = _designer(result, monkeypatch)
-    _fake_density(monkeypatch, [_density_result(12)])
+    _fake_density(monkeypatch, [_density_result(16)])
 
     await designer.design(SNAP, [], [], strategy_type="breakout")
 
@@ -455,14 +464,15 @@ def _designer_with_verdict(monkeypatch, verdicts):
     verdicts = [verdicts] if isinstance(verdicts, str) else list(verdicts)
     calls = []
 
-    async def _fake_guard(name, params, snap, executor="price_action", guard_candles=None):
+    async def _fake_guard(name, params, snap, executor="price_action", guard_candles=None,
+                          **_kw):
         idx = min(len(calls), len(verdicts) - 1)
         calls.append({"name": name, "executor": executor, "params": dict(params)})
         return {"verdict": verdicts[idx], "score": 50.9, "oos_ret": 0.0, "pbo": None,
                 "decay": None, "n_folds": 0}
 
     monkeypatch.setattr(sd, "_guard_ai_strategy", _fake_guard)
-    _fake_density(monkeypatch, [_density_result(9)])
+    _fake_density(monkeypatch, [_density_result(16)])
     return sd.StrategyDesigner(_FakeClient(PA_RESULT), _FakeDb(), None), calls
 
 
@@ -529,14 +539,15 @@ async def test_severe_overfit_first_then_pass_registers_clean(monkeypatch):
     verdicts = ["严重过拟合", "通过"]
     calls = []
 
-    async def _flaky_guard(name, params, snap, executor="price_action", guard_candles=None):
+    async def _flaky_guard(name, params, snap, executor="price_action", guard_candles=None,
+                           **_kw):
         idx = min(len(calls), len(verdicts) - 1)
         calls.append({"name": name, "executor": executor, "params": dict(params)})
         return {"verdict": verdicts[idx], "score": 50.9, "oos_ret": 0.0, "pbo": None,
                 "decay": None, "n_folds": 0}
 
     monkeypatch.setattr(sd, "_guard_ai_strategy", _flaky_guard)
-    _fake_density(monkeypatch, [_density_result(9)])
+    _fake_density(monkeypatch, [_density_result(16)])
     designer = sd.StrategyDesigner(client, _FakeDb(), None)
 
     spec = await designer.design(SNAP, [], [], strategy_type="breakout")

@@ -6,7 +6,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from web.deps import get_db, get_engine
 

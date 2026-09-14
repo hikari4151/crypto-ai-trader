@@ -508,6 +508,15 @@ async def iterate_strategy(payload: dict = {}, engine=Depends(get_engine)):
             if strategy_name:
                 from strategies import get_strategy
                 target = get_strategy(strategy_name)
+            # L2：草稿（未证明）不能作为迭代链的父代。在"过拟合未过 / 证据不足"的
+            # 策略上继续迭代，会把它的问题特征继承并放大（低交易 → 更少交易、
+            # 过拟合 → 换一批参数继续过拟合），这也是"劣质策略继续繁殖"的主路径。
+            from strategies import is_draft
+            if is_draft(target.name):
+                raise RuntimeError(
+                    f"策略 {target.name} 是草稿（未证明：过拟合未过或样本外证据不足），"
+                    "不能作为迭代起点。请改选已通过验证的策略迭代，"
+                    "或先针对它重新设计一版能过门的策略。")
             _ai_progress(task_id, "perf", "分析近期表现与前代迭代", 15,
                          f"目标策略 {target.name}")
             snap = await engine._current_snapshot()
@@ -516,6 +525,13 @@ async def iterate_strategy(payload: dict = {}, engine=Depends(get_engine)):
             guard_candles = await engine._fetch_history_ohlcv(engine.GUARD_CANDLES) \
                 or snap.get("candles", [])
             snap = {**snap, "candles": guard_candles}
+            # K 线被替换为守卫数据后，指标/S/R/PA 必须按同源重算——否则 prompt 里
+            # "最近K线明细"来自 guard 数据、而 RSI/S/R 仍是旧快照算的，两端对不上
+            try:
+                from indicators.technical import compute_latest
+                snap["indicators"] = compute_latest([list(c) for c in guard_candles])
+            except Exception:  # noqa: BLE001
+                log.warning("[ai] 替换守卫K线后重算指标失败（沿用快照指标）: %s", exc_info=True)
             try:
                 perf = _run_on_loop(engine, lambda: engine._recent_performance())
             except TimeoutError:

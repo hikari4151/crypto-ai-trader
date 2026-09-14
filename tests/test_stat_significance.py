@@ -149,15 +149,19 @@ class TestOverfitLowEvidenceVerdict:
     def _report(self, avg_oos_trades: float, oos_ret: float = -0.01,
                 pbo: float = 0.6, dsr: float = 0.3, n_folds: int = 3) -> "OverfitReport":
         from backtest.overfit import FoldResult, OverfitReport
-        # 构造 n_folds 折，每折 oos_trades 取整到 avg 附近
-        base = avg_oos_trades / n_folds
+        # 构造 n_folds 折，每折 oos_trades 平均后 ≈ avg_oos_trades
+        # （此前用 int(round(avg/n_folds)) 每折取整，avg=8/n_folds=3 → 每折3笔，
+        #  真实平均只有3笔，与"avg=8=交易充分"的用例意图不符，已修正为按总量分配）
+        total = int(round(avg_oos_trades * n_folds))
+        base, rem = divmod(total, n_folds)
+        trades_per_fold = [base + 1 if i < rem else base for i in range(n_folds)]
         folds = [FoldResult(fold=i + 1, is_start="2024-01-01 00:00:00+00:00",
                             is_end="2024-06-01 00:00:00+00:00",
                             oos_start="2024-06-01 00:00:00+00:00",
                             oos_end="2024-12-01 00:00:00+00:00",
                             is_ret=0.05, oos_ret=oos_ret / n_folds,
                             oos_sharpe=-0.5, oos_drawdown=0.1,
-                            oos_trades=int(round(base if base >= 1 else base))) for i in range(n_folds)]
+                            oos_trades=trades_per_fold[i]) for i in range(n_folds)]
         return OverfitReport(
             verdict="未判定", score=5.0,
             flags=[], folds=folds,
@@ -180,6 +184,17 @@ class TestOverfitLowEvidenceVerdict:
         """OOS 平均交易 1-2 笔（<3）→ 统计证据不足，判“无法判定”而非“严重过拟合”。"""
         from backtest.overfit import _score_and_verdict
         rep = self._report(avg_oos_trades=1.5, oos_ret=-0.008)
+        _score_and_verdict(rep)
+        assert rep.verdict == "无法判定", f"got {rep.verdict}"
+
+    def test_low_evidence_negative_is_inconclusive_not_severe_overfit(self):
+        """3≤avg<8 且收益为负 → “无法判定”而非“严重过拟合”。
+
+        校准：内置默认策略（dual_ma/factor_signal/grid）在近 7 个月真实 1h
+        K线上 OOS 收益为负时 avg_oos_trades 仅 3~12 笔，此前全被判“严重过拟合”，
+        其中低频段（3~7 笔）的负收益是成交噪声/行情不适配，不是参数过拟合。"""
+        from backtest.overfit import _score_and_verdict
+        rep = self._report(avg_oos_trades=4.0, oos_ret=-0.02, pbo=0.8, dsr=0.1)
         _score_and_verdict(rep)
         assert rep.verdict == "无法判定", f"got {rep.verdict}"
 

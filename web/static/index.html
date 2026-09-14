@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark" data-density="cozy">
+<html lang="zh-CN" data-theme="dark" data-density="cozy" data-boot="1">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -389,8 +389,7 @@
   .mac-seg-btn:hover{background:var(--hover);color:var(--text)}
   .mac-seg-btn.active{background:var(--accent);color:#fff;border-color:transparent;box-shadow:0 1px 3px rgba(10,132,255,.3)}
   .mac-card{background:color-mix(in srgb,var(--bg-3) 30%,transparent);border:1px solid var(--border);border-radius:var(--r-md);padding:14px;backdrop-filter:blur(12px) saturate(140%)}
-  .stat-card{background:color-mix(in srgb,var(--bg-2) 70%,transparent);border:1px solid var(--border);border-radius:var(--r-xl);padding:14px 18px;backdrop-filter:blur(28px) saturate(170%);transition:border-color .25s ease,transform .3s var(--ease-spring),box-shadow .3s var(--ease-spring);
-    animation:statIn .4s var(--ease-spring) both}
+  .stat-card{background:color-mix(in srgb,var(--bg-2) 70%,transparent);border:1px solid var(--border);border-radius:var(--r-xl);padding:14px 18px;backdrop-filter:blur(28px) saturate(170%);transition:border-color .25s ease,transform .3s var(--ease-spring),box-shadow .3s var(--ease-spring)}
   .stat-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 12px 28px rgba(0,0,0,.22),0 2px 8px rgba(0,0,0,.12)}
   :root[data-theme="light"] .stat-card:hover{box-shadow:0 12px 28px rgba(0,0,0,.10),0 2px 8px rgba(0,0,0,.06)}
   @keyframes statIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
@@ -524,22 +523,104 @@
   .toast .ico svg{width:15px;height:15px;display:block;margin-top:1px}
   .toast .ico .i-ok{color:var(--green)} .toast .ico .i-error{color:var(--orange)} .toast .ico .i-info{color:var(--accent)}
 
-  /* ---------- 动画 ---------- */
-  .fade-enter-active,.fade-leave-active{transition:opacity .16s ease}
-  .fade-enter-from,.fade-leave-to{opacity:0}
-  /* F-9：page 过渡补 leave（leave .16s 纯淡出，enter 保持 18ms 上移入场） */
-  /* 页面切换只动 opacity，绝对不要动 transform：section 上任何非 none 的 transform
+  /* ---------- 动画：各级页面衔接（一级视图 / 二级 tab 面板共用同一套时长与缓动） ---------- */
+  /* ⚠️ 铁律（别动）：section 自身**永远不写 transform**。section 上任何非 none 的 transform
      都会成为后代 position:fixed 的包含块，遮罩 .ui-overlay{inset:0} 于是按 section 盒
      解析而不是按视口解析——实测遮罩 y:72/h:3618、内层弹窗顶到 1595px，二级窗口整扇
-     跑出屏幕外（tab 切后台时 rAF 停摆，enter-from 会一直挂着不消失）。 */
-  .page-enter-active{transition:opacity .18s ease}
+     跑出屏幕外（tab 切后台时 rAF 停摆，enter-from 会一直挂着不消失）。
+     所以"位移"一律下沉到 section 的直接子元素：本文件两个 .ui-overlay 都是 section 的
+     直接子元素、不在任何卡片内部，故给卡片/面板加 transform 是安全的（已逐个核对；
+     将来若把 .ui-overlay 挪进卡片内部，卡片上的动画必须同步去掉）。 */
+  :root{
+    /* ⚠️ 「速率感」的判据从来不是 duration，而是【有几个属性在动 + 各自速度剖面的相位】。
+       本项目在这条线索上的四次返工，根因依次是：
+         ① expo-out(.16,1,.3,1)：20% 时间走完 75% 位移 ⇒ 读成"啪一下出现"；
+         ② 强减速(.22,.61,.36,1)：起步仍偏快 ⇒ 读成"窜出去再收尾"；
+         ③ 拆成【透明度 .28s easeOutQuad ＋ 位移 .40s easeInOutSine】两条并行动画 ⇒
+            两条曲线的速度峰值分别在 t=0 与 t=50%，**相位正好相反**：元素先"亮起来"（快），
+            随即定住约 120ms（位移还没起速），再滑过去（快）⇒ 读成"两拍"；
+            而 11 个顶层块各错峰 36ms，等于把这两拍叠了 11 遍 ⇒ 用户原话"速率很奇怪、卡顿"。
+         ④ 同时 .page-enter-active（section）与它的直接子元素**都在淡入**，两条 easeOutQuad
+            相乘得到 q(t)²，前段爬升被放大近一倍、后段迅速变平 —— 又一层"速率奇怪"。
+       ✅ 定稿：**整页只留一次运动** —— 只动透明度、只有一条曲线、只有一个合成层。
+          这也正是 macOS 自己的做法（系统设置切面板、Finder 前进后退都是纯交叉淡化、零位移）。
+       ⚠️ 透明度必须用 easeOut 类。亮度没有惯性，「峰速÷均速」那条位移判据对它**不适用**；
+          反过来用 easeInOutSine 淡入，开头几十毫秒屏幕近乎全黑，读成"闪空档"。
+       ⚠️ 别再给 section 的直接子元素挂入场动画：① 会让 section 的淡入被乘第二次；
+          ② 把合成层从 1 个变成 N 个（evolve 页实测 11 个），每个层里又压着 backdrop-filter
+          玻璃（全站 38 处声明）⇒ 每帧重算背景模糊，这才是真正掉帧的那一段。
+          若确实想要"逐层落位"，必须接受这两条代价，并保证位移与淡入**同曲线、同时长**
+          （相位对齐），否则又会退回上面第 ③ 条。 */
+    --dur-out:.14s;      /* 出场：一次干脆的淡出。低于 ~100ms 人眼读成"硬切"而不是过渡 */
+    --dur-in:.28s;       /* 入场：一次干净的淡入。out-in 串行，一次切换合计约 420ms */
+    --dur-panel:.22s;    /* 二级 tab 面板：点击频率比换菜单高，再快一档 */
+    --ease-page:cubic-bezier(.25,.46,.45,.94);  /* easeOutQuad：起步即可见、尾部柔和、单曲线无节拍 */
+  }
+  /* 弹层：只走 opacity（遮罩本身就是 fixed，动它没有收益只有风险） */
+  .fade-enter-active{transition:opacity var(--dur-in) var(--ease-page)}
+  .fade-leave-active{transition:opacity var(--dur-out) var(--ease-page)}
+  .fade-enter-from,.fade-leave-to{opacity:0}
+
+  /* 一级页面（9 个顶层视图）：保留 out-in（两个 section 同时留在流里会把页面撑成双高）。
+     ★ 只对 section 自身做一次透明度过渡 —— 这是全站唯一的"页面切换运动"。
+     ⚠️ 别再拆出块级动画（历史见 :root 注释第 ③④ 条）；
+     ⚠️ 出场也别砍到 <100ms：那不是变快，是变成硬切（屏幕"啪"地空一下再"啪"地亮起来）。 */
+  .page-enter-active{transition:opacity var(--dur-in) var(--ease-page)}
   .page-enter-from{opacity:0}
-  .page-leave-active{transition:opacity .16s ease}
+  .page-leave-active{transition:opacity var(--dur-out) var(--ease-page)}
   .page-leave-to{opacity:0}
+
+  /* 二级页面板：v-if 挂载即自动播放，不需要 <transition> 包裹；
+     v-show 的面板靠 :class 切 tab-on 触发（类从无到有 → animation-name 变化 → 重播）。
+     [class] 是防御性写法：确保压过任何卡片类上的同权重 animation（量化页的面板都是 .mac-window）。
+     与一级页面同一套 DNA、同一条曲线，只把时长换 --dur-panel。 */
+  .settings-panel,.tab-on[class]{animation:panelFade var(--dur-panel) var(--ease-page) backwards}
+  @keyframes panelFade{from{opacity:0}to{opacity:1}}
+
+  /* ========== 动效单一来源（2026-09-14 定稿；别再往卡片基类上写 animation） ==========
+     入场动画只允许有两个来源：
+       ① 页面级 .page-enter-active / .page-leave-active —— 菜单切换的主节奏
+       ② 面板级 .settings-panel / .tab-on[class]     —— 二级 tab
+     卡片的入场动画【一律不写在基类上】，改用 <html data-boot="1"> 门控，只在首屏播一次。
+
+     ⛔ 为什么必须这样：一级视图是 9 个各自独立的 <transition mode="out-in"> 包着 v-if 的
+     <section>，切菜单 = 整个 section 卸载重建 ⇒ 里面所有元素都算"新挂载"，凡是基类上挂了
+     animation 的元素都会重播入场。实际规模：.stat-card 61 处、.mac-window 58 处、
+     .fade-num 25 处 —— 一次点击上百个元素同时重新入场，而三者时长各不相同
+     （statIn .40s / macWinIn .32s / numIn .30s）又互相嵌套，波形彼此错位，
+     表现就是"基本每个菜单都在闪、而且是一部分卡片在闪"。
+     （更早还叠过 sweep 全宽蓝扫光与 filter:blur，那两处已单独删除，见下方注释。）
+
+     ✅ 正确做法：首屏时 data-boot 在 ⇒ 卡片各自入场，加载有质感；
+     首次交互时 JS 摘掉 data-boot ⇒ 此后任何菜单切换卡片都不再自己演，
+     只剩页面级"壳淡入 + 顶层内容错峰落位"一个节奏，干净、不闪。
+     ⚠️ 摘属性是安全的：此时这些动画早已结束，且它们 fill:both 的终态就等于基样式，
+        属性消失 → 动画被取消 → 元素停在终态，视觉零跳变（不会有第二波入场）。 */
+  html[data-boot] .stat-card{animation:statIn .4s var(--ease-spring) both}
+  html[data-boot] .mac-window{animation:macWinIn .32s var(--ease-spring) both}
+  html[data-boot] .fade-num{animation:numIn .3s ease}
+  html[data-boot] .card-in{animation:cardIn .28s ease}
+  html[data-boot] .stagger>*{animation:rowIn .34s var(--ease-spring) both}
+  html[data-boot] .stagger>*:nth-child(1){animation-delay:0s}
+  html[data-boot] .stagger>*:nth-child(2){animation-delay:.03s}
+  html[data-boot] .stagger>*:nth-child(3){animation-delay:.06s}
+  html[data-boot] .stagger>*:nth-child(4){animation-delay:.09s}
+  html[data-boot] .stagger>*:nth-child(5){animation-delay:.12s}
+  html[data-boot] .stagger>*:nth-child(6){animation-delay:.15s}
+  html[data-boot] .stagger>*:nth-child(n+7){animation-delay:.18s}
+
+  /* ⛔ 已删：视图切换曾加过一条"交接高光"扫光条（.nav-sweep，fixed top:90px 全宽 2px
+     accent 蓝渐变 + 发光）。它同时是"奇怪的蓝线"和"闪屏"的来源：
+       a) --accent 就是 #0A84FF/#007AFF（纯蓝），fixed 全宽横在视口上，读起来像界面里
+          多出一条没来由的蓝线（也压在 46px 顶栏的下沿上）；
+       b) 它靠 opacity 0→.9→0 + box-shadow 发光在 460ms 内整体亮灭，是非单调的亮度变化
+          ——页面本身只是淡入淡出（单调），多出这条亮条就"闪"了。
+     ⚠️ 教训：页面切换的装饰层不要用"亮度脉冲"（扫光/闪光/发光条）来填补空档。
+     单调的淡入淡出即使有 100ms 空档，观感也远好于任何会亮起来的元素。
+     现在切换节奏就是"一次真淡出 + 一次真淡入"（见 :root 的 --dur-* / --ease-page），不需要任何额外装饰。 */
   /* 轻量线性动画（stat-card 完整 transition 定义在上方 .stat-card 规则，勿覆盖） */
-  .fade-num{animation:numIn .3s ease}
+  /* 数字/卡片入场：已改为「首屏门控」，见本文件「动效单一来源」注释块 —— 此处不再挂 animation */
   @keyframes numIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-  .card-in{animation:cardIn .28s ease}
   @keyframes cardIn{from{opacity:0;transform:translateY(6px) scale(.99)}to{opacity:1;transform:none}}
   .mac-window{transition:border-color .25s ease}
   /* 骨架屏（加载/空态占位） */
@@ -627,9 +708,10 @@
   .menu-item:focus-visible,.settings-item:focus-visible,.bt-step:focus-visible,
   .mac-toggle:focus-visible,.mac-toggle-input:focus-visible,
   button.pill:focus-visible,button.mac-card:focus-visible,tr[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  /* 窗口入场动效：阻尼 1.0 无 overshoot；位移 8px（曾 14px 偏大） */
+  /* 窗口入场动效：阻尼 1.0 无 overshoot；位移 8px（曾 14px 偏大）。
+     ⛔ 这里【故意不写】.mac-window{animation:...} —— 窗口的入场动画统一由下面
+     「动效单一来源」块里的 html[data-boot] 门控，只在首屏播一次。见该处注释。 */
   @keyframes macWinIn{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
-  .mac-window{animation:macWinIn .32s var(--ease-spring) both}
   /* 卡片 hover：只加深边框/背景，不弹大阴影（曾凭空弹出 .2 透明度大阴影）；
      弹簧曲线（阻尼 1.0）让抬升自然无过冲 */
   .mac-card{transition:transform .3s var(--ease-spring),border-color .25s ease}
@@ -708,33 +790,34 @@
   /* 菜单栏密度分段控件：图标态，比默认 .mac-seg button 收紧内距 */
   .seg-density button{padding:4px 7px;flex:none;line-height:0}
   .seg-density svg{width:14px;height:14px;display:block}
-  /* --- 动效工具：错落入场（父容器加 .stagger，子项依次入场） --- */
-  .stagger>*{animation:rowIn .34s var(--ease-spring) both}
-  .stagger>*:nth-child(1){animation-delay:0s}
-  .stagger>*:nth-child(2){animation-delay:.03s}
-  .stagger>*:nth-child(3){animation-delay:.06s}
-  .stagger>*:nth-child(4){animation-delay:.09s}
-  .stagger>*:nth-child(5){animation-delay:.12s}
-  .stagger>*:nth-child(6){animation-delay:.15s}
-  .stagger>*:nth-child(n+7){animation-delay:.18s}
+  /* --- 动效工具：错落入场（父容器加 .stagger，子项依次入场）---
+     ⛔ 规则已移到文件上方「动效单一来源」块，并加 html[data-boot] 门控（只在首屏播）。
+        这里【不要】再写一份未门控的 .stagger>*：视图切换会整体重挂载，未门控的基类动画
+        会随每次点菜单把整块列表重播一遍。 */
+  /* .stagger>*{...} → 见「动效单一来源」 */
   @keyframes rowIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
   /* 套件自带减动效降级 */
   @media (prefers-reduced-motion: reduce){
-    .stagger>*{animation:none}
+    html[data-boot] .stagger>*{animation:none}
     .mac-list-row,.mac-form-row{transition:none}
   }
 
   /* 减动效偏好：关闭全部位移/缩放/闪烁（保留透明度与颜色反馈）。
-     F-10：清单补 .ui-modal/.ui-modal-mask 动画与 page/fade 过渡 */
+     F-10：清单补 .ui-modal/.ui-modal-mask 动画与 page/fade 过渡
+     ⚠️ 卡片那几条必须带 html[data-boot] 前缀：否则 (0,1,0) 压不过「动效单一来源」块里的
+        html[data-boot] .mac-window 等 (0,2,1) 规则，减动效设置会失效。 */
   @media (prefers-reduced-motion: reduce){
-    .mac-window,.stat-card,.ui-modal,.ui-modal-mask{animation:none}
+    html[data-boot] .mac-window,html[data-boot] .stat-card,
+    html[data-boot] .fade-num,html[data-boot] .card-in,
+    .ui-modal,.ui-modal-mask{animation:none}
     .mac-card,.mac-btn,.mac-seg-btn,.mac-seg button,.menu-item,.settings-item,.bt-step,.mac-toggle{transition:none}
-    .fade-num,.flash,.skeleton,.toast,.pill.pulse,.bg-ico,.empty-state .e-ico{animation:none}
+    .flash,.skeleton,.toast,.pill.pulse,.bg-ico,.empty-state .e-ico{animation:none}
     .page-enter-active,.page-leave-active,.fade-enter-active,.fade-leave-active{transition:none}
+    .settings-panel,.tab-on[class]{animation:none}
   }
 
   /* ========== Pine Script 代码面板（AI 策略工坊·左栏） ========== */
-  .pn-panel{display:flex;flex-direction:column;overflow:hidden;min-height:480px;max-height:620px}
+  .pn-panel{display:flex;flex-direction:column;overflow:hidden;min-height:480px;max-height:920px}
   .pn-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap}
   .pn-badge{font-family:var(--mono);font-size:12px;font-weight:600;letter-spacing:.3px;
     padding:2px 7px;border-radius:6px;background:var(--accent-soft);color:var(--accent-text)}
@@ -750,12 +833,24 @@
   /* 热门币 chips 横滚隐藏滚动条（触摸板/shift+滚轮仍可横滚） */
   .scrollbar-none{scrollbar-width:none;-ms-overflow-style:none}
   .scrollbar-none::-webkit-scrollbar{display:none}
-  /* 工坊分栏：左 Pine 代码 2 : 右实时行情 8。
-     Tailwind 的 xl: 要 1280px 视口才生效，笔记本窗口（含半屏）一律退化成上下堆叠，
-     看代码时得滚到图表上方再滚回来。这里自带断点，880px 起就并排，
-     并用 minmax 兜住代码列下限（低于 2fr 时优先保证图表，代码列不再缩）。 */
+  /* 工坊分栏：左 Pine 代码 4.1 : 右实时行情 5.9（原 2:8）。
+     原比例下代码列最窄压到 172px，Pine 主体几乎每行都要横向滚动；
+     加宽到 ~41% 后单屏可读完整主体。自带 880px 断点（Tailwind xl: 要 1280px，
+     笔记本半屏会退化成上下堆叠，看代码得滚到图表上方再滚回来）。 */
   .ws-split{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;align-items:stretch}
-  @media (min-width:880px){.ws-split{grid-template-columns:minmax(172px,2fr) 8fr}}
+  @media (min-width:880px){.ws-split{grid-template-columns:minmax(300px,4.1fr) 5.9fr}}
+  /* 右栏纵向列：上为实时行情卡，下为「信号回放 / 迭代前后对比」双子面板 */
+  .ws-col{display:flex;flex-direction:column;gap:16px;min-width:0}
+  .ws-sub{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
+  @media (min-width:1180px){.ws-sub{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
+  /* 策略上下文条：名称 / 类型 / 来源 / 关卡一行可见，省去在代码与图表间反复确认状态 */
+  .ws-ctxbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 12px}
+  .ws-ctxbar .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+  /* 信号回放表：时间/价格等宽右对齐，方向用涨跌色，替代原来挤成一行的横排文本 */
+  .ws-sig{width:100%;font-size:var(--fs-caption)}
+  .ws-sig td{padding:5px 8px;border-bottom:1px solid var(--border)}
+  .ws-sig tbody tr:last-child td{border-bottom:none}
+  .ws-sig tbody tr:hover{background:rgba(128,128,140,.08)}
 
   /* ============================================================
      【毛玻璃加强层】Apple 材质体系 —— 覆盖于既有玻璃组件之上
@@ -811,8 +906,16 @@
   :root[data-theme="light"] .mac-titlebar{background:color-mix(in srgb,var(--bg-2) 55%,transparent)}
   :root[data-theme="light"] .menubar{background:color-mix(in srgb,var(--bg-1) 55%,transparent);box-shadow:inset 0 1px 0 rgba(255,255,255,.75),0 2px 10px rgba(31,45,61,.05)}
   :root[data-theme="light"] .ui-modal{background:rgba(255,255,255,.86)}
-  /* ---- 3) 材质化入场：blur 淡出 + 缩放 + 位移同帧（非干巴巴淡入） ---- */
-  @keyframes macWinIn{from{opacity:0;transform:translateY(8px) scale(.985);filter:blur(6px)}to{opacity:1;transform:none;filter:blur(0)}}
+  /* ---- 3) 材质化入场：缩放 + 位移 + 淡入同帧（非干巴巴淡入） ----
+     ⛔ 已删这里原先的 filter:blur(6px)→0。它是"切页面整屏闪一下"的主因：
+     .mac-window 是 backdrop-filter:blur(36px) 的玻璃层，给它再叠一层 CSS filter
+     动画，每帧都要重新栅格化整块背景模糊区；而一次切页会同时重挂载一个视图里的
+     全部窗口（仪表盘 15+ 个），叠加后表现为整页亮度抖一下。
+     更关键的是 blur 让卡片中途"半透明化"，背后的亮色渐变透上来 —— 这是非单调的
+     亮度变化，页面本身只是淡入（单调），所以一眼就看出"闪"。
+     ⚠️ 纪律：backdrop-filter 玻璃元素不要再用 filter:blur 做入场；位移/缩放/透明度足够。
+     降级方案（要"材质感"时）：把效果放到元素自身的 background/box-shadow 上，别碰 filter。 */
+  @keyframes macWinIn{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
   @keyframes modalIn{from{opacity:0;transform:translateY(10px) scale(.97);filter:blur(4px)}to{opacity:1;transform:none;filter:blur(0)}}
   @keyframes menuDropIn{from{opacity:0;transform:translateY(-5px);filter:blur(3px)}to{opacity:1;transform:none;filter:blur(0)}}
   /* ---- 4) 滚动边缘：sticky 表头玻璃化，内容从下方擦入（替代硬分割线） ---- */
@@ -831,7 +934,7 @@
     .ai-full-modal{background:var(--bg-2)}
   }
   @media (prefers-reduced-motion: reduce){
-    .mac-window,.ui-modal,.menu-sub,.ai-full-modal,.ai-full-mask{animation:none;filter:none}
+    html[data-boot] .mac-window,.ui-modal,.menu-sub,.ai-full-modal,.ai-full-mask{animation:none;filter:none}
   }
 
   /* ============================================================
@@ -949,6 +1052,115 @@
   .ctx-chip{background:color-mix(in srgb,var(--bg-2) 58%,transparent);border-color:color-mix(in srgb,var(--border) 70%,transparent);box-shadow:0 3px 12px rgba(0,0,0,.16),inset 0 1px 0 var(--glass-edge)}
   .ctx-right .pill{background:color-mix(in srgb,var(--bg-2) 58%,transparent);border-color:color-mix(in srgb,var(--border) 70%,transparent);box-shadow:0 3px 12px rgba(0,0,0,.14),inset 0 1px 0 var(--glass-edge)}
   :root[data-theme="light"] .ctx-chip,:root[data-theme="light"] .ctx-right .pill{background:rgba(255,255,255,.48);border-color:rgba(31,45,61,.10);box-shadow:0 3px 12px rgba(31,45,61,.10),inset 0 1px 0 rgba(255,255,255,.82)}
+
+  /* ---------- 持续进化页 PDF 工作台：仅作用于 evolve 视图 ---------- */
+  .evolve-page{display:flex;flex-direction:column;gap:16px}
+  .evolve-page > *{margin-top:0!important}
+  .evolve-page-head{min-height:52px}
+  .evolve-stale-alert{display:flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid color-mix(in srgb,var(--orange) 32%,transparent);border-radius:var(--r-sm);background:var(--orange-soft);color:var(--orange-text);font-size:12px}
+  .evolve-status-window{order:0}
+  .evolve-status-window .mac-titlebar{display:none}
+  .evolve-status-window .mac-body{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px 14px;padding:10px 14px}
+  .evolve-status-window .mac-body > .evolve-stale-alert{grid-column:1/-1}
+  .evolve-status-strip{display:grid!important;min-width:0;grid-column:1;grid-template-columns:auto minmax(120px,1.6fr) repeat(3,minmax(76px,1fr)) auto;gap:14px;align-items:center;margin:0!important;padding:0!important;background:transparent!important;border-radius:0}
+  .evolve-status-immediate{padding:4px 11px;white-space:nowrap}
+  .evolve-status-primary,.evolve-status-item,.evolve-status-controls{min-width:0;display:flex;align-items:center;gap:7px}
+  .evolve-status-primary{white-space:nowrap}
+  .evolve-status-sub,.evolve-status-item span{font-size:11px;color:var(--muted)}
+  .evolve-status-item{display:grid;gap:1px;align-content:center}
+  .evolve-status-item strong{font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .evolve-status-window .evolve-status-controls{margin:0;grid-column:2;justify-content:flex-end;flex-wrap:wrap}
+  .evolve-status-window .evolve-status-controls .mac-btn{padding:4px 10px}
+  .evolve-status-window .evolve-status-controls .mac-btn.primary{background:var(--accent)}
+  .evolve-layout{display:grid;grid-template-columns:minmax(0,1fr) 370px;gap:16px;align-items:start}
+  /* 左右两列各自独立成栅格。
+     曾把 5 个窗口直接挂在外层网格上、用 grid-row 把它们定位到左右列——但外层网格的
+     行高是两列【共享】的（行高 = 该行较高者），而两列窗口数不同（左 2 / 右 3）：
+     第 1 行左列是 220px 图表的「训练轮次曲线」、右列只是百余像素的「训练配置」，
+     共享行高后右列在配置窗下方被撑出约 200px 空洞，「回退基线 / 手动触发训练」
+     被迫从左侧「模型状态」卡的下沿才开始——这就是右侧内容整体"没对齐"的根因。
+     改成列容器后，两列各自 16px 等距紧密堆叠，互不牵连（DOM 顺序保持右列在前，
+     900px 单列断点下的排列顺序不变）。
+
+     ⚠️ grid-row:1 必须显式写出，不能只给 grid-column —— 只给列不给行时两个列容器
+     都落进「自动放置」流程，行号由 DOM 顺序决定：光标初始在 (row1,col1)，先排
+     side-column（列 2，不触发换行 → 落在 row1/col2）；再排 main-column 时列号从 2
+     回退到 1，变小 → 按 CSS Grid 规范 §8.5 会把光标行 +1，main-column 被放到
+     【row2/col1】。后果：第一行高度 = 右列（三窗约 470px），整个左列（训练轮次曲线）
+     被推到 470+16px 之下，顶栏与曲线之间出现约 490px 空档。
+     加了 grid-row:1 后两列钉在同一行，行高取较高者（左列），互不产生位移。
+     推演脚本：.optim/ui_check/grid_place.py */
+  .evolve-main-column,.evolve-side-column{min-width:0;display:grid;gap:16px;align-content:start;grid-row:1}
+  .evolve-main-column{grid-column:1}
+  .evolve-side-column{grid-column:2}
+  .evolve-main-column > *,.evolve-side-column > *{min-width:0}
+  .evolve-panel .mac-body{min-width:0}
+  .evolve-curve-tabs{margin:0 0 10px auto;width:max-content;max-width:100%;overflow:auto}
+  .evolve-chart-wrap{min-width:0}
+  .evolve-curve-foot{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:11.5px}
+  .evolve-curve-foot span{display:inline-flex;align-items:center;gap:5px}
+  .evolve-legend-dot{display:inline-block;width:7px;height:7px;border-radius:50%}
+  .evolve-legend-dot.red{background:var(--red)}
+  .evolve-legend-dot.orange{background:var(--orange)}
+  .evolve-legend-dot.blue{background:var(--accent)}
+  .evolve-model-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+  .evolve-model-card{min-width:0;margin:0!important;padding:12px;display:flex;flex-direction:column;gap:6px;background:color-mix(in srgb,var(--bg-2) 35%,transparent)}
+  .evolve-model-head,.evolve-model-meta,.evolve-fitness{display:flex;align-items:center;gap:7px;min-width:0}
+  .evolve-model-head{justify-content:space-between}
+  .evolve-model-head > span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .evolve-model-meta{justify-content:space-between;color:var(--muted);font-size:11px}
+  .evolve-fitness{padding:5px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+  .evolve-fitness strong{font-family:var(--mono);font-size:18px}
+  .evolve-model-detail{display:flex;align-items:center;gap:7px;flex-wrap:wrap;color:var(--muted);font-size:11.5px}
+  .evolve-model-warning{display:flex;gap:5px;align-items:flex-start;color:var(--orange-text);font-size:11.5px;overflow-wrap:anywhere}
+  .evolve-model-warning svg{flex:none;margin-top:2px}
+  .evolve-version-btn{width:100%;justify-content:center;margin-top:auto;padding:4px 8px;font-size:11.5px}
+  .evolve-config-body{display:grid;gap:14px}
+  .evolve-config-body > div{min-width:0}
+  .evolve-full-input{width:100%;display:flex;align-items:center;gap:6px;text-align:left}
+  .evolve-full-input span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .evolve-full-input svg{flex:none}
+  .evolve-anchor-item{display:grid;gap:5px;padding:9px 0;border-top:1px solid var(--border);min-width:0}
+  .evolve-anchor-item:first-of-type{border-top:0}
+  .evolve-anchor-item button{justify-self:start}
+  .evolve-trigger-stack{display:grid;gap:8px}
+  .evolve-trigger-stack .mac-btn{width:100%;justify-content:center}
+  .evolve-lab .mac-body{min-width:0}
+  .evolve-lab .mac-body > .flex.gap-1{display:flex;flex-wrap:wrap}
+  .evolve-lab .mac-input,.evolve-lab select{max-width:100%}
+  .evolve-lab .grid{min-width:0}
+  .evolve-lab .grid > div{min-width:0}
+  .evolve-lab input,.evolve-lab select{min-width:0}
+  .evolve-lab table{min-width:560px}
+  @media (max-width:1100px){
+    .evolve-layout{grid-template-columns:minmax(0,1fr) minmax(280px,34%)}
+    .evolve-model-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  }
+  @media (max-width:900px){
+    .evolve-layout{grid-template-columns:1fr}
+    /* 单列断点：列号归 1、行号必须归 auto，否则两列会被 grid-row:1 叠在同一格上。
+       行号交给自动放置，DOM 顺序（右列窗口在前）即视觉顺序，与改动前一致。 */
+    .evolve-main-column,.evolve-side-column{grid-column:1;grid-row:auto}
+    .evolve-status-strip{grid-template-columns:1fr 1fr;gap:10px 14px;align-items:stretch}
+    .evolve-status-primary{grid-column:1/-1}
+    .evolve-status-item{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:4px 0}
+    .evolve-status-item span{white-space:nowrap}
+    .evolve-status-item strong{max-width:100%;white-space:nowrap;text-overflow:ellipsis}
+    .evolve-status-immediate{grid-column:1/-1;justify-self:start}
+  }
+  @media (max-width:700px){
+    .evolve-status-strip{gap:9px 12px}
+    .evolve-status-window .evolve-status-controls{grid-column:1/-1;justify-content:flex-start}
+    .evolve-status-window .mac-body{grid-template-columns:1fr}
+    .evolve-model-grid{grid-template-columns:1fr}
+    .evolve-page-head{flex-direction:row;align-items:flex-start}
+    .evolve-page-head .page-actions{flex:none}
+    .evolve-page-head .page-actions .mac-btn{font-size:0;padding:7px 9px}
+    .evolve-page-head .page-actions .mac-btn svg{margin:0}
+    .evolve-curve-foot .ml-auto{margin-left:0!important}
+    .evolve-lab .grid.grid-cols-2,.evolve-lab .grid.grid-cols-2.lg\\:grid-cols-4{grid-template-columns:1fr}
+    .evolve-lab .col-span-2{grid-column:span 1}
+  }
 </style>
 </head>
 <body class="pt-[90px]">
@@ -1272,8 +1484,8 @@
       <div class="mac-window dash-table-card">
         <div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><div class="mac-seg" style="padding:2px"><button :class="dashboardTab==='positions'?'active':''" @click="dashboardTab='positions'">当前持仓</button><button :class="dashboardTab==='trades'?'active':''" @click="dashboardTab='trades'">最近成交</button></div><div class="ml-auto flex items-center gap-2"><input v-model="dashboardSearch" class="mac-input" style="width:190px;padding:4px 10px" placeholder="搜索交易对"/><button class="mac-btn" style="padding:4px 10px" @click="dashboardSearch=''" v-if="dashboardSearch">清除</button></div></div>
         <div class="mac-body">
-          <div v-if="dashboardTab==='positions'" class="overflow-auto"><table><thead><tr><th>交易对</th><th class="num">数量</th><th class="num">均价</th><th class="num">最新价</th><th class="num">浮动盈亏</th></tr></thead><tbody><tr v-for="p in dashboardRows" :key="p.symbol"><td class="font-medium">{{p.symbol}}</td><td class="num">{{p.qty}}</td><td class="num">{{fmt(p.avg_price)}}</td><td class="num">{{fmt(p.last_price)}}</td><td class="num" :class="p.unrealized_pnl>=0?'pos':'neg'">{{p.unrealized_pnl>=0?'+':''}}{{fmt(p.unrealized_pnl)}}</td></tr><tr v-if="!dashboardRows.length"><td colspan="5"><div class="empty-state"><span class="e-ico"><svg><use href="#i-basket"/></svg></span><span class="e-txt">暂无匹配持仓 · 启动引擎开始模拟交易</span></div></td></tr></tbody></table></div>
-          <div v-else class="overflow-auto"><table><thead><tr><th>时间</th><th>交易对</th><th>方向</th><th class="num">价格</th><th class="num">数量</th><th class="num">盈亏</th><th>原因</th></tr></thead><tbody><tr v-for="t in dashboardRows" :key="t.id"><td class="text-slate-500">{{t.ts}}</td><td>{{t.symbol}}</td><td :class="t.side==='buy'?'pos':'neg'">{{t.side==='buy'?'买入':'卖出'}}</td><td class="num">{{fmt(t.price)}}</td><td class="num">{{t.qty}}</td><td class="num" :class="t.pnl>=0?'pos':'neg'">{{t.pnl>=0?'+':''}}{{fmt(t.pnl)}}</td><td class="text-slate-500">{{t.reason||'-'}}</td></tr><tr v-if="!dashboardRows.length"><td colspan="7"><div class="empty-state"><span class="e-ico"><svg><use href="#i-inbox"/></svg></span><span class="e-txt">暂无匹配成交记录</span></div></td></tr></tbody></table></div>
+          <div v-if="dashboardTab==='positions'" class="tab-on overflow-auto"><table><thead><tr><th>交易对</th><th class="num">数量</th><th class="num">均价</th><th class="num">最新价</th><th class="num">浮动盈亏</th></tr></thead><tbody><tr v-for="p in dashboardRows" :key="p.symbol"><td class="font-medium">{{p.symbol}}</td><td class="num">{{p.qty}}</td><td class="num">{{fmt(p.avg_price)}}</td><td class="num">{{fmt(p.last_price)}}</td><td class="num" :class="p.unrealized_pnl>=0?'pos':'neg'">{{p.unrealized_pnl>=0?'+':''}}{{fmt(p.unrealized_pnl)}}</td></tr><tr v-if="!dashboardRows.length"><td colspan="5"><div class="empty-state"><span class="e-ico"><svg><use href="#i-basket"/></svg></span><span class="e-txt">暂无匹配持仓 · 启动引擎开始模拟交易</span></div></td></tr></tbody></table></div>
+          <div v-else class="tab-on overflow-auto"><table><thead><tr><th>时间</th><th>交易对</th><th>方向</th><th class="num">价格</th><th class="num">数量</th><th class="num">盈亏</th><th>原因</th></tr></thead><tbody><tr v-for="t in dashboardRows" :key="t.id"><td class="text-slate-500">{{t.ts}}</td><td>{{t.symbol}}</td><td :class="t.side==='buy'?'pos':'neg'">{{t.side==='buy'?'买入':'卖出'}}</td><td class="num">{{fmt(t.price)}}</td><td class="num">{{t.qty}}</td><td class="num" :class="t.pnl>=0?'pos':'neg'">{{t.pnl>=0?'+':''}}{{fmt(t.pnl)}}</td><td class="text-slate-500">{{t.reason||'-'}}</td></tr><tr v-if="!dashboardRows.length"><td colspan="7"><div class="empty-state"><span class="e-ico"><svg><use href="#i-inbox"/></svg></span><span class="e-txt">暂无匹配成交记录</span></div></td></tr></tbody></table></div>
           <div class="flex items-center justify-between text-[12px] text-slate-500 mt-3"><span>{{dashboardTab==='positions'?'共 '+dashboardRows.length+' 个持仓方向':'显示最近 '+Math.min(8,dashboardRows.length)+' 笔 · 共 '+dashboardRows.length+' 笔成交'}}</span><button class="mac-btn" style="padding:2px 10px;font-size:12px" @click="switchView(dashboardTab==='positions'?'live':'performance')">查看全部{{dashboardTab==='positions'?'持仓':'成交'}}</button></div>
         </div>
       </div>
@@ -1676,6 +1888,9 @@
                   <td class="font-medium">
                     <span class="font-mono">{{s.name}}</span>
                     <span v-if="s.based_on" class="[font-size:.9em] text-slate-500">基于 {{s.based_on}}</span>
+                    <!-- L2：草稿（未证明）= 过拟合未过 / 样本外证据不足。仍可手动启用，
+                         但系统不把它当可用策略：不当迭代父代、AI 不接管调参 -->
+                    <span v-if="s.draft" class="pill orange" :title="s.draft_reason">草稿·未证明</span>
                   </td>
                   <td>
                     <span v-if="s.iter_no" class="pill purple">{{s.name}} 第{{s.iter_no}}代</span>
@@ -1725,7 +1940,7 @@
 <transition name="page" mode="out-in">  <!-- view: strategy -->
     <section v-if="view==='strategy'" class="space-y-5">
       <div class="page-head">
-        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>AI 策略工坊</h1><p>设计、验证并管理可复用的交易策略</p></div>
+        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>AI 策略工坊</h1><p>设计、验证并管理可复用的交易策略 —— 左侧代码 · 右侧图表同屏闭环</p></div>
         <!-- 统一策略选择入口：点击弹出二级面板展示全部可用策略 -->
         <div class="page-actions">
           <button class="mac-btn primary" @click="openUnifiedPicker()">
@@ -1736,6 +1951,21 @@
             <svg width="13" height="13" style="display:inline-block;vertical-align:-2px;margin-right:4px"><use href="#i-dna"/></svg>
             组合多策略
           </button>
+        </div>
+      </div>
+
+      <!-- 策略上下文条：名称 / 类型 / 来源 / 注册状态 / 关卡一行可见，
+           省掉在代码面板、图表与结果卡之间反复横跳确认「我在看哪个策略」 -->
+      <div class="mac-card ws-ctxbar" style="border-color:rgba(63,140,255,.26)">
+        <span class="font-mono text-[13px] font-semibold">{{wsCtx.name}}</span>
+        <span class="pill" :class="wsCtx.mode==='回调入场'?'orange':'blue'">{{wsCtx.mode}}</span>
+        <span class="pill blue">{{wsCtx.source}}</span>
+        <span class="pill green"><i class="dot"></i>{{wsCtx.registered}}</span>
+        <span class="text-[12px] text-slate-500">{{wsCtx.meta}}</span>
+        <div class="ml-auto flex items-center gap-1.5 flex-wrap">
+          <span v-if="wsCtx.density" class="pill" :class="wsCtx.density.passed?'green':'red'">信号密度 {{wsCtx.density.text}}</span>
+          <span v-if="wsCtx.overfit" class="pill" :class="wsCtx.overfit.ok?'green':'orange'">过拟合 {{wsCtx.overfit.text}}</span>
+          <button class="mac-btn" style="padding:3px 9px" @click="scrollToIterCard()">对比 v2 → v3</button>
         </div>
       </div>
 
@@ -1874,7 +2104,8 @@
                 </div>
               </div>
 
-              <!-- 右栏：实时行情面板（原行情页核心功能并入：多交易所/品种/周期 + 价格条 + 热门币 + 策略信号回放） -->
+              <!-- 右栏：实时行情卡 + 下方双子面板（信号回放 / 迭代前后对比） -->
+              <div class="ws-col">
               <div class="mac-card" style="padding:0;border-color:rgba(48,209,88,.28);overflow:hidden;display:flex;flex-direction:column;min-height:480px">
                 <div class="pn-head">
                   <svg width="13" height="13" style="color:var(--green)"><use href="#i-chart"/></svg>
@@ -1908,34 +2139,88 @@
                 </div>
                 <div id="workshopChart" style="flex:1;min-height:460px"></div>
               </div>
+
+              <!-- 图表下方双子面板：最近成交与版本差异放进同屏，填掉原右侧大片留白 -->
+              <div class="ws-sub">
+                <!-- 信号回放：把原来挤成一行的「最近：…」横排文本改为可扫读的表格 -->
+                <div class="mac-card" style="padding:0;display:flex;flex-direction:column;overflow:hidden">
+                  <div class="pn-head" style="padding:7px 10px">
+                    <svg width="13" height="13" style="color:var(--accent)"><use href="#i-chart"/></svg>
+                    <span class="text-[12px] font-semibold">信号回放</span>
+                    <span class="pill">{{(wsOverlay.signals||[]).length}} 笔</span>
+                    <span class="ml-auto text-[11.5px] text-slate-500">{{wsSymbolText}} · {{wsTimeframeText}}</span>
+                  </div>
+                  <div v-if="wsSignalRows.length" style="overflow:auto">
+                    <table class="ws-sig">
+                      <tbody>
+                        <tr v-for="(s,i) in wsSignalRows" :key="'sg'+i">
+                          <td class="font-mono text-slate-500">{{s.time}}</td>
+                          <td :class="s.side==='buy'?'pos':'neg'" style="font-weight:600">{{s.side==='buy'?'买入':'卖出'}}</td>
+                          <td class="font-mono num">{{mktPrice(s.price)}}</td>
+                          <td class="text-slate-400">{{s.reason}}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div v-else class="pn-empty" style="padding:18px">
+                    <svg width="26" height="26" style="opacity:.55"><use href="#i-alert"/></svg>
+                    <span>当前参数下该区间没有成交信号</span>
+                  </div>
+                </div>
+
+                <!-- 迭代前后对比：v2 → v3 的四项绩效 old → new，结论一眼可见 -->
+                <div class="mac-card" style="padding:0;display:flex;flex-direction:column;overflow:hidden">
+                  <div class="pn-head" style="padding:7px 10px">
+                    <svg width="13" height="13" style="color:#bf5af2"><use href="#i-dna"/></svg>
+                    <span class="text-[12px] font-semibold">迭代前后对比 {{iterResult&&iterResult.based_on?iterResult.based_on+' → '+((iterResult||{}).version||'新版'):'v2 → v3'}}</span>
+                    <span v-if="iterResult&&iterResult.comparison" class="pill ml-auto" :class="iterResult.comparison.improved?'green':'red'">
+                      {{iterResult.comparison.improved?'绩效提升':'绩效下降'}}</span>
+                  </div>
+                  <div v-if="iterResult&&iterResult.comparison" class="px-2.5 py-1.5">
+                    <div v-for="m in iterCompareRows" :key="m.label" class="flex items-center gap-2" style="padding:4px 6px">
+                      <span class="text-slate-500" style="flex:0 0 56px;font-size:var(--fs-caption)">{{m.label}}</span>
+                      <span class="font-mono text-slate-500 num" style="flex:0 0 62px;text-align:right;font-size:var(--fs-caption)">{{m.old}}</span>
+                      <span class="text-slate-500" style="font-size:var(--fs-caption)">→</span>
+                      <span class="font-mono num" :class="m.better?'pos':'neg'" style="flex:0 0 62px;text-align:right;font-weight:600;font-size:var(--fs-caption)">{{m.neu}}</span>
+                    </div>
+                  </div>
+                  <div v-else class="pn-empty" style="padding:18px">
+                    <svg width="26" height="26" style="opacity:.55"><use href="#i-dna"/></svg>
+                    <span>还没有迭代结果</span>
+                    <span class="text-[11.5px]">跑一次「AI 深度反思迭代」后，这里会显示前后绩效差异</span>
+                  </div>
+                </div>
+              </div>
+              </div>
             </div>
 
             <!-- AI 设计策略配置：品种/周期/类型/自定义要求（位于代码与图表下方） -->
             <div class="mac-card" style="padding:10px;border-color:rgba(63,140,255,.25)">
-              <div class="mac-label mb-2">AI 设计策略配置</div>
-              <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                <div>
+              <div class="flex items-end gap-2 flex-wrap">
+                <div style="flex:1 1 168px;min-width:150px">
                   <label class="mac-label" for="designSymbol" style="font-size:var(--fs-caption)">设计品种</label>
                   <mac-select v-model="designSymbol" :options="designSymbolOptions" style="width:100%" @change="loadWorkshopChart()"></mac-select>
                 </div>
-                <div>
+                <div style="flex:0 0 106px">
                   <label class="mac-label" for="designTimeframe" style="font-size:var(--fs-caption)">时间周期</label>
                   <mac-select v-model="designTimeframe" :options="wsTfOptions" style="width:100%" @change="loadWorkshopChart()"></mac-select>
                 </div>
-                <div>
+                <div style="flex:1 1 150px;min-width:140px">
                   <label class="mac-label" for="designType" style="font-size:var(--fs-caption)">策略类型</label>
                   <mac-select v-model="designType" :options="designTypeOptions" style="width:100%"></mac-select>
                 </div>
-                <div>
-                  <label class="mac-label" style="font-size:12px">操作</label>
-                  <div class="flex gap-2">
-                    <button class="mac-btn primary" @click="designStrategy()" :disabled="designLoading">{{designLoading?'AI 设计中…':'开始设计'}}</button>
-                  </div>
+                <div style="flex:1 1 230px;min-width:180px">
+                  <label class="mac-label" for="designCustom" style="font-size:var(--fs-caption)">自定义要求</label>
+                  <input id="designCustom" v-model="designCustom" class="mac-input" style="width:100%;padding:5px 9px"
+                    :disabled="designType!=='custom'"
+                    :placeholder="designType==='custom'?'跌 3% 且放量抄底，反弹 1.5% 就跑…':'选「自定义」后可描述具体要求'"/>
                 </div>
+                <button class="mac-btn primary flex-none" @click="designStrategy()" :disabled="designLoading">
+                  <svg width="11" height="11" style="display:inline;vertical-align:-1px;margin-right:3px"><use href="#i-play"/></svg>{{designLoading?'AI 设计中…':'开始设计'}}
+                </button>
               </div>
               <div v-if="designType==='custom'" class="mt-2">
-                <label class="mac-label" for="designCustom" style="font-size:var(--fs-caption)">自定义设计要求（自由描述你想让 AI 做什么类型的策略）</label>
-                <textarea id="designCustom" v-model="designCustom" class="mac-input" rows="2"
+                <textarea id="designCustomFull" v-model="designCustom" class="mac-input" rows="2"
                   placeholder="例：专门做 BTC 暴跌后的快速反弹，跌 3% 且放量时抄底，反弹 1.5% 就跑，单笔最大亏损 2%…"></textarea>
               </div>
             </div>
@@ -1968,8 +2253,20 @@
             <div v-if="designed" class="mac-card space-y-2" style="border-color:rgba(63,140,255,.35)">
               <div class="font-mono text-[13px]">{{designed.name}} <span class="text-slate-500 text-[12px]">· {{designed.title}}</span></div>
               <p class="text-[13px] text-slate-300">{{designed.description}}</p>
+              <!-- 注册关卡与关键参数收成一行状态条：过拟合 / 信号密度 / 单笔最大亏损一眼可比，
+                   完整参数折进「参数明细」，不再用大段原始 JSON 占版面 -->
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <span v-if="designed.overfit" class="pill" :class="designed.overfit.verdict==='通过'?'green':'orange'">过拟合 {{designed.overfit.verdict}}{{designed.overfit.score!=null?' '+designed.overfit.score+' 分':''}}</span>
+                <span v-if="designed.signal_density" class="pill" :class="designed.signal_density.passed?'green':'red'">信号密度 {{designed.signal_density.trades==null?'—':designed.signal_density.trades}} 笔 / 门槛 {{designed.signal_density.min_trades}}</span>
+                <span v-if="(designed.params||{}).stop_loss_pct!=null" class="pill red">单笔最大亏损 {{pct(designed.params.stop_loss_pct)}}</span>
+                <span v-if="(designed.params||{}).take_profit_pct!=null" class="pill green">止盈 {{pct(designed.params.take_profit_pct)}}</span>
+                <span v-if="(designed.params||{}).size_pct!=null" class="pill blue">仓位 {{pct(designed.params.size_pct)}}</span>
+              </div>
               <div class="text-[12px] text-slate-400 leading-relaxed">逻辑：{{designed.logic}}</div>
-              <pre class="text-[11.5px] text-slate-400 overflow-x-auto bg-black/20 rounded-lg p-2">参数: {{JSON.stringify(designed.params)}}</pre>
+              <details class="text-[11.5px] text-slate-400">
+                <summary style="cursor:pointer;user-select:none">参数明细</summary>
+                <pre class="overflow-x-auto bg-black/20 rounded-lg p-2">{{JSON.stringify(designed.params)}}</pre>
+              </details>
               <div class="text-[12px] text-slate-500" v-if="designed.risk_tips?.length">风控：{{designed.risk_tips.join('；')}}</div>
               <!-- 过拟合检测结果：通过/疑似/无法判定 → 正常可应用；严重过拟合 → 拦截并明确提示 -->
               <div v-if="designed.overfit" class="text-[12px] text-slate-500">
@@ -2000,7 +2297,7 @@
               <button v-if="!designed.blocked_by_signal_density" class="mac-btn primary" @click="useDesigned()"><svg width="11" height="11" style="display:inline;vertical-align:-1px"><use href="#i-play"/></svg> 使用此策略</button>
               <button v-else class="mac-btn" disabled style="opacity:.5;cursor:not-allowed"><svg width="11" height="11" style="display:inline;vertical-align:-1px"><use href="#i-lock"/></svg> 无法应用（信号密度拦截）</button>
             </div>
-            <div v-if="iterResult" class="mac-card space-y-2" style="border-color:rgba(191,90,242,.45)">
+            <div v-if="iterResult" id="iterCompareCard" class="mac-card space-y-2" style="border-color:rgba(191,90,242,.45)">
               <div class="flex items-center gap-2">
                 <span class="text-[13px] font-semibold">AI 深度反思迭代完成</span>
                 <span class="pill purple">迭代</span>
@@ -2279,7 +2576,7 @@
       </div>
 
       <!-- 因子分析 -->
-      <div v-show="qTab==='ic'" class="mac-window">
+      <div v-show="qTab==='ic'" :class="qTab==='ic'?'tab-on':''" class="mac-window">
         <div class="mac-titlebar">
           <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
           <span class="mac-title"><svg><use href="#i-chart"/></svg>因子库与有效性分析</span>
@@ -2338,7 +2635,7 @@
       </div>
 
       <!-- 因子使用场景：当前信号 + 因子择时策略回测 -->
-      <div v-show="qTab==='usage'" class="mac-window">
+      <div v-show="qTab==='usage'" :class="qTab==='usage'?'tab-on':''" class="mac-window">
         <div class="mac-titlebar">
           <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
           <span class="mac-title"><svg><use href="#i-target"/></svg>因子使用场景（当前信号 + 可落地策略）</span>
@@ -2388,7 +2685,7 @@
       </div>
 
       <!-- 横截面因子（跨品种轮动） -->
-      <div v-show="qTab==='xs'" class="mac-window">
+      <div v-show="qTab==='xs'" :class="qTab==='xs'?'tab-on':''" class="mac-window">
         <div class="mac-titlebar">
           <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
           <span class="mac-title"><svg><use href="#i-target"/></svg>横截面因子（跨品种轮动）</span>
@@ -2479,7 +2776,7 @@
       </div>
 
       <!-- AI 因子挖掘与合成 -->
-      <div v-show="qTab==='ai'" class="grid grid-cols-1 xl:grid-cols-2 gap-5">
+      <div v-show="qTab==='ai'" :class="qTab==='ai'?'tab-on':''" class="grid grid-cols-1 xl:grid-cols-2 gap-5">
         <div class="mac-window">
           <div class="mac-titlebar">
             <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
@@ -2557,300 +2854,219 @@
 
       <!-- ========== 持续进化引擎 ========== -->
 <transition name="page" mode="out-in">  <!-- view: evolve -->
-    <section v-if="view==='evolve'" class="space-y-5">
-      <div class="page-head"><div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>持续进化</h1><p>持续训练、版本回退与策略稳健性监控</p></div></div>
-      <!-- 进化概览 KPI：与仪表盘/实盘页同一套 stat-card，首屏即可见「是否在训、训了多少轮、fitness 多少」，
-           无需下钻到各训练卡。数据全部取自 evolveStatus，无新增请求。 -->
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div class="stat-card">
-          <div class="mac-label flex items-center gap-1"><svg width="12" height="12" style="flex:none" :style="{color:evolveStatus.running?'var(--green)':'var(--muted)'}"><use href="#i-power"/></svg>引擎状态</div>
-          <div class="val fade-num" style="font-size:18px" :class="evolveStatus.running?'pos':'text-slate-400'">
-            <span class="inline-flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full" :class="evolveStatus.running && !evolveStatus.paused?'bg-green-400 animate-pulse':(evolveStatus.paused?'bg-yellow-400':'bg-slate-500')"></span>{{evolveStatus.running ? (evolveStatus.paused ? '已暂停' : '运行中') : '已停止'}}</span>
-          </div>
-          <div class="sub">{{evolveStatus.enabled ? '自动进化已启用' : '自动进化已禁用'}}</div>
-        </div>
-        <div class="stat-card">
-          <div class="mac-label flex items-center gap-1"><svg width="12" height="12" style="color:var(--accent);flex:none"><use href="#i-dna"/></svg>因子挖掘</div>
-          <div class="val fade-num" style="font-size:18px">{{evolveStatus.factor_miner?.episode||0}} 轮</div>
-          <div class="sub">fitness {{evolveStatus.factor_miner?.fitness!=null ? evolveStatus.factor_miner.fitness.toFixed(5) : '—'}}</div>
-        </div>
-        <div class="stat-card">
-          <div class="mac-label flex items-center gap-1"><svg width="12" height="12" style="color:#8b5cf6;flex:none"><use href="#i-brain"/></svg>策略 DRL</div>
-          <div class="val fade-num" style="font-size:18px">{{evolveStatus.strategy_drl?.episode||0}} 轮</div>
-          <div class="sub">fitness {{evolveStatus.strategy_drl?.fitness!=null ? evolveStatus.strategy_drl.fitness.toFixed(5) : '—'}}</div>
-        </div>
-        <div class="stat-card">
-          <div class="mac-label flex items-center gap-1"><svg width="12" height="12" style="color:var(--accent);flex:none"><use href="#i-target"/></svg>训练标的池</div>
-          <div class="val fade-num" style="font-size:18px">{{(evolveStatus.symbols||[]).length||0}} 个</div>
-          <div class="sub">{{evolveStatus.current_symbol || (evolveStatus.symbols||[]).slice(0,3).join(' / ') || '未设置'}}</div>
-        </div>
-      </div>
-      <div class="mac-window">
+    <section v-if="view==='evolve'" class="space-y-5 evolve-page">
+      <div class="page-head evolve-page-head"><div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>持续进化</h1><p>持续训练、版本回退与策略稳健性监控</p></div><div class="page-actions"><button class="mac-btn" disabled title="进化日志导出尚未提供接口"><svg width="13" height="13"><use href="#i-download"/></svg>导出进化日志</button><button class="mac-btn primary" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button></div></div>
+      <!-- 运行状态：陈旧提示 + 状态栏 + 控制/触发 + 回退基线 -->
+      <div class="mac-window evolve-status-window">
         <div class="mac-titlebar">
           <div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div>
-          <span class="mac-title"><svg><use href="#i-brain"/></svg>持续进化引擎</span>
+          <span class="mac-title"><svg><use href="#i-brain"/></svg>运行状态</span>
         </div>
         <div class="mac-body">
           <!-- 轮询陈旧提示：状态连续失败 ≥3 次（约 15s）显示，恢复成功即隐藏 -->
-          <div v-if="evolveFailStreak >= 3" class="text-[11.5px] rounded-lg px-3 py-2 mb-4 flex items-center gap-1.5" style="background:rgba(255,159,10,.12);color:#ffb340">
+          <div v-if="evolveFailStreak >= 3" class="evolve-stale-alert text-[11.5px] rounded-lg px-3 py-2 mb-4 flex items-center gap-1.5" style="background:rgba(255,159,10,.12);color:#ffb340">
             <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>进化状态可能已过期（连续请求失败）
           </div>
-          <!-- 状态栏 -->
-          <div class="flex items-center gap-3 mb-4 p-3 rounded-lg" :style="{background:'rgba(0,0,0,.2)'}">
-            <span class="inline-block w-2 h-2 rounded-full" :class="evolveStatus.running && !evolveStatus.paused ? 'bg-green-400' : (evolveStatus.paused ? 'bg-yellow-400' : 'bg-slate-500')"></span>
-            <svg width="14" height="14" style="flex:none"><use :href="evolveStatus.running && !evolveStatus.paused ? '#i-play' : (evolveStatus.paused ? '#i-pause' : '#i-stop')"/></svg>
-            <span class="text-[13px] font-semibold">
-              {{evolveStatus.running ? (evolveStatus.paused ? '已暂停' : '运行中') : '已停止'}}
-            </span>
-            <span class="text-[12px] text-slate-500 ml-auto">
-              <span v-if="evolveStatus.current_symbol" class="mr-2">标的池: {{evolveStatus.symbols?.join(' / ')}}</span>
-              因子挖掘 {{evolveStatus.factor_miner?.active ? '训练中…' : '待机'}} ·
-              策略DRL {{evolveStatus.strategy_drl?.active ? '训练中…' : '待机'}}
-            </span>
+          <!-- 状态栏：保留原状态字段，压缩为单行健康度概览 -->
+          <div class="flex items-center gap-3 mb-4 p-3 rounded-lg evolve-status-strip evolve-status-bar" :style="{background:'rgba(0,0,0,.2)'}">
+            <div class="evolve-status-primary"><span class="inline-block w-2 h-2 rounded-full" :class="evolveStatus.running && !evolveStatus.paused ? 'bg-green-400' : (evolveStatus.paused ? 'bg-yellow-400' : 'bg-slate-500')"></span><svg width="14" height="14" style="flex:none"><use :href="evolveStatus.running && !evolveStatus.paused ? '#i-play' : (evolveStatus.paused ? '#i-pause' : '#i-stop')"/></svg><strong>{{evolveStatus.running ? (evolveStatus.paused ? '已暂停' : '运行中') : '已停止'}}</strong><span class="evolve-status-sub">{{evolveStatus.enabled ? '自动进化已启用' : '自动进化已禁用'}}</span></div>
+            <div class="evolve-status-item"><span>标的池</span><strong>{{evolveStatus.symbols?.join(' / ') || evolveStatus.current_symbol || '未设置'}}</strong></div>
+            <div class="evolve-status-item"><span>因子挖掘</span><strong :class="evolveStatus.factor_miner?.active?'pos':''">{{evolveStatus.factor_miner?.active ? '训练中…' : '待机'}}</strong></div>
+            <div class="evolve-status-item"><span>策略 DRL</span><strong :class="evolveStatus.strategy_drl?.active?'pos':''">{{evolveStatus.strategy_drl?.active ? '训练中…' : '待机'}}</strong></div>
+            <div class="evolve-status-item"><span>保活巡检</span><strong :class="evolveStatus.supervisor&&evolveStatus.supervisor.degraded?'neg':''">{{ !evolveStatus.running ? '未运行' : (evolveStatus.supervisor&&evolveStatus.supervisor.degraded ? '循环已退出，正在自愈' : ((evolveStatus.supervisor&&evolveStatus.supervisor.restarts) ? '已自愈 '+evolveStatus.supervisor.restarts+' 次' : '正常')) }}</strong></div><div class="evolve-status-item"><span>下一次训练</span><strong>{{evolveNextRun()}}</strong></div><button class="mac-btn primary evolve-status-immediate" @click="triggerFactorMiner()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.factor_miner?.active"><svg width="13" height="13"><use href="#i-play"/></svg>{{evolveStatus.factor_miner?.active ? '训练中…' : '立即训练'}}</button>
           </div>
-          <!-- 回退基线（锚点）：迭代「看着在训、其实一轮都没被接受」时唯一能看见的地方 -->
-          <div v-if="evolveAnchorIssues.length" class="mac-card mb-4" :style="{borderColor: evolveAnchorLocked ? 'rgba(255,69,58,.45)' : 'rgba(255,159,10,.3)'}">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-[13px] font-semibold"><svg width="14" height="14" :style="{color: evolveAnchorLocked ? 'var(--red)':'var(--orange)', verticalAlign:'-2px', marginRight:'3px'}"><use href="#i-alert"/></svg>回退基线（锚点）</span>
-              <span class="text-[12px] text-slate-500">每轮新模型须与锚点同口径比较，落后过多即回退；锚点本身不可比时，迭代会静默停摆</span>
-            </div>
-            <div v-for="a in evolveAnchorIssues" :key="a.model" class="flex items-center gap-2 flex-wrap py-2" style="border-top:1px solid var(--border)">
-              <span class="pill" :class="a.tone">{{ a.tag }}</span>
-              <span class="text-[12.5px] font-semibold">{{ a.label }}</span>
-              <span class="text-[12px] text-slate-500">锚点 fitness={{ a.fitness }} · 来源 {{ a.source }} · 连续未接受 {{ a.streak }}/{{ a.stallRounds }} 轮</span>
-              <span class="text-[12px]" style="color:var(--muted);flex:1;min-width:220px">{{ a.reason }}</span>
-              <button v-if="a.resettable" class="mac-btn text-[12px]" style="padding:3px 10px" @click="resetEvolveAnchor(a.model)">重置锚点</button>
-            </div>
-          </div>
-          <!-- 控制按钮 -->
-          <div class="flex gap-2 mb-4">
-            <button class="mac-btn primary" @click="evolvePause()" :disabled="!evolveStatus.running || evolveStatus.paused || !evolveStatus.enabled"><svg width="13" height="13"><use href="#i-pause"/></svg>暂停</button>
+          <!-- 高频控制保留在状态区，避免改变原有启停行为 -->
+          <div class="evolve-status-controls">
+            <button class="mac-btn" @click="evolvePause()" :disabled="!evolveStatus.running || evolveStatus.paused || !evolveStatus.enabled"><svg width="13" height="13"><use href="#i-pause"/></svg>暂停</button>
             <button class="mac-btn" @click="evolveResume()" :disabled="!evolveStatus.running || !evolveStatus.paused || !evolveStatus.enabled"><svg width="13" height="13"><use href="#i-play"/></svg>恢复</button>
-            <button class="mac-btn" @click="evolveEnable()" :disabled="!evolveStatus.running || evolveStatus.enabled"><svg width="13" height="13" style="color:var(--green)"><use href="#i-power"/></svg>启用</button>
-            <button class="mac-btn" @click="evolveDisable()" :disabled="!evolveStatus.running || !evolveStatus.enabled"><svg width="13" height="13" style="color:var(--red)"><use href="#i-power"/></svg>禁用</button>
+            <button class="mac-btn" @click="evolveEnable()" :disabled="!evolveStatus.running || evolveStatus.enabled"><svg width="13" height="13"><use href="#i-power"/></svg>启用</button>
+            <button class="mac-btn" @click="evolveDisable()" :disabled="!evolveStatus.running || !evolveStatus.enabled"><svg width="13" height="13"><use href="#i-power"/></svg>禁用</button>
             <button class="mac-btn" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新</button>
           </div>
-          <!-- 手动触发训练 -->
-          <div class="flex gap-2 mb-4">
-            <button class="mac-btn cyan" @click="triggerFactorMiner()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.factor_miner?.active">
-              <svg width="13" height="13" style="color:var(--accent)"><use href="#i-dna"/></svg>{{evolveStatus.factor_miner?.active ? '因子挖掘中…' : '立即因子挖掘'}}
-            </button>
-            <button class="mac-btn purple" @click="triggerStrategyDrl()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.strategy_drl?.active">
-              <svg width="13" height="13" style="color:#8b5cf6"><use href="#i-brain"/></svg>{{evolveStatus.strategy_drl?.active ? '策略训练中…' : '立即策略训练'}}
-            </button>
-            <button class="mac-btn purple" @click="triggerMetaController()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.meta_controller?.active">
-              <svg width="13" height="13" style="color:var(--purple)"><use href="#i-robot"/></svg>{{evolveStatus.meta_controller?.active ? '元策略训练中…' : '训练元策略'}}
-            </button>
-          </div>
-          <!-- 训练参数（P2-12：可编辑 + 保存；含「指定品种+时间周期」） -->
-          <div class="mac-card mb-3" :style="{borderColor:'rgba(255,159,10,.3)'}">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-[13px] font-semibold"><svg width="14" height="14" style="color:var(--orange);vertical-align:-2px;margin-right:3px"><use href="#i-settings"/></svg>训练配置</span>
-              <span class="text-[12px] text-slate-500">可热更新，保存后写入 config.yaml，重启保留</span>
-              <button class="mac-btn text-[12px] ml-auto" @click="saveEvolveConfig()" style="padding:3px 10px">保存配置</button>
-            </div>
-            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              <div class="col-span-2">
-                <div class="mac-label">训练标的池（二级菜单多选；留一个 = 固定品种训练）</div>
-                <div class="menu-drop" :class="{open: formDrop==='evolveSymbols'}" style="width:100%">
-                  <button class="mac-input" style="width:100%;display:flex;align-items:center;gap:6px" :data-form-key="'evolveSymbols'"
-                    :aria-expanded="formDrop==='evolveSymbols'?'true':'false'" aria-haspopup="true"
-                    @click.stop="toggleFormDrop('evolveSymbols', $event)">
-                    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{evolveSymbolsLabel}}</span>
-                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex:none"><path d="M6 9l6 6 6-6"/></svg>
-                  </button>
-                  <Teleport to="body">
-                    <div v-if="formDrop==='evolveSymbols'" ref="formDropMenu" class="menu-sub" :style="formDropStyle" @click.stop style="min-width:280px;max-height:320px;overflow-y:auto">
-                      <div class="text-[12px] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">可选品种（点击勾选/取消）</div>
-                      <span v-for="s in evolveSymbolOptions" :key="s" class="menu-item sub"
-                        :class="(normSymbols(evolveConfig.symbols)).includes(s)?'active':''"
-                        @click="toggleEvolveSymbol(s)" style="padding:5px 12px;justify-content:space-between">
-                        {{s}}<svg v-if="normSymbols(evolveConfig.symbols).includes(s)" width="11" height="11"><use href="#i-check"/></svg>
-                      </span>
-                      <div class="flex gap-1 mt-1" style="border-top:1px solid var(--border);padding:6px 8px 4px">
-                        <input v-model="evolveSymbolManual" class="mac-input" style="flex:1;min-width:0;padding:4px 8px" placeholder="输入其他交易对（如 DOGE/USDT）"
-                          @keydown.enter.prevent="addEvolveSymbolManual()"/>
-                        <button class="mac-btn" style="padding:3px 10px" @click="addEvolveSymbolManual()">添加</button>
-                      </div>
-                    </div>
-                  </Teleport>
-                </div>
-              </div>
-              <div>
-                <div class="mac-label">训练时间周期</div>
-                <mac-select v-model="evolveConfig.timeframe" :options="evolveTfOptions" style="width:100%"></mac-select>
-              </div>
-              <div>
-                <div class="mac-label">其他训练超参</div>
-                <div class="text-[12px] text-slate-500 mt-1">自动训练保持默认；调参请到下方「手动 DRL 实验台」</div>
-              </div>
-            </div>
-          </div>
-          <!-- 训练轮次曲线（P2-13） -->
-          <div class="mac-card mb-3">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-[13px] font-semibold"><svg width="14" height="14" style="color:var(--accent);vertical-align:-2px;margin-right:3px"><use href="#i-chart"/></svg>训练轮次曲线</span>
-              <div class="mac-seg" style="margin-left:auto">
-                <button class="mac-seg-btn" :class="evolveCurveModel==='factor_miner'?'active':''" @click="setEvolveCurveModel('factor_miner')">因子挖掘</button>
-                <button class="mac-seg-btn" :class="evolveCurveModel==='strategy_drl'?'active':''" @click="setEvolveCurveModel('strategy_drl')">策略 DRL</button>
-                <button class="mac-seg-btn" :class="evolveCurveModel==='meta_controller'?'active':''" @click="setEvolveCurveModel('meta_controller')">元策略</button>
-              </div>
-              <span class="text-[12px] text-slate-500 ml-auto">红点 = 拦截/回退轮次</span>
-            </div>
-            <div class="relative" style="height:180px">
-              <div id="evolveCurveChart" v-if="evolveCurveHasData" style="height:180px"></div>
-              <div v-else class="flex items-center justify-center text-[13px] text-slate-500" style="height:180px;border:1px dashed var(--border2);border-radius:var(--r-md)">{{evolveRoundsErr ? '训练轮次加载失败，请稍后重试' : '暂无训练轮次记录——点击「立即因子挖掘 / 立即策略训练」运行一轮后在此绘制曲线'}}</div>
-            </div>
-          </div>
-          <!-- 因子挖掘状态 -->
-          <div class="mac-card mb-3" :style="{borderColor:'rgba(63,140,255,.3)'}">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-[13px] font-semibold"><svg width="14" height="14" style="color:var(--accent);vertical-align:-2px;margin-right:3px"><use href="#i-dna"/></svg>因子挖掘 <span class="pill" style="font-size:11px;background:rgba(48,209,88,.15);color:#30d158;margin-left:2px">PPO</span></span>
-              <span v-if="evolveStatus.factor_miner?.symbol" class="text-[12px] px-2 py-0.5 rounded" :style="{background:'rgba(63,140,255,.15)',color:'rgba(63,140,255,.9)'}">{{evolveStatus.factor_miner.symbol}}</span>
-              <span class="text-[12px] text-slate-500">上次训练：{{evolveStatus.factor_miner?.last_run ? fmtTs(evolveStatus.factor_miner.last_run * 1000) : '尚未运行'}}</span>
-              <span class="ml-auto text-[12px] font-mono">{{evolveStatus.factor_miner?.episode||0}} 轮</span>
-            </div>
-            <div class="flex items-center gap-3">
-              <span class="text-[12px]">当前 fitness</span>
-              <span class="text-[15px] font-semibold" :class="(evolveStatus.factor_miner?.fitness||0)>=0?'pos':'neg'">
-                {{evolveStatus.factor_miner?.fitness?.toFixed(5) || '-'}}
-              </span>
-              <button class="mac-btn text-[12px] ml-auto" @click="showEvolveVersions('factor_miner')" style="padding:3px 10px">查看版本</button>
-            </div>
-            <div v-if="evolveStatus.factor_miner?.last_error" class="text-[12px] text-orange-400 mt-1 flex items-center gap-1">
-              <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>{{evolveStatus.factor_miner.last_error}}
-            </div>
-            <div v-if="evolveStatus.factor_miner?.oos_rejected" class="text-[12px] text-orange-400 mt-1 flex items-center gap-1">
-              <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>因子安检拦截：{{evolveStatus.factor_miner.oos_rejected}}
-            </div>
-            <div v-if="evolveStatus.factor_miner?.next_run" class="text-[12px] text-slate-500 mt-1">
-              下次训练：{{fmtTs(evolveStatus.factor_miner.next_run * 1000)}}
-            </div>
-            <div v-if="evolveVersions.length && evolveVersionName==='factor_miner'" class="mt-3" style="border-top:1px dashed var(--border);padding-top:8px">
-              <div class="flex items-center gap-2 mb-2">
-                <span class="text-[12px] font-semibold"><svg width="13" height="13" style="vertical-align:-1.5px;margin-right:3px"><use href="#i-list"/></svg>因子挖掘版本列表</span>
-                <button class="mac-btn text-[12px] ml-auto" @click="evolveVersions=[]" style="padding:2px 8px">关闭</button>
-              </div>
-              <table class="w-full">
-                <thead><tr class="text-slate-500"><th class="text-left">版本</th><th class="num">fitness</th><th class="text-left">时间</th><th class="text-left">操作</th></tr></thead>
-                <tbody>
-                  <tr v-for="v in evolveVersions" :key="v.version">
-                    <td>v{{v.version}} <span v-if="v.version===evolveBestVersion" class="pill green" style="font-size:12px">最佳</span></td>
-                    <td class="font-mono num">{{v.meta?.fitness?.toFixed(5)||'-'}}</td>
-                    <td class="text-slate-500">{{v.timestamp ? fmtTs(v.timestamp * 1000) : '-'}}</td>
-                    <td>
-                      <button class="mac-btn text-[12px]" @click="evolveRollback('factor_miner', v.version)" style="padding:1px 6px" :disabled="v.version===evolveBestVersion">回退</button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-          <!-- 策略DRL状态 -->
-          <div class="mac-card mb-3" :style="{borderColor:'rgba(139,92,246,.3)'}">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-[13px] font-semibold"><svg width="14" height="14" style="color:#8b5cf6;vertical-align:-2px;margin-right:3px"><use href="#i-brain"/></svg>策略 DRL <span class="pill" style="font-size:11px;background:rgba(139,92,246,.18);color:#c4a3f7;margin-left:2px">PPO</span></span>
-              <span v-if="evolveStatus.strategy_drl?.symbol" class="text-[12px] px-2 py-0.5 rounded" :style="{background:'rgba(139,92,246,.15)',color:'rgba(139,92,246,.9)'}">{{evolveStatus.strategy_drl.symbol}}</span>
-              <span class="text-[12px] text-slate-500">上次训练：{{evolveStatus.strategy_drl?.last_run ? fmtTs(evolveStatus.strategy_drl.last_run * 1000) : '尚未运行'}}</span>
-              <span class="ml-auto text-[12px] font-mono">{{evolveStatus.strategy_drl?.episode||0}} 轮</span>
-            </div>
-            <div class="flex items-center gap-3">
-              <span class="text-[12px]">当前收益</span>
-              <span class="text-[15px] font-semibold" :class="(evolveStatus.strategy_drl?.fitness||0)>=0?'pos':'neg'">
-                {{evolveStatus.strategy_drl?.fitness?.toFixed(5) || '-'}}
-              </span>
-              <button class="mac-btn text-[12px] ml-auto" @click="showEvolveVersions('strategy_drl')" style="padding:3px 10px">查看版本</button>
-            </div>
-            <div class="text-[12px] mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-slate-400">
-              <span>候选 <span class="font-mono" :class="(evolveStatus.strategy_drl?.candidate_fitness||0)>=0?'pos':'neg'">{{ (evolveStatus.strategy_drl?.candidate_fitness!=null ? evolveStatus.strategy_drl.candidate_fitness.toFixed(5) : '-') }}</span></span>
-              <span>部署 <span class="font-mono" :class="(evolveStatus.strategy_drl?.deployed_fitness||0)>=0?'pos':'neg'">{{ (evolveStatus.strategy_drl?.deployed_fitness!=null ? evolveStatus.strategy_drl.deployed_fitness.toFixed(5) : '-') }}</span><span v-if="evolveStatus.strategy_drl?.deployed_version" class="font-mono"> · v{{evolveStatus.strategy_drl.deployed_version}} <span v-if="evolveStatus.strategy_drl?.deployed_source==='demo'">(demo)</span></span></span>
-              <span v-if="evolveStatus.strategy_drl?.last_outcome" class="pill" :class="evolveStatus.strategy_drl.last_outcome==='accepted'?'green':(evolveStatus.strategy_drl.last_outcome==='failed'?'red':'orange')" style="font-size:11px">{{evolveStatus.strategy_drl.last_outcome}}</span>
-              <span v-if="evolveStatus.strategy_drl?.runtime_reload && evolveStatus.strategy_drl.runtime_reload!=='skipped'">热加载 {{evolveStatus.strategy_drl.runtime_reload}}</span>
-            </div>
-            <div v-if="evolveStatus.strategy_drl?.anchor_mismatch" class="text-[12px] text-slate-500 mt-1 flex items-center gap-1">
-              <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>锚点口径不一致，跳过对比：{{evolveStatus.strategy_drl.anchor_mismatch}}
-            </div>
-            <div v-if="evolveStatus.strategy_drl?.last_error" class="text-[12px] text-orange-400 mt-1 flex items-center gap-1">
-              <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>{{evolveStatus.strategy_drl.last_error}}
-            </div>
-            <div v-if="evolveStatus.strategy_drl?.cross_oos" class="text-[12px] mt-1" :class="(evolveStatus.strategy_drl.cross_oos.ret||0)>=0?'text-slate-500':'text-orange-400'">
-              跨标OOS：{{evolveStatus.strategy_drl.cross_oos.symbol}} 收益 {{evolveStatus.strategy_drl.cross_oos.ret?.toFixed(4)}} (仓位 {{evolveStatus.strategy_drl.cross_oos.position_ratio?.toFixed(3)||'-'}})
-            </div>
-            <div v-if="evolveStatus.strategy_drl?.next_run" class="text-[12px] text-slate-500 mt-1">
-              下次训练：{{fmtTs(evolveStatus.strategy_drl.next_run * 1000)}}
-            </div>
-            <div v-if="evolveVersions.length && evolveVersionName==='strategy_drl'" class="mt-3" style="border-top:1px dashed var(--border);padding-top:8px">
-              <div class="flex items-center gap-2 mb-2">
-                <span class="text-[12px] font-semibold"><svg width="13" height="13" style="vertical-align:-1.5px;margin-right:3px"><use href="#i-list"/></svg>策略 DRL 版本列表</span>
-                <button class="mac-btn text-[12px] ml-auto" @click="evolveVersions=[]" style="padding:2px 8px">关闭</button>
-              </div>
-              <table class="w-full">
-                <thead><tr class="text-slate-500"><th class="text-left">版本</th><th class="num">fitness</th><th class="text-left">时间</th><th class="text-left">操作</th></tr></thead>
-                <tbody>
-                  <tr v-for="v in evolveVersions" :key="v.version">
-                    <td>v{{v.version}} <span v-if="v.version===evolveBestVersion" class="pill green" style="font-size:12px">最佳</span></td>
-                    <td class="font-mono num">{{v.meta?.fitness?.toFixed(5)||'-'}}</td>
-                    <td class="text-slate-500">{{v.timestamp ? fmtTs(v.timestamp * 1000) : '-'}}</td>
-                    <td>
-                      <button class="mac-btn text-[12px]" @click="evolveRollback('strategy_drl', v.version)" style="padding:1px 6px" :disabled="v.version===evolveBestVersion">回退</button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-          <!-- 元策略控制器状态 -->
-          <div class="mac-card mb-3" :style="{borderColor:'rgba(191,90,242,.3)'}">
-            <div class="flex items-center gap-2 mb-2">
-              <span class="text-[13px] font-semibold"><svg width="14" height="14" style="color:var(--purple);vertical-align:-2px;margin-right:3px"><use href="#i-robot"/></svg>元策略控制器 <span class="pill" style="font-size:11px;background:rgba(191,90,242,.18);color:#e0b0ff;margin-left:2px">PPO</span></span>
-              <span v-if="evolveStatus.meta_controller?.symbol" class="text-[12px] px-2 py-0.5 rounded" :style="{background:'rgba(191,90,242,.15)',color:'rgba(191,90,242,.9)'}">{{evolveStatus.meta_controller.symbol}}</span>
-              <span class="text-[12px] text-slate-500">上次训练：{{evolveStatus.meta_controller?.last_run ? fmtTs(evolveStatus.meta_controller.last_run * 1000) : '尚未运行'}}</span>
-              <span class="ml-auto text-[12px] font-mono">{{evolveStatus.meta_controller?.episode||0}} 轮</span>
-            </div>
-            <div class="flex items-center gap-3">
-              <span class="text-[12px]">当前收益</span>
-              <span class="text-[15px] font-semibold" :class="(evolveStatus.meta_controller?.fitness||0)>=0?'pos':'neg'">
-                {{evolveStatus.meta_controller?.fitness?.toFixed(5) || '-'}}
-              </span>
-              <button class="mac-btn text-[12px] ml-auto" @click="showEvolveVersions('meta_controller')" style="padding:3px 10px">查看版本</button>
-            </div>
-            <div v-if="evolveStatus.meta_controller?.last_error" class="text-[12px] text-orange-400 mt-1 flex items-center gap-1">
-              <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>{{evolveStatus.meta_controller.last_error}}
-            </div>
-            <div v-if="evolveStatus.meta_controller?.oos_rejected" class="text-[12px] text-orange-400 mt-1 flex items-center gap-1">
-              <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>OOS 拦截：{{evolveStatus.meta_controller.oos_rejected}}
-            </div>
-            <div class="mt-2 text-[12px] text-slate-400">
-              子策略：{{(evolveStatus.meta_controller?.sub_strategies||'dual_ma,factor_signal,price_action').split(',').join(' / ')}} · 间隔 {{evolveStatus.meta_controller_interval||600}}s
-            </div>
-            <div v-if="evolveVersions.length && evolveVersionName==='meta_controller'" class="mt-3" style="border-top:1px dashed var(--border);padding-top:8px">
-              <div class="flex items-center gap-2 mb-2">
-                <span class="text-[12px] font-semibold"><svg width="13" height="13" style="vertical-align:-1.5px;margin-right:3px"><use href="#i-list"/></svg>元策略控制器版本列表</span>
-                <button class="mac-btn text-[12px] ml-auto" @click="evolveVersions=[]" style="padding:2px 8px">关闭</button>
-              </div>
-              <table class="w-full">
-                <thead><tr class="text-slate-500"><th class="text-left">版本</th><th class="num">fitness</th><th class="text-left">时间</th><th class="text-left">操作</th></tr></thead>
-                <tbody>
-                  <tr v-for="v in evolveVersions" :key="v.version">
-                    <td>v{{v.version}} <span v-if="v.version===evolveBestVersion" class="pill green" style="font-size:12px">最佳</span></td>
-                    <td class="font-mono num">{{v.meta?.fitness?.toFixed(5)||'-'}}</td>
-                    <td class="text-slate-500">{{v.timestamp ? fmtTs(v.timestamp * 1000) : '-'}}</td>
-                    <td>
-                      <button class="mac-btn text-[12px]" @click="evolveRollback('meta_controller', v.version)" style="padding:1px 6px" :disabled="v.version===evolveBestVersion">回退</button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-          <!-- 版本详情：由各训练卡内「查看版本」触发，展示在对应卡下方 -->
         </div>
       </div>
-      <!-- 手动 DRL 实验台（已并入持续进化面板，折叠展示） -->
-      <div class="mac-card mb-3" style="border-color:rgba(88,130,255,.3)">
-        <div class="flex items-center gap-2 mb-2">
-          <span class="text-[13px] font-semibold"><svg width="14" height="14" style="color:var(--accent);vertical-align:-2px;margin-right:3px"><use href="#i-dna"/></svg>手动 DRL 实验台</span>
-          <span class="text-[12px] text-slate-500">一次性手动训练 · 模型库 · 跨行情评估（自动持续训练见上方）</span>
+
+      <!-- 训练配置：标的池 / 周期，可热更新写入 config.yaml -->
+      <div class="evolve-layout">
+      <div class="evolve-side-column">
+      <div class="mac-window evolve-side-config">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div>
+          <span class="mac-title"><svg><use href="#i-settings"/></svg>训练配置</span>
+          <span class="text-[12px] text-slate-500">可热更新，保存后写入 config.yaml</span>
+          <button class="mac-btn text-[12px] ml-auto" @click="saveEvolveConfig()" style="padding:3px 10px">保存配置</button>
+        </div>
+        <div class="mac-body">
+          <div class="grid grid-cols-2 lg:grid-cols-3 gap-3">
+            <div class="col-span-2">
+              <div class="mac-label">训练标的池（二级菜单多选；留一个 = 固定品种训练）</div>
+              <div class="menu-drop" :class="{open: formDrop==='evolveSymbols'}" style="width:100%">
+                <button class="mac-input" style="width:100%;display:flex;align-items:center;gap:6px" :data-form-key="'evolveSymbols'"
+                  :aria-expanded="formDrop==='evolveSymbols'?'true':'false'" aria-haspopup="true"
+                  @click.stop="toggleFormDrop('evolveSymbols', $event)">
+                  <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{evolveSymbolsLabel}}</span>
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex:none"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+                <Teleport to="body">
+                  <div v-if="formDrop==='evolveSymbols'" ref="formDropMenu" class="menu-sub" :style="formDropStyle" @click.stop style="min-width:280px;max-height:320px;overflow-y:auto">
+                    <div class="text-[12px] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">可选品种（点击勾选/取消）</div>
+                    <span v-for="s in evolveSymbolOptions" :key="s" class="menu-item sub"
+                      :class="(normSymbols(evolveConfig.symbols)).includes(s)?'active':''"
+                      @click="toggleEvolveSymbol(s)" style="padding:5px 12px;justify-content:space-between">
+                      {{s}}<svg v-if="normSymbols(evolveConfig.symbols).includes(s)" width="11" height="11"><use href="#i-check"/></svg>
+                    </span>
+                    <div class="flex gap-1 mt-1" style="border-top:1px solid var(--border);padding:6px 8px 4px">
+                      <input v-model="evolveSymbolManual" class="mac-input" style="flex:1;min-width:0;padding:4px 8px" placeholder="输入其他交易对（如 DOGE/USDT）"
+                        @keydown.enter.prevent="addEvolveSymbolManual()"/>
+                      <button class="mac-btn" style="padding:3px 10px" @click="addEvolveSymbolManual()">添加</button>
+                    </div>
+                  </div>
+                </Teleport>
+              </div>
+            </div>
+            <div>
+              <div class="mac-label">训练时间周期</div>
+              <mac-select v-model="evolveConfig.timeframe" :options="evolveTfOptions" style="width:100%"></mac-select>
+            </div>
+          </div>
+          <div class="text-[12px] text-slate-500 mt-2">自动训练保持默认超参；需要调参请到下方「手动 DRL 实验台」</div>
+        </div>
+      </div>
+
+      <div v-if="evolveAnchorIssues.length" class="mac-window evolve-side-anchor" :style="{borderColor: evolveAnchorLocked ? 'rgba(255,69,58,.45)' : 'rgba(255,159,10,.3)'}">
+        <div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div><span class="mac-title"><svg :style="{color:evolveAnchorLocked ? 'var(--red)':'var(--orange)'}"><use href="#i-alert"/></svg>回退基线（锚点）</span></div>
+        <div class="mac-body"><p class="text-[12px] text-slate-500">新模型须与锚点同口径比较，连续未接受会触发告警。</p>
+          <div v-for="a in evolveAnchorIssues" :key="a.model" class="evolve-anchor-item"><div class="flex items-center gap-2"><span class="pill" :class="a.tone">{{a.tag}}</span><strong class="text-[12.5px]">{{a.label}}</strong></div><div class="text-[12px] text-slate-500">fitness={{a.fitness}} · 来源 {{a.source}} · 未接受 {{a.streak}}/{{a.stallRounds}} 轮</div><div class="text-[12px]" style="color:var(--muted)">{{a.reason}}</div><button v-if="a.resettable" class="mac-btn text-[12px]" style="padding:3px 10px" @click="resetEvolveAnchor(a.model)">重置锚点</button></div>
+        </div>
+      </div>
+      <div class="mac-window evolve-side-trigger"><div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div><span class="mac-title"><svg><use href="#i-play"/></svg>手动触发训练</span></div><div class="mac-body evolve-trigger-stack"><button class="mac-btn cyan" @click="triggerFactorMiner()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.factor_miner?.active"><svg width="13" height="13"><use href="#i-dna"/></svg>{{evolveStatus.factor_miner?.active ? '因子挖掘中…' : '立即因子挖掘'}}</button><button class="mac-btn purple" @click="triggerStrategyDrl()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.strategy_drl?.active"><svg width="13" height="13"><use href="#i-brain"/></svg>{{evolveStatus.strategy_drl?.active ? '策略训练中…' : '立即策略训练'}}</button><button class="mac-btn purple" @click="triggerMetaController()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.meta_controller?.active"><svg width="13" height="13"><use href="#i-robot"/></svg>{{evolveStatus.meta_controller?.active ? '元策略训练中…' : '训练元策略'}}</button><span class="text-[12px] text-slate-500">手动训练不影响自动调度，结果将参与锚点对比。</span></div></div>
+
+      </div>
+
+      <div class="evolve-main-column">
+      <!-- 训练轮次曲线：红点为拦截/回退轮次 -->
+      <div class="mac-window evolve-main-curve">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div>
+          <span class="mac-title"><svg><use href="#i-chart"/></svg>训练轮次曲线</span>
+          <span class="text-[12px] text-slate-500 ml-auto">{{evolveCurveStat}}</span>
+        </div>
+        <div class="mac-body">
+            <div class="mac-seg evolve-curve-tabs" style="margin-left:auto">
+              <button class="mac-seg-btn" :class="evolveCurveModel==='factor_miner'?'active':''" @click="setEvolveCurveModel('factor_miner')">因子挖掘</button>
+              <button class="mac-seg-btn" :class="evolveCurveModel==='strategy_drl'?'active':''" @click="setEvolveCurveModel('strategy_drl')">策略 DRL</button>
+              <button class="mac-seg-btn" :class="evolveCurveModel==='meta_controller'?'active':''" @click="setEvolveCurveModel('meta_controller')">元策略</button>
+            </div>
+          <div class="relative evolve-chart-wrap" style="height:220px">
+            <div id="evolveCurveChart" v-if="evolveCurveHasData" style="height:220px"></div>
+            <div v-else class="flex items-center justify-center text-[13px] text-slate-500" style="height:220px;border:1px dashed var(--border2);border-radius:var(--r-md)">{{evolveRoundsErr ? '训练轮次加载失败，请稍后重试' : '暂无训练轮次记录——点击「立即因子挖掘 / 立即策略训练」运行一轮后在此绘制曲线'}}</div>
+          </div>
+          <div class="evolve-curve-foot">
+            <span><i class="evolve-legend-dot blue"></i>fitness（每轮训练目标）</span>
+            <span><i class="evolve-legend-dot red"></i>拦截 / 回退轮次</span>
+            <span><i class="evolve-legend-dot orange"></i>挑战者未晋升</span>
+            <span class="ml-auto">滚轮缩放 · 拖拽下方滑块回看更早轮次</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 模型状态：三张卡由 EVOLVE_MODELS 配置驱动（见脚本区） -->
+      <div class="mac-window evolve-main-models">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div>
+          <span class="mac-title"><svg><use href="#i-dna"/></svg>模型状态</span>
+        </div>
+        <div class="mac-body">
+          <!-- 三张模型状态卡：结构完全一致，此前是三份复制粘贴（约 140 行），
+               改一处要改三处且极易漏。现抽成配置数组 + v-for 单模板（约 60 行）。
+               各模型独有字段（候选/部署、跨标 OOS、锚点不一致、子策略）用 v-if 保留，
+               数据里没有这些字段的模型自然不渲染，功能零丢失。 -->
+          <div class="evolve-model-grid">
+          <div v-for="m in EVOLVE_MODELS" :key="m.key" class="mac-card mb-3 evolve-model-card" :style="{borderColor:m.border}">
+            <div class="flex items-center gap-2 mb-2 evolve-model-head">
+              <span class="text-[13px] font-semibold"><svg width="14" height="14" :style="{color:m.color,verticalAlign:'-2px',marginRight:'3px'}"><use :href="m.icon"/></svg>{{m.name}} <span class="pill" :style="{fontSize:'11px',background:m.pillBg,color:m.pillColor,marginLeft:'2px'}">PPO</span></span>
+              <span v-if="evolveModel(m.key).symbol" class="text-[12px] px-2 py-0.5 rounded" :style="{background:m.chipBg,color:m.chipColor}">{{evolveModel(m.key).symbol}}</span>
+              <span class="text-[12px] text-slate-500">上次训练：{{evolveModel(m.key).last_run ? fmtTs(evolveModel(m.key).last_run * 1000) : '尚未运行'}}</span>
+              <span class="ml-auto text-[12px] font-mono">{{evolveModel(m.key).episode||0}} 轮</span>
+            </div>
+            <div class="flex items-center gap-3 evolve-fitness">
+              <span class="text-[12px]">{{m.fitnessLabel}}</span>
+              <span class="text-[15px] font-semibold" :class="(evolveModel(m.key).fitness||0)>=0?'pos':'neg'">
+                {{evolveModel(m.key).fitness?.toFixed(5) || '-'}}
+              </span>
+              <button class="mac-btn text-[12px] ml-auto" @click="showEvolveVersions(m.key)" style="padding:3px 10px">查看版本</button>
+            </div>
+            <!-- 策略 DRL 独有：候选 / 部署 / 上轮结论 / 热加载 -->
+            <div v-if="evolveModel(m.key).candidate_fitness!=null || evolveModel(m.key).deployed_fitness!=null || evolveModel(m.key).last_outcome" class="text-[12px] mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-slate-400">
+              <span v-if="evolveModel(m.key).candidate_fitness!=null">候选 <span class="font-mono" :class="(evolveModel(m.key).candidate_fitness||0)>=0?'pos':'neg'">{{evolveModel(m.key).candidate_fitness.toFixed(5)}}</span></span>
+              <span v-if="evolveModel(m.key).deployed_fitness!=null">部署 <span class="font-mono" :class="(evolveModel(m.key).deployed_fitness||0)>=0?'pos':'neg'">{{evolveModel(m.key).deployed_fitness.toFixed(5)}}</span><span v-if="evolveModel(m.key).deployed_version" class="font-mono"> · v{{evolveModel(m.key).deployed_version}}<span v-if="evolveModel(m.key).deployed_source==='demo'"> (demo)</span></span></span>
+              <span v-if="evolveModel(m.key).last_outcome" class="pill" :class="evolveModel(m.key).last_outcome==='accepted'?'green':(evolveModel(m.key).last_outcome==='failed'?'red':'orange')" style="font-size:11px">{{evolveModel(m.key).last_outcome}}</span>
+              <span v-if="evolveModel(m.key).runtime_reload && evolveModel(m.key).runtime_reload!=='skipped'">热加载 {{evolveModel(m.key).runtime_reload}}</span>
+            </div>
+            <div v-if="evolveModel(m.key).anchor_mismatch" class="text-[12px] text-slate-500 mt-1 flex items-center gap-1">
+              <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>锚点口径不一致，跳过对比：{{evolveModel(m.key).anchor_mismatch}}
+            </div>
+            <div v-if="evolveModel(m.key).last_error" class="text-[12px] text-orange-400 mt-1 flex items-center gap-1">
+              <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>{{evolveModel(m.key).last_error}}
+            </div>
+            <div v-if="evolveModel(m.key).oos_rejected" class="text-[12px] text-orange-400 mt-1 flex items-center gap-1">
+              <svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>{{m.rejectedLabel}}{{evolveModel(m.key).oos_rejected}}
+            </div>
+            <div v-if="evolveModel(m.key).cross_oos" class="text-[12px] mt-1" :class="(evolveModel(m.key).cross_oos.ret||0)>=0?'text-slate-500':'text-orange-400'">
+              跨标OOS：{{evolveModel(m.key).cross_oos.symbol}} 收益 {{evolveModel(m.key).cross_oos.ret?.toFixed(4)}} (仓位 {{evolveModel(m.key).cross_oos.position_ratio?.toFixed(3)||'-'}})
+            </div>
+            <!-- 元策略控制器独有：子策略与训练间隔 -->
+            <div v-if="m.key==='meta_controller'" class="mt-2 text-[12px] text-slate-400">
+              子策略：{{(evolveModel(m.key).sub_strategies||'dual_ma,factor_signal,price_action').split(',').join(' / ')}} · 间隔 {{evolveStatus.meta_controller_interval||600}}s
+            </div>
+            <div v-if="evolveModel(m.key).next_run" class="text-[12px] text-slate-500 mt-1">
+              下次训练：{{fmtTs(evolveModel(m.key).next_run * 1000)}}
+            </div>
+          </div>
+          </div>
+        </div>
+      </div>
+      </div>
+      </div>
+      <!-- 版本列表弹层：原先插在模型卡内部，展开瞬间卡片高度翻倍、下方内容整体下跳。
+           改为独立弹层后零布局跳动；且某模型暂无版本时也能给出空态，而不是点了没反应。 -->
+      <transition name="fade">
+        <div v-if="evolveVersionsOpen" class="ui-overlay" style="background:rgba(0,0,0,.7);backdrop-filter:blur(10px) saturate(120%)" @click.self="closeEvolveVersions()">
+          <div class="mac-window" style="width:min(680px,92vw);max-height:80vh;display:flex;flex-direction:column">
+            <div class="mac-titlebar">
+              <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
+              <span class="mac-title"><svg><use href="#i-list"/></svg>{{evolveVersionTitle}}</span>
+              <button class="mac-btn text-[12px] ml-auto" @click="closeEvolveVersions()" style="padding:3px 10px">关闭</button>
+            </div>
+            <div class="mac-body" style="overflow:auto">
+              <template v-if="evolveVersions.length">
+                <table class="w-full">
+                  <thead><tr class="text-slate-500"><th class="text-left">版本</th><th class="num">fitness</th><th class="text-left">时间</th><th class="text-left">操作</th></tr></thead>
+                  <tbody>
+                    <tr v-for="v in evolveVersions" :key="v.version">
+                      <td>v{{v.version}} <span v-if="v.version===evolveBestVersion" class="pill green" style="font-size:12px">最佳</span></td>
+                      <td class="font-mono num">{{v.meta?.fitness?.toFixed(5)||'-'}}</td>
+                      <td class="text-slate-500">{{v.timestamp ? fmtTs(v.timestamp * 1000) : '-'}}</td>
+                      <td>
+                        <button class="mac-btn text-[12px]" @click="evolveRollback(evolveVersionName, v.version)" style="padding:1px 6px" :disabled="v.version===evolveBestVersion">回退</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </template>
+              <div v-else class="empty-state"><span class="e-ico"><svg><use href="#i-inbox"/></svg></span><span class="e-txt">该模型暂无可回退版本</span></div>
+            </div>
+          </div>
+        </div>
+      </transition>
+
+      <!-- 手动 DRL 实验台：从裸卡提升为独立玻璃窗，与「持续进化引擎」同级。
+           此前 270 行内容以 mac-card 形式游离于窗口体系之外，视觉上像"贴在页面上的补丁"。 -->
+      <div class="mac-window evolve-lab">
+        <div class="mac-titlebar">
+          <div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div>
+          <span class="mac-title"><svg><use href="#i-dna"/></svg>手动 DRL 实验台</span>
+          <span class="text-[12px] text-slate-500">一次性手动训练 · 模型库 · 跨行情评估</span>
           <button class="mac-btn text-[12px] ml-auto" @click="drlPanelOpen=!drlPanelOpen" style="padding:3px 10px">{{drlPanelOpen?'收起':'展开'}}</button>
         </div>
         <div v-show="drlPanelOpen">
@@ -2858,6 +3074,8 @@
           <div class="flex gap-1 mb-4">
             <button class="mac-seg-btn" :class="drlMode==='factor'?'active':''" @click="drlMode='factor'">RL 因子挖掘</button>
             <button class="mac-seg-btn" :class="drlMode==='strategy'?'active':''" @click="drlMode='strategy'">自适应策略训练</button>
+            <button class="mac-seg-btn" :class="drlMode==='models'?'active':''" @click="drlMode='models'">已训练模型库</button>
+            <button class="mac-seg-btn" :class="drlMode==='oos'?'active':''" @click="drlMode='oos'">跨行情 OOS</button>
           </div>
 
           <!-- 模式一：RL 因子组合挖掘 -->
@@ -3021,8 +3239,11 @@
 
           </template>
 
-          <div>
-            <div class="mac-label mb-2">已训练模型库</div>
+          <div v-if="drlMode==='models'">
+            <div class="flex items-center gap-2 mb-2">
+              <div class="mac-label mb-0">已训练模型库</div>
+              <button class="mac-btn ml-auto" style="padding:3px 10px;font-size:12px" @click="loadDrlModels()">刷新</button>
+            </div>
             <table>
               <thead><tr><th>模型名</th><th class="num">大小</th><th class="num">创建时间</th><th></th></tr></thead>
               <tbody>
@@ -3048,7 +3269,7 @@
           </div>
 
           <!-- 跨行情 OOS 独立评估：换币种/周期/时间段 -->
-          <div class="mt-4 mac-card" style="background:rgba(0,0,0,.18); border-color:rgba(88,130,255,.3)">
+          <div v-if="drlMode==='oos'" class="mt-4 mac-card" style="background:rgba(0,0,0,.18); border-color:rgba(88,130,255,.3)">
             <div class="flex items-center gap-2 mb-2">
               <span class="mac-label mb-0"><svg class="i-ico"><use href="#i-refresh"/></svg>跨行情泛化评估（换币种/周期/时间段）</span>
               <span class="text-[12px] text-slate-500">把模型放到一段从未见过的行情上检验，避免只会背行情</span>
@@ -3379,6 +3600,9 @@ const app = createApp({
     // 行情视图已移除：残留的 ?view=market / 旧 localStorage 值一律回退仪表盘
     const __initialView = new URLSearchParams(location.search).get('view') || localStorage.getItem(VIEW_KEY) || 'dashboard';
     const view = ref(__initialView === 'market' ? 'dashboard' : __initialView);
+    // 卡片入场动画（.mac-window/.stat-card/.fade-num 等）只在首屏播一次，由 <html data-boot> 门控。
+    // 这里兜底：即便用户一直不切菜单，1.6s 后也摘掉开关，杜绝"切菜单时动画播到一半被取消"。
+    setTimeout(()=>document.documentElement.removeAttribute('data-boot'), 1600);
     const settingsTab = ref(new URLSearchParams(location.search).get('tab') || 'ai');
     const tblDensity = ref(localStorage.getItem('cat_density') || 'cozy');
     const theme = ref(localStorage.getItem('cat_theme') || (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
@@ -3741,10 +3965,45 @@ const app = createApp({
       factor_miner_interval:60, strategy_drl_interval:60, meta_controller_interval:600,
       rolling_window:5000, rollback_threshold:0.95,
       symbols:["BTC/USDT","ETH/USDT","SOL/USDT"], current_symbol:"BTC/USDT",
+      supervisor:null,   // 保活监督状态（巡检心跳/自愈次数/降级判定），由 /evolve/status 注入
     });
     const evolveVersions = ref([]);
     const evolveVersionName = ref('');
     const evolveBestVersion = ref(0);
+    // 三张模型状态卡的差异只有「名称/图标/配色/个别文案」，数据与字段级差异交给 v-if。
+    // 新增一个训练模型只需在此加一项配置，模板零改动。
+    const EVOLVE_MODELS = [
+      { key:'factor_miner', name:'因子挖掘', icon:'#i-dna', color:'var(--accent)',
+        pillBg:'rgba(48,209,88,.15)', pillColor:'#30d158',
+        chipBg:'rgba(63,140,255,.15)', chipColor:'rgba(63,140,255,.9)',
+        border:'rgba(63,140,255,.3)', fitnessLabel:'当前 fitness',
+        versionTitle:'因子挖掘版本列表', rejectedLabel:'因子安检拦截：' },
+      { key:'strategy_drl', name:'策略 DRL', icon:'#i-brain', color:'#8b5cf6',
+        pillBg:'rgba(139,92,246,.18)', pillColor:'#c4a3f7',
+        chipBg:'rgba(139,92,246,.15)', chipColor:'rgba(139,92,246,.9)',
+        border:'rgba(139,92,246,.3)', fitnessLabel:'当前收益',
+        versionTitle:'策略 DRL 版本列表', rejectedLabel:'OOS 拦截：' },
+      { key:'meta_controller', name:'元策略控制器', icon:'#i-robot', color:'var(--purple)',
+        pillBg:'rgba(191,90,242,.18)', pillColor:'#e0b0ff',
+        chipBg:'rgba(191,90,242,.15)', chipColor:'rgba(191,90,242,.9)',
+        border:'rgba(191,90,242,.3)', fitnessLabel:'当前收益',
+        versionTitle:'元策略控制器版本列表', rejectedLabel:'OOS 拦截：' },
+    ];
+    function evolveModel(key) { return evolveStatus[key] || {}; }
+    function evolveNextRun() {
+      const runs = ['factor_miner', 'strategy_drl', 'meta_controller']
+        .map(key => Number(evolveStatus[key]?.next_run || 0))
+        .filter(value => value > 0);
+      return runs.length ? fmtTs(Math.min(...runs) * 1000) : '按计划运行';
+    }
+    // 版本列表弹层开关：与 evolveVersions 分开，这样"一个版本都没有"时也能开弹层给空态
+    const evolveVersionsOpen = ref(false);
+    let evolveVersionRequest = 0;
+    const evolveVersionTitle = computed(()=> {
+      const m = EVOLVE_MODELS.find(x => x.key === evolveVersionName.value);
+      return m ? m.versionTitle : '模型版本列表';
+    });
+    function closeEvolveVersions() { evolveVersionsOpen.value = false; evolveVersions.value = []; }
     // 轮询陈旧指示：最近成功时间戳 + 连续失败计数（≥3 次约 15s 时面板顶部显示黄色提示条）
     const lastEvolveOkTs = ref(0);
     const evolveFailStreak = ref(0);
@@ -3770,12 +4029,19 @@ const app = createApp({
       catch(e) { toast('恢复失败：'+(e.message||e),'error'); }
     }
     async function showEvolveVersions(name) {
+      const requestId = ++evolveVersionRequest;
       evolveVersionName.value = name;
+      evolveVersions.value = [];
+      evolveBestVersion.value = 0;
+      evolveVersionsOpen.value = true;
       try {
         const d = await api('/evolve/versions?name='+name);
+        if (requestId !== evolveVersionRequest || evolveVersionName.value !== name) return;
         evolveVersions.value = d.versions || [];
         evolveBestVersion.value = d.best_version || 0;
-      } catch(e) { toast('获取版本列表失败','error'); }
+      } catch(e) {
+        if (requestId === evolveVersionRequest) toast('获取版本列表失败','error');
+      }
     }
     async function evolveRollback(name, version) {
       if (!confirm('确认回退到 v'+version+'？当前最佳将被覆盖。')) return;
@@ -3876,14 +4142,34 @@ const app = createApp({
     }
     // ---- 持续进化：训练轮次曲线（P2-13） ----
     const evolveRounds = reactive({factor_miner:[], strategy_drl:[], meta_controller:[]});
+    const evolveRoundsTotal = reactive({factor_miner:0, strategy_drl:0, meta_controller:0});
     const evolveCurveModel = ref('strategy_drl');
     const evolveCurveHasData = computed(()=> (evolveRounds[evolveCurveModel.value]||[]).length > 0);
+    // 轮次状态语义（两级，取自 drl/evolve_engine.py 的实际判定，不混为一色）：
+    //   拦截/回退 = oos_rejected / cross_rejected / rollback / demo_blocked
+    //               —— 本轮被拦下或回退，未产出可用模型（红）
+    //   挑战者未晋升 = challenger_degraded（相对自身谱系退化，只存档不更新）
+    //                / challenger_kept（未显著优于冠军，保留冠军）（橙）
+    // 此前这两类都不在红点集合内，被当成「正常」漏标。
+    const EVOLVE_STOP_STATUS = new Set(['oos_rejected','cross_rejected','rollback','demo_blocked']);
+    const EVOLVE_CHALLENGER_STATUS = new Set(['challenger_degraded','challenger_kept']);
+    const evolveCurveStat = computed(()=>{
+      const rows = evolveRounds[evolveCurveModel.value] || [];
+      if (!rows.length) return '红点 = 拦截 / 回退轮次';
+      const stop = rows.filter(r=>EVOLVE_STOP_STATUS.has(r.status)).length;
+      const chal = rows.filter(r=>EVOLVE_CHALLENGER_STATUS.has(r.status)).length;
+      const total = evolveRoundsTotal[evolveCurveModel.value] || rows.length;
+      return `显示 ${rows.length}/${total} 轮 · 拦截 ${stop} · 未晋升 ${chal}`;
+    });
     let evolveCurveChart = null;
     async function fetchEvolveRounds(model) {
       try {
         const d = await api('/evolve/rounds?model='+model+'&limit=120');
         evolveRoundsErr.value = false;
-        if (d && d.rounds) evolveRounds[model] = d.rounds || [];
+        if (d && d.rounds) {
+          evolveRounds[model] = d.rounds || [];
+          evolveRoundsTotal[model] = d.total || (d.rounds || []).length;
+        }
         // 数据异步到达后必须重绘（否则 renderEvolveCurve 在数据前执行会因 rows 空直接返回，曲线永远空白）
         if (view.value==='evolve' && (evolveRounds[model]||[]).length) renderEvolveCurve();
       } catch(e) {
@@ -3904,7 +4190,13 @@ const app = createApp({
         const el = document.getElementById('evolveCurveChart');
         if (!el) return;
         const rows = evolveRounds[evolveCurveModel.value] || [];
-        if (!rows.length) return;
+        if (!rows.length) {
+          // 无数据（切到暂无轮次的模型/接口清空）：显式销毁上一个模型的残留实例，
+          // 防止旧画布悬挂在已移除的 DOM 上、切回时拿到脏实例导致曲线空白
+          if (evolveCurveChart && !evolveCurveChart.isDisposed?.()) evolveCurveChart.dispose();
+          evolveCurveChart = null;
+          return;
+        }
         // v-if 重建过图表 div（无数据↔有数据/切模型）时旧实例绑在已移除节点上，
         // 直接 setOption 会画到脱离文档的 DOM 上（表现为曲线空白），必须换绑
         if (!evolveCurveChart || evolveCurveChart.isDisposed?.() || el._chart !== evolveCurveChart) {
@@ -3913,32 +4205,95 @@ const app = createApp({
         }
         if (!evolveCurveChart) return;
         const ct = chartTheme();
-        const pts = rows.map(r=>[r.round_no||r.id, r.fitness]);
-        // 拦截轮次用散点标出（oos_rejected / cross_rejected / demo_blocked / rollback）
-        const bad = rows.filter(r=>['oos_rejected','cross_rejected','rollback','demo_blocked'].includes(r.status))
-                        .map(r=>({value:[r.round_no||r.id, r.fitness], status:r.status}));
+        // P4-E3：series 数据必须用「纯值」（按 category 索引对齐），不能用 [x,y] 对——
+        // ECharts 5.5 对 category 轴 + [x,y] 对会把数字 x 当"数组索引"而非 category
+        // 匹配：轮次号(219+)超出 120 个索引 → 全部点被静默丢弃，表现为"有图表无折线无散点"
+        //（canvas 只有网格/坐标轴）。曾用 [r.round_no||r.id, r.fitness] 对，曲线永远空白。
+        const pts = rows.map(r=>r.fitness);
+        // 状态点画在「底部事件轨」上（副轴 y=0.06），而非各自 fitness 取值处。
+        // 原实现把红点画在 fitness 坐标上，而拦截往往成片出现（实测 strategy_drl
+        // 近 120 轮有 101 轮被拦/回退 + 19 轮挑战者未晋升），散点于是密铺满整个绘图区、
+        // 与折线彻底糊在一起。移到独立轨道后，曲线区只剩一条干净的 fitness 线。
+        const stopPts = rows.map(r=>EVOLVE_STOP_STATUS.has(r.status) ? 0.06 : null);
+        const chalPts = rows.map(r=>EVOLVE_CHALLENGER_STATUS.has(r.status) ? 0.06 : null);
+        const stopCount = stopPts.filter(v=>v!==null).length;
+        const chalCount = chalPts.filter(v=>v!==null).length;
+        // y 轴留白：向外扩 span 的 15%。原 scale:true 让轴紧贴数据 min/max，
+        // 而逐轮 fitness 抖动极大（实测 strategy_drl 相邻轮差分均值 = 总跨度的 17.6%），
+        // 拉满量程后曲线呈满屏锯齿状，这是"看起来很乱"的主因之一。
+        const fin = pts.filter(v=>v!=null && isFinite(v));
+        let yMin = null, yMax = null;
+        if (fin.length) {
+          const lo = Math.min.apply(null, fin), hi = Math.max.apply(null, fin);
+          const span = hi - lo;
+          const pad = span > 1e-9 ? span * 0.15 : (Math.abs(hi) * 0.1 || 0.01);
+          yMin = lo - pad; yMax = hi + pad;
+        }
+        // 默认只显示最后 50 轮（120 点挤进 220px 高仍偏密），可滚轮缩放 / 拖滑块回看全部
+        const n = rows.length;
+        const win = Math.min(n, 50);
+        const zoomStart = n > win ? (1 - win / n) * 100 : 0;
         const series = [
-          {type:'line', name:'fitness', data:pts, showSymbol:true, symbolSize:5,
-           lineStyle:{color:ct.accent,width:2}, itemStyle:{color:ct.accent}},
+          {type:'line', name:'fitness', data:pts, showSymbol:false, symbol:'circle', symbolSize:5,
+           smooth:false, z:3,
+           lineStyle:{color:ct.accent, width:1.9}, itemStyle:{color:ct.accent},
+           areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[
+             {offset:0,color:ct.accentSoft},{offset:1,color:ct.accentSoft2}]}}},
         ];
-        if (bad.length) {
-          series.push({type:'scatter', name:'拦截/回退', data:bad.map(b=>b.value), symbolSize:9,
-                       itemStyle:{color:'#ff453a'}});
+        // 散点 data 必须与 rows 等长（索引对齐 category 轴），非该状态位填 null 跳过——
+        // 若只放子集，scatter 独立索引会对齐子集内部而非全局，点会串到错误的轮次位置。
+        if (stopCount) {
+          series.push({type:'scatter', name:'拦截/回退', yAxisIndex:1, z:5,
+                       data: stopPts, symbol:'circle', symbolSize:6,
+                       itemStyle:{color:ct.down, opacity:.95}});
+        }
+        if (chalCount) {
+          series.push({type:'scatter', name:'挑战者未晋升', yAxisIndex:1, z:4,
+                       data: chalPts, symbol:'circle', symbolSize:6,
+                       itemStyle:{color:ct.orange, opacity:.95}});
         }
         evolveCurveChart.setOption({
+          // notMerge：series 数量随「有/无拦截轮次」变化，合并模式下切模型时
+          // 上一个模型残留的 scatter 会留在新图上（红点串到错误的轮次位置）
+          notMerge:true,
           animation:false, backgroundColor:'transparent',
           tooltip:{trigger:'axis', backgroundColor:ct.tooltip, borderColor:ct.tooltipBorder,
                    textStyle:{color:ct.text, fontSize:11}, formatter: function(params){
-                     const p = params[0];
-                     const r = rows[p?.dataIndex ?? p?.data?.[0] ?? 0];
+                     const p = Array.isArray(params) ? params[0] : params;
+                     // 折线/拦截散点的 data 均与 rows 等长（索引对齐），直接按 dataIndex 反查
+                     const r = rows[p.dataIndex] || null;
                      if (!r) return '';
-                     const st = r.status==='ok' ? '正常' : ({oos_rejected:'OOS拦截',cross_rejected:'跨标拦截',rollback:'回退',demo_blocked:'演示数据'}[r.status]||r.status);
-                     return `${r.symbol||''} ${r.timeframe||''} 轮${r.round_no||r.id}<br/>fitness=${r.fitness}<br/>OOS=${r.oos_ret} 衰减=${r.decay} 仓位=${r.position_ratio}<br/>状态:${st} (${r.data_source})`;
+                     const stName = {ok:'正常', oos_rejected:'OOS拦截', cross_rejected:'跨标拦截',
+                                     rollback:'回退', demo_blocked:'演示数据',
+                                     challenger_degraded:'候选退化', challenger_kept:'候选保留'};
+                     const st = stName[r.status] || r.status;
+                     const num = v => (v==null || !isFinite(v)) ? '-' : Number(v).toFixed(4);
+                     return `${r.symbol||''} ${r.timeframe||''} 轮${r.round_no||r.id}<br/>` +
+                            `fitness=${num(r.fitness)}<br/>` +
+                            `OOS=${num(r.oos_ret)} 衰减=${num(r.decay)} 仓位=${num(r.position_ratio)}<br/>` +
+                            `状态:${st} (${r.data_source})`;
                    }},
-          grid:{left:55,right:16,top:20,bottom:32},
-          xAxis:{type:'category', data:rows.map(r=>r.round_no||r.id), axisLine:{lineStyle:{color:ct.line}},
-                 axisLabel:{color:ct.axis, fontSize:10}},
-          yAxis:{type:'value', scale:true, splitLine:{lineStyle:{color:ct.split}}, axisLabel:{color:ct.axis, fontSize:10}},
+          grid:{left:56,right:18,top:16,bottom:48},
+          xAxis:{type:'category', data:rows.map(r=>r.round_no||r.id),
+                 axisLine:{lineStyle:{color:ct.line}}, axisTick:{show:false},
+                 axisLabel:{color:ct.axis, fontSize:10, hideOverlap:true, margin:8}},
+          yAxis:[
+            {type:'value', scale:false, min:yMin, max:yMax,
+             splitLine:{lineStyle:{color:ct.split}}, axisLabel:{color:ct.axis, fontSize:10}},
+            // 事件轨专用轴：不显示，仅给拦截点一个「贴底」的坐标（0..1）
+            {type:'value', min:0, max:1, show:false},
+          ],
+          dataZoom:[
+            {type:'inside', xAxisIndex:0, start:zoomStart, end:100, throttle:40},
+            {type:'slider', xAxisIndex:0, start:zoomStart, end:100, height:14, bottom:6,
+             brushSelect:false, showDetail:false,
+             borderColor:'transparent', backgroundColor:'transparent',
+             fillerColor:ct.accentSoft,
+             dataBackground:{lineStyle:{color:ct.line}, areaStyle:{color:ct.split}},
+             selectedDataBackground:{lineStyle:{color:ct.accent}, areaStyle:{color:ct.accentSoft}},
+             handleStyle:{color:ct.accent, borderColor:ct.accent},
+             textStyle:{color:ct.axis, fontSize:10}},
+          ],
           series
         });
       });
@@ -4282,7 +4637,7 @@ const app = createApp({
         if (resistance != null && Math.abs(c - resistance) / resistance <= 0.003) touchRes++;
         if (support != null && Math.abs(c - support) / support <= 0.003) touchSup++;
         const mk = (side, price, anchor, reason) => out.signals.push({
-          ts, side, price, anchor,
+          ts, side, price, anchor, reason,
           text: fmtT(ts) + ' ' + (side === 'buy' ? '▲ ' : '▼ ') + reason + ' @' + mktPrice(price),
         });
         if (pos) {
@@ -4304,6 +4659,60 @@ const app = createApp({
       }
       out.resistance = resistance; out.support = support;
       return out;
+    }
+    // ---------- 工坊上下文条 / 信号回放 / 迭代对比 ----------
+    // 三者同源：activeSpec（当前策略）+ wsOverlay（回放信号）+ iterResult（迭代结论），
+    // 目的都是把「我在看哪个策略、它过得怎么样」从代码/图表/结果卡里提到一屏可见的位置。
+    const _wsPad = n => String(n).padStart(2, '0');
+    const _wsTime = ms => { const d = new Date(ms); return _wsPad(d.getMonth() + 1) + '-' + _wsPad(d.getDate()) + ' ' + _wsPad(d.getHours()) + ':' + _wsPad(d.getMinutes()); };
+    const wsSignalRows = computed(() => {
+      const list = (wsOverlay.value && wsOverlay.value.signals) || [];
+      return list.slice(-6).reverse().map(s => ({
+        time: _wsTime(s.ts),
+        side: s.side,
+        price: s.price,
+        reason: s.reason || String(s.text || '').replace(/^\S+\s+[▲▼]\s*/, '').replace(/\s*@.*$/, ''),
+      }));
+    });
+    const iterCompareRows = computed(() => {
+      const c = iterResult.value && iterResult.value.comparison;
+      if (!c) return [];
+      const o = c.old || {}, n = c.new || {};
+      const f2 = v => (v === null || v === undefined) ? '—' : Number(v).toFixed(2);
+      const ge = (a, b) => (a === null || a === undefined || b === null || b === undefined) ? true : a >= b;
+      return [
+        { label: '总收益', old: pct(o.total_return), neu: pct(n.total_return), better: ge(n.total_return, o.total_return) },
+        { label: '夏普', old: f2(o.sharpe), neu: f2(n.sharpe), better: ge(n.sharpe, o.sharpe) },
+        { label: '最大回撤', old: pct(o.max_drawdown), neu: pct(n.max_drawdown), better: ge(n.max_drawdown, o.max_drawdown) },
+        { label: '胜率', old: pct(o.win_rate), neu: pct(n.win_rate), better: ge(n.win_rate, o.win_rate) },
+      ];
+    });
+    const wsCtx = computed(() => {
+      const spec = activeSpec.value;
+      const P = (spec && spec.params) || {};
+      const d = designed.value || iterResult.value;
+      const sd = d && d.signal_density;
+      const of = d && d.overfit;
+      return {
+        name: (spec && spec.name) || currentStrategy.value || '未选择策略',
+        mode: P.mode === 'pullback' ? '回调入场' : '突破入场',
+        source: (spec && spec.source) || (codeTab.value === 'iterate' ? 'AI 深度反思' : codeTab.value === 'pick' ? '策略库' : 'AI 设计'),
+        registered: spec ? '已注册' : '未选择',
+        meta: [wsSymbolText.value, wsTimeframeText.value, '实时回放'].join(' · '),
+        density: sd ? {
+          passed: sd.passed !== false && sd.available !== false,
+          text: (sd.trades == null ? '—' : sd.trades) + ' 笔 / ' + (sd.candles || '—') + ' 根',
+        } : null,
+        overfit: of ? {
+          ok: of.verdict === '通过',
+          text: (of.verdict || '—') + (of.score != null ? ' ' + of.score + ' 分' : ''),
+        } : null,
+      };
+    });
+    function scrollToIterCard() {
+      const el = document.getElementById('iterCompareCard');
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      else toast('还没有迭代结果 —— 先跑一次「AI 深度反思迭代」再回来对比', 'info');
     }
     function getWsSymbol() { return (designSymbol.value && designSymbol.value !== '当前品种') ? designSymbol.value : (liveStatus.symbol || 'BTC/USDT'); }
     const wsSymbolText = computed(() => getWsSymbol());
@@ -4496,7 +4905,13 @@ const app = createApp({
     function pickForIterate(s) {
       iterStrategyName.value = s.name;
       unifiedPickerOpen.value = false;
-      toast('已选择迭代策略: '+s.name,'ok');
+      // L2：草稿不能当迭代父代（后端也会拒绝）。先讲清楚，别让用户白等一轮后台任务。
+      if (s.draft) {
+        toast('「'+s.name+'」是草稿（未证明），不能作为迭代起点：'
+              + (s.draft_reason||'过拟合未过或样本外证据不足'), 'error');
+      } else {
+        toast('已选择迭代策略: '+s.name,'ok');
+      }
     }
     async function applyFromUnified(spec) {
       // P4-D7：applyAnyStrategy 内含严重过拟合二次确认；成功/失败 toast 由它负责
@@ -4597,6 +5012,13 @@ const app = createApp({
       const s = (allStrategies.value||[]).find(x=>x.name===name);
       if (s && s.blocked_by_overfit) {
         const ok = await uiConfirm('策略「'+name+'」被判定为严重过拟合，AI 不会自动接管实盘。\n确定仍要手动应用它吗？', '过拟合警告');
+        if (!ok) return;
+      }
+      // L2：草稿（未证明）同样允许手动启用，但必须让用户知道"系统没验证过它"：
+      // 数据不足或过拟合未过，且 AI 不会接管它的参数更新、也不会以它为迭代起点。
+      if (s && s.draft && !s.blocked_by_overfit) {
+        const ok = await uiConfirm('策略「'+name+'」是草稿（未证明）：'+(s.draft_reason||'过拟合未过或样本外证据不足')+'。\n'
+          + '系统不会把它当可用策略：AI 不接管其参数更新，也不能以它为迭代起点。\n确定仍要手动应用它吗？', '草稿警告');
         if (!ok) return;
       }
       try {
@@ -4777,13 +5199,19 @@ const app = createApp({
         try { if (btChart) { btChart.dispose(); btChart=null; } } catch(e) {}
         try { if (plateauChart) { plateauChart.dispose(); plateauChart=null; renderPlateauChart(); } } catch(e) {}
         try { if (view.value==='quant' && xsChart) { xsChart.dispose(); xsChart=null; renderXsChart(); } } catch(e) {}
+        try { if (evolveCurveChart) { evolveCurveChart.dispose(); evolveCurveChart=null; } } catch(e) {}
         try { if (plateauChart) { plateauChart.dispose(); plateauChart=null; renderPlateauChart(); } } catch(e) {}
         if (view.value==='dashboard') loadEquity();
         if (view.value==='performance') { const eq = api('/performance/equity?limit=500').then(x=>{ perfChart=renderEquity(perfChart, x.map(v=>[v.ts,v.equity]), 'perf'); }); renderPnlChart(); }
         if (view.value==='backtest' && btResult.value) renderBtChart();
+        if (view.value==='evolve') renderEvolveCurve();   // 主题切换重建进化轮次曲线（此前漏重绘，切浅色后仍是旧主题色）
       });
     }
     function switchView(k) {
+      // 首屏卡片入场动画的开关（<html data-boot>）：第一次切菜单就摘掉，
+      // 此后卡片不再自带入场 —— 否则整个 section 重挂载会让上百个卡片重播动画（= 闪）。
+      // 详见 <style> 里「动效单一来源」注释块。摘除是无副作用的（动画早已结束且终态即基样式）。
+      document.documentElement.removeAttribute('data-boot');
       // 离开视图时释放对应 ECharts 实例，防止切回时绑定到已销毁 DOM 导致白屏
       if (view.value!==k) {
         try { if (k!=='strategy' && workshopChart) { workshopChart.dispose(); workshopChart=null; } } catch(e) {}
@@ -4796,6 +5224,7 @@ const app = createApp({
         try { if (k!=='quant' && factorIcChart) { factorIcChart.dispose(); factorIcChart=null; } } catch(e) {}
         try { if (k!=='quant' && xsChart) { xsChart.dispose(); xsChart=null; } } catch(e) {}
         try { if (k!=='quant' && factorIcChart) { factorIcChart.dispose(); factorIcChart=null; } } catch(e) {}
+        try { if (k!=='evolve' && evolveCurveChart) { evolveCurveChart.dispose(); evolveCurveChart=null; } } catch(e) {}
       }
       view.value = k;
       localStorage.setItem(VIEW_KEY, k);
@@ -4960,6 +5389,16 @@ const app = createApp({
       await useAiStrategy(designed.value.name);
     }
     async function iterateStrategy() {
+      // L2：迭代起点不能是草稿（未证明）——在它身上继续迭代会把"低交易/过拟合"
+      // 特征继承放大，这是劣质策略继续繁殖的主路径。前端先拦一道（后端同样拒绝），
+      // 避免白跑一轮后台任务再报错。
+      const _iterName = iterStrategyName.value || currentStrategy.value;
+      const _iterSpec = (allStrategies.value||[]).find(x=>x.name===_iterName);
+      if (_iterSpec && _iterSpec.draft) {
+        toast('「'+_iterName+'」是草稿（未证明），不能作为迭代起点：'
+              + (_iterSpec.draft_reason||'过拟合未过或样本外证据不足'), 'error');
+        return;
+      }
       iterLoading.value=true; iterResult.value=null; aiTaskPct.value=0; aiTaskMessage.value='';
       try {
         const d = await api('/ai/iterate-strategy', {method:'POST', body:JSON.stringify({strategy_name: iterStrategyName.value})});
@@ -4992,7 +5431,7 @@ const app = createApp({
         split: dark ? 'rgba(255,255,255,.07)' : 'rgba(0,0,0,.07)',
         accent: dark ? '#0A84FF' : '#007AFF',   // 与 UI 主色统一（曾图表用 #3f8cff 双色板）
         // 语义色（与 CSS token --green/--red/--orange 一致，双主题固定）
-        up:'#30d158', down:'#ff453a',
+        up:'#30d158', down:'#ff453a', orange:'#ff9f0a',
         upBar:'rgba(48,209,88,.8)', downBar:'rgba(255,69,58,.8)',
         upSoft:'rgba(48,209,88,.55)', downSoft:'rgba(255,69,58,.55)',
         accentSoft:'rgba(10,132,255,.22)', accentSoft2:'rgba(10,132,255,.02)',
@@ -5952,7 +6391,7 @@ const app = createApp({
           tooltip:{trigger:'axis', backgroundColor:ct.tooltip, borderColor:ct.tooltipBorder, textStyle:{color:ct.text, fontSize:12}},
           grid:{left:60, right:20, top:30, bottom:30},
           xAxis:{type:'category', data:sampled.map(x=>x.episode), axisLine:{lineStyle:{color:ct.line}}, axisLabel:{color:ct.axis, fontSize:10.5}, name:'训练轮'},
-          yAxis:{type:'value', axisLabel:{color:ct.axis, fontSize:10.5}, splitLine:{lineStyle:{color:ct.grid}}, scale:true},
+          yAxis:{type:'value', axisLabel:{color:ct.axis, fontSize:10.5}, splitLine:{lineStyle:{color:ct.split}}, scale:true},
           legend:{data:['累计收益','验证收益'], top:0, textStyle:{color:ct.axis, fontSize:11}},
           series:[
             {name:'累计收益', type:'line', smooth:true, showSymbol:false, data:sampled.map(x=>x.total_ret),
@@ -6036,11 +6475,12 @@ const app = createApp({
         // 持续进化引擎状态轮询（5s；仅 evolve 视图轮询——模板绑定全在该视图 v-if 内，其他视图跳过）
         evolvePollTimers.push(setInterval(()=>{ if (view.value!=='evolve') return; fetchEvolveStatus(); }, 5000));
         // 持续进化：轮次曲线（10s，数据量小且事件低频）；配置只在挂载/进入视图/保存成功后回填，避免覆盖用户正在编辑的表单
+        // 修复：去掉 running 门控——running 只在训练进行中为 true，空闲期（等新K线可长达 10+ 分钟）
+        // 曲线轮询停摆，用户盯着页面时新轮次永远不出现；无条件拉取（limit=120 开销极小）保证曲线始终如实刷新
         evolvePollTimers.push(setInterval(async ()=>{
-          if (evolveStatus.running) {
-            await fetchEvolveRounds(evolveCurveModel.value);
-            if (view.value==='evolve') renderEvolveCurve();
-          }
+          if (view.value!=='evolve') return;
+          await fetchEvolveRounds(evolveCurveModel.value);
+          renderEvolveCurve();
         }, 10000));
       };
       // 后台标签页暂停非时钟轮询，回前台立即恢复并刷一次数据（tick 时钟保留）
@@ -6050,10 +6490,11 @@ const app = createApp({
         else {
           startPolls(); if (view.value==='dashboard') loadAll();
           // 回到前台立即补刷一次持续进化进度，消除后台节流造成的显示滞后
+          // （轮次同样无条件补刷，理由同上：running 门控会让空闲期漏刷）
           fetchEvolveStatus();
-          if (evolveStatus.running) {
+          if (view.value==='evolve') {
             fetchEvolveRounds(evolveCurveModel.value);
-            if (view.value==='evolve') renderEvolveCurve();
+            renderEvolveCurve();
           }
         }
       };
@@ -6100,6 +6541,7 @@ const app = createApp({
       codeTab, pickedSpec, activeSpec, pineCode, pineLines, pineNote, hlPineLine, pickSpec, selectCodeTab, latestDesigned, latestIterated, showRepoPine, copyPine,
       loadWorkshopChart, wsLoading, wsUpdated, wsOverlay, openMenu, viewInGroup, toggleMenu, menuDropStyle,
       wsLast, wsChange, wsVol, wsFlash, getWsSymbol, wsSymbolText, wsTimeframe, wsTimeframeText,
+      wsCtx, wsSignalRows, iterCompareRows, scrollToIterCard,
       pineImportOpen, pineImportCode, pineImportName, pineImportAiCheck, pineImportLoading, pineImportWarnings, importPine, drlPineOpen, copyDrlPine,
       liveCfg, liveStatus, liveModeMsg, liveModeMsgOk, loadLiveConfig, saveLiveConfig, setLiveMode,
       paperCfg, loadPaperConfig, savePaperConfig,
@@ -6117,11 +6559,12 @@ const app = createApp({
       drlCfg, drlTrain, drlModels, drlEvalResult, drlCurveShown, drlOos,
       evolveStatus, evolveVersions, evolveVersionName, evolveBestVersion,
       fetchEvolveStatus, evolvePause, evolveResume, showEvolveVersions, evolveRollback,
+      EVOLVE_MODELS, evolveModel, evolveNextRun, evolveVersionsOpen, evolveVersionTitle, closeEvolveVersions,
       evolveEnable, evolveDisable, triggerFactorMiner, triggerStrategyDrl, triggerMetaController,
       evolveAnchorIssues, evolveAnchorLocked, resetEvolveAnchor,
       evolveConfig, fetchEvolveConfig, saveEvolveConfig,
       evolveFailStreak, evolveRoundsErr,
-      evolveRounds, evolveCurveModel, evolveCurveHasData, fetchEvolveRounds, renderEvolveCurve, setEvolveCurveModel, evolveExtra,
+      evolveRounds, evolveCurveModel, evolveCurveHasData, evolveCurveStat, fetchEvolveRounds, renderEvolveCurve, setEvolveCurveModel, evolveExtra,
       formDrop, formDropStyle, formDropMenu, toggleFormDrop, normSymbols,
       evolveSymbolOptions, evolveSymbolManual, evolveSymbolsLabel, toggleEvolveSymbol, addEvolveSymbolManual,
       liveSymbolOptions, liveSymbolManual, setLiveSymbol, addLiveSymbolManual,

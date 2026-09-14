@@ -15,7 +15,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from .agent import ACAgent
 
@@ -162,9 +162,6 @@ class ModelZoo:
             raise ModelZooError(f"版本 v{version} 格式无效")
         return data
 
-    def _snapshot_bytes(self, data: dict) -> tuple[bytes, bytes]:
-        return self._gzip_bytes(data), self._json_bytes(self._flat_payload(data))
-
     def save_agent(self, agent: ACAgent, name: str, *,
                    meta: Optional[dict] = None,
                    is_best: bool = True) -> int:
@@ -205,10 +202,19 @@ class ModelZoo:
         })
         # 限制版本数量（P4-A5：读取实例配置而非硬编码常量）
         # P4-E1：裁剪不许删掉 best 锚点指向的版本——否则 best_version 悬空。
-        # 先选出要删除的旧版本，再写入新版本，避免 max_versions=1 删掉刚保存的 best。
+        # run25 R4 修复：原实现 removable 排除旧 best_v，max_versions=1 时选中
+        # 刚保存的新版本删除（versions 列表与 best_version 永久错位：列表无当前
+        # best）。新规则：不删刚保存的 version；is_best=True（新版本即将接管 best）
+        # 时允许删旧 best；其余情况优先删最旧的非 best 非新版本；都无法删时
+        # 正确性优先，保留超限条目并告警。
         if len(versions) > self.max_versions:
             best_v = current_meta.get("best_version", 0)
-            removable = next((v for v in versions if v["version"] != best_v), None)
+            removable = next((v for v in versions
+                              if v["version"] != version
+                              and (is_best or v["version"] != best_v)), None)
+            if removable is None and is_best:
+                # 只剩 [新版本, 旧 best] 且新版本接管：删旧 best
+                removable = next((v for v in versions if v["version"] != version), None)
             if removable is not None:
                 versions.remove(removable)
                 old_path = self._version_path(name, removable["version"])
@@ -218,8 +224,9 @@ class ModelZoo:
                 except Exception as e:  # noqa: BLE001
                     log.warning("[model_zoo] 版本文件删除失败 %s: %s", old_path.name, e)
             else:
-                # 新版本将成为 best 时，保留它；否则最多保留 best 这一份历史版本。
-                versions.pop(0)
+                log.warning("[model_zoo] %s 版本列表超限但无可安全删除项"
+                            "（best=%s 锚点 + 刚保存 v%d 均须保留），本次不裁剪",
+                            name, best_v, version)
         # 版本记录先落盘：让 next_version 的递增持久化（防崩溃窗口覆盖）
         self._write_meta(name, current_meta)
         self._write_json_gz(version_path, data)
@@ -485,7 +492,9 @@ class ModelZoo:
                 "comparable": False, "reason": "", "source_unknown": False}
         # 训练身份字段透传：_identity_mismatch 需要读锚点的符号/周期/配置指纹
         for _ik in ("model", "symbol", "timeframe", "state_window",
-                    "factor_signature", "config_fingerprint", "window_tail_ts"):
+                    "factor_signature", "config_fingerprint", "window_tail_ts",
+                    # P0-族群：挑战者晋升互换标记（审计用）
+                    "swapped_from_champion", "lineage"):
             info[_ik] = anchor_meta.get(_ik)
         if not best_version and info["fitness"] is None:
             # 没有锚点：全新仓库，或 reset_anchor 之后。此时 best 文件里的权重仍然
@@ -701,11 +710,22 @@ class ModelZoo:
                 pass
             raise ModelZooError(f"写入 {path.name} 失败: {e}") from e
 
+    # run16 E1：读取端改用 orjson 解析（若可用）。模型权重 best.json.gz 解压后
+    # 1.93MB（factor_miner）→ json.loads 22.4ms，orjson.loads 3.6ms（6.3x）。
+    # 启动恢复路径（_restore_episode_counts→zoo.best_info→_read_json_gz）占
+    # 启动 wall 大头（33.2ms/38.4ms）；orjson 对同一文本逐位等价
+    # （.optim/probe_orjson_eq.py：1.93MB 全 dict 递归 float/NaN 位级 PASS）。
+    # 不可用时自动回退标准 json（行为/格式不变）。JSON 浮点解析是确定性
+    # 最近舍入（无归约序），故逐位一致成立。
     @staticmethod
     def _read_json_gz(path: Path) -> dict:
         """读取压缩 JSON 文件。"""
-        with gzip.open(path, "rt", encoding="utf-8") as f:
-            return json.load(f)
+        data = gzip.decompress(path.read_bytes())
+        try:
+            import orjson  # type: ignore
+            return orjson.loads(data)
+        except ImportError:
+            return json.loads(data.decode("utf-8"))
 
     @staticmethod
     def _write_flat_json(path: Path, data: dict) -> None:

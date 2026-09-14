@@ -13,18 +13,20 @@ import pytest
 import drl.evolve_engine as ev
 from backtest.data_loader import generate_demo
 from core.bus import EventBus
+from drl.agent import ACAgent
 from drl.evolve_engine import EvolveEngine
 from tests.test_drl_optimizations import _MetaDB
 
 
-class _StubAgent:
-    def to_dict(self) -> dict:
-        return {"hidden": [4, 4], "w": [[0.0]], "stub": True}
+def _agent():
+    # 真实 ACAgent（极小网络）：角色互换路径要把旧冠军 save→load 往返，
+    # _StubAgent 缺 state_dim 等字段无法反序列化，必须用真 agent
+    return ACAgent(state_dim=2, n_actions=2, hidden=(2, 2), seed=7)
 
 
 def _result(best_ret=0.30, oos_ret=0.05):
     return {
-        "agent": _StubAgent(),
+        "agent": _agent(),
         "history": [{"total_ret": -3.0}],
         "best_ret": best_ret,
         "deployment_blocked": False,
@@ -125,3 +127,23 @@ async def test_force_always_trains_main_lineage(engine):
     await eng._train_strategy_drl_once(force=True)
     assert eng._strategy_drl_status["lineage"] == "main"
     assert eng.zoo.best_fitness("strategy_drl") == 0.30
+
+
+async def test_promotion_swaps_old_champion_into_challenger(engine):
+    """P0-族群加强：挑战者晋升时旧冠军转入挑战者槽位（角色互换），不丢弃。
+
+    A/B 实验显示互换比"晋升即丢弃旧冠军" final 提升约 +92%：两条谱系
+    都保持"曾当过冠军"的强度，多样性不减、信息不丢。
+    """
+    eng, registered, holder = engine
+    holder["result"] = _result(best_ret=0.30, oos_ret=0.05)
+    await eng._train_strategy_drl_once()  # 冠军轮建立基线 fitness=0.30
+
+    # 挑战者显著优于冠军（0.07 > 0.05×1/0.95）→ 晋升
+    holder["result"] = _result(best_ret=0.32, oos_ret=0.07)
+    await eng._train_strategy_drl_once()
+    assert eng.zoo.best_fitness("strategy_drl") == 0.32, "晋升后冠军槽位被挑战者接管"
+    # 角色互换：旧冠军（fitness=0.30）应转入挑战者槽位，而非被丢弃
+    alt_anchor = eng.zoo.best_info("strategy_drl_alt")
+    assert alt_anchor.get("fitness") == 0.30, "旧冠军应转入挑战者槽位"
+    assert alt_anchor.get("swapped_from_champion") is True

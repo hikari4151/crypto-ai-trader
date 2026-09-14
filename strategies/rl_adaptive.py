@@ -62,6 +62,7 @@ class RLAdaptiveStrategy(Strategy):
         self._factor_mu: Optional[float] = None   # 模型文件内的因子标准化统计量
         self._factor_sd: Optional[float] = None
         self._factor_expr_from_model: str = ""    # 模型文件内记录的训练表达式
+        self._factor_composite: Optional[dict] = None  # 模型文件内的级联组合因子配方
         self._state_dim = 15  # 13 特征 + 持仓比例 + 浮动盈亏（+因子列时动态调整）
         self._n_actions = len(ACTION_BUCKETS) if _DRL_AVAILABLE else 5
 
@@ -71,6 +72,7 @@ class RLAdaptiveStrategy(Strategy):
         self._factor_mu = None
         self._factor_sd = None
         self._factor_expr_from_model = ""
+        self._factor_composite = None
         self._trade_zone = None
         return self._reload_agent()
 
@@ -103,6 +105,12 @@ class RLAdaptiveStrategy(Strategy):
                     self._factor_mu = float(md["factor_mu"])
                     self._factor_sd = float(md["factor_sd"])
                 self._factor_expr_from_model = str(md.get("factor_expression", "") or "")
+                # 级联组合因子配方（factor_miner 挖掘，见 factors.mining.CompositeFactorEvaluator）：
+                # 实盘在滚动缓冲上复算组合因子——曾只读表达式，级联模型因子列恒 None、
+                # 每根K线都"跳过本根"、永不交易
+                fc = md.get("factor_composite")
+                if isinstance(fc, dict) and fc.get("weights"):
+                    self._factor_composite = fc
                 if "min_trade_zone" in md:
                     self._trade_zone = float(md["min_trade_zone"])
             except Exception as e:  # noqa: BLE001
@@ -113,11 +121,25 @@ class RLAdaptiveStrategy(Strategy):
             return False
 
     def _factor_value(self) -> Optional[float]:
-        """在滚动缓冲上计算因子表达式，返回标准化后的最新值。
+        """在滚动缓冲上计算因子信号列，返回标准化后的最新值。
 
+        两种来源（与训练端一一对应）：
+        - factor_composite（模型内的级联组合因子配方）：用 CompositeFactorEvaluator
+          在滚动缓冲上复算（expanding z + 权重归一 + mu/sd 二次标准化，与训练同式）；
+        - factor_expression：用同一表达式实时计算。
         标准化统计量取模型文件（训练段拟合的 mu/sd）；旧模型无统计量时
         返回原始值（保持旧行为）。表达式优先取模型内记录的（部署一致性）。
         """
+        if self._factor_composite:
+            from factors.mining import CompositeFactorEvaluator
+            ev = CompositeFactorEvaluator(
+                self._factor_composite.get("weights") or {},
+                mu=self._factor_mu, sd=self._factor_sd)
+            df = pd.DataFrame({
+                "open": self._opens, "high": self._highs, "low": self._lows,
+                "close": self._closes, "volume": self._volumes,
+            })
+            return ev.eval(df)
         expr = str(self.params.get("factor_expression", "") or "").strip() or self._factor_expr_from_model
         if not expr:
             return None

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.bus import EventBus
-from core.database import Analysis, Database
+from core.database import Analysis, Database, _run_on_main
 from core.events import Event, EventType
 from .client import AIClient, AICallError, AINotConfigured
 from .context_engine import build_continuity_context, parse_prev_analysis
@@ -52,11 +52,15 @@ class MarketAnalyst:
             async def _load_prev_analysis():
                 from sqlalchemy import select as _sel
                 from core.database import Analysis as _Analysis
-                async with self._db.session() as s:
-                    row = (await s.execute(
-                        _sel(_Analysis).where(_Analysis.symbol == snap.get("symbol", ""))
-                        .order_by(_Analysis.ts.desc()).limit(1))).scalar_one_or_none()
-                return parse_prev_analysis(row.content) if row is not None else None
+
+                async def _query() -> Optional[dict]:
+                    async with self._db.session() as s:
+                        row = (await s.execute(
+                            _sel(_Analysis).where(_Analysis.symbol == snap.get("symbol", ""))
+                            .order_by(_Analysis.ts.desc()).limit(1))).scalar_one_or_none()
+                    return parse_prev_analysis(row.content) if row is not None else None
+                # run26 R3：session 使用经主循环调度（worker 跨 loop 连接池安全）
+                return await _run_on_main(self._db, _query)
 
             program, prev_analysis = await asyncio.gather(
                 _compute_direction(),
@@ -72,15 +76,20 @@ class MarketAnalyst:
                 log.warning("[ai] 上一轮分析读取失败: %s", prev_analysis)
                 prev_analysis = None
         else:
-            try:
+            async def _load_prev_fallback() -> Optional[dict]:
                 from sqlalchemy import select as _sel
                 from core.database import Analysis as _Analysis
-                async with self._db.session() as s:
-                    row = (await s.execute(
-                        _sel(_Analysis).where(_Analysis.symbol == snap.get("symbol", ""))
-                        .order_by(_Analysis.ts.desc()).limit(1))).scalar_one_or_none()
-                if row is not None:
-                    prev_analysis = parse_prev_analysis(row.content)
+
+                async def _query() -> Optional[dict]:
+                    async with self._db.session() as s:
+                        row = (await s.execute(
+                            _sel(_Analysis).where(_Analysis.symbol == snap.get("symbol", ""))
+                            .order_by(_Analysis.ts.desc()).limit(1))).scalar_one_or_none()
+                    return parse_prev_analysis(row.content) if row is not None else None
+                # run26 R3：session 使用经主循环调度（worker 跨 loop 连接池安全）
+                return await _run_on_main(self._db, _query)
+            try:
+                prev_analysis = await _load_prev_fallback()
             except Exception as e:  # noqa: BLE001
                 log.warning("[ai] 上一轮分析读取失败: %s", e)
         program_bias = (program or {}).get("direction")
@@ -125,11 +134,15 @@ class MarketAnalyst:
         # AI 输出 schema 不含 ts，此前依赖 AI 自愿输出导致防线永远失效
         result["ts"] = datetime.now(timezone.utc).isoformat()
         content = json.dumps(result, ensure_ascii=False)
-        async with self._db.session() as s:
-            s.add(Analysis(
-                symbol=snap.get("symbol", ""), content=content,
-                meta_json=json.dumps({"source": source, "has_program": bool(program)})))
-            await s.commit()
+
+        async def _persist_analysis() -> None:
+            async with self._db.session() as s:
+                s.add(Analysis(
+                    symbol=snap.get("symbol", ""), content=content,
+                    meta_json=json.dumps({"source": source, "has_program": bool(program)})))
+                await s.commit()
+        # run26 R3：session 使用经主循环调度（worker 跨 loop 连接池安全）
+        await _run_on_main(self._db, _persist_analysis)
         await self._bus.publish(Event(EventType.AI_ANALYSIS, {"snapshot": snap, "result": result}, source="ai.market_analyst"))
         return result
 

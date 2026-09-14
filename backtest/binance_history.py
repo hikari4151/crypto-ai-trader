@@ -15,7 +15,6 @@ from typing import Callable, Optional
 
 import httpx
 
-from config.settings import settings
 
 log = logging.getLogger(__name__)
 

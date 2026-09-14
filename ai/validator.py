@@ -21,12 +21,6 @@ from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
 
-# 允许的 AI 功能名
-FEATURES = {
-    "market_analysis", "param_optimize", "strategy_design",
-    "strategy_iterate", "trade_review", "factor_mine",
-}
-
 
 class ValidationError(Exception):
     """AI 输出未通过量化校验。携带可反馈给 AI 的具体错误信息。"""

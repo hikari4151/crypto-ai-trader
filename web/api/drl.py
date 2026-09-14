@@ -6,11 +6,10 @@
 import asyncio
 import json
 import logging
-import os
 import re
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 
@@ -477,7 +476,7 @@ async def use_model(name: str, engine=Depends(get_engine)):
     strategy_name = f"rl_{name}"
     try:
         from strategies.rl_adaptive import RLAdaptiveStrategy
-        from strategies import register_dynamic, get_strategy
+        from strategies import register_dynamic
         from drl.pine_export import export_pine_from_model
         pine_code, pine_note = export_pine_from_model(path, name)
         register_dynamic(strategy_name, {

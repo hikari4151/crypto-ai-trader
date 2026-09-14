@@ -148,7 +148,14 @@ class Settings(BaseSettings):
     # 永远没有可运行的自动交易代码（图上买卖点无从谈起）。改回大网络即放弃 Pine 导出。
     evolve_strategy_drl_state_window: int = 4
     evolve_strategy_drl_hidden: list[int] = [16, 16]
-    evolve_meta_episodes: int = 8                 # 每轮元策略训练轮数（连续训练取小值）
+    evolve_meta_episodes: int = 16                 # 每轮元策略训练轮数（连续训练取小值；
+                                             # 8→16 实验提升：.optim/exp_training/verify_meta_rounds.py
+                                             # 3 轮续训 OOS 收益 +0.021→+0.044、验证收益转正，
+                                             # 每轮墙钟 ~17.5s 对 600s 间隔占比 ~3%）
+    # 元策略信号对齐塑形系数：>0 时奖励叠加"仓位×最强子策略信号×置信度"项，
+    # 让 PPO 学会在信号高置信时持仓（元控制器本职），逃出"空仓=0"懒惰最优解；
+    # 0=关闭保持旧行为。塑形只进训练梯度，best_ret/OOS 仍按真实收益。
+    evolve_meta_signal_align: float = 12.0
     evolve_rollback_threshold: float = 0.95       # 新模型低于最佳模型此比例时回退（仅旧 fitness 为正时生效）
     evolve_max_versions: int = 10                 # 保留的历史版本数
     evolve_symbols: list[str] = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # 训练标的池（留单个=固定品种训练）

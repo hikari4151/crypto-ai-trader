@@ -15,11 +15,38 @@
 """
 import json
 import math
-import os
 import random
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
+
+
+def _softmax_1row(logits: np.ndarray) -> np.ndarray:
+    """单行 (1,N) softmax 快速路径（run9 E1）。
+
+    greedy_action/部署采样每步一次 predict_proba → 小数组 numpy ufunc
+    调度开销占主导；用 math 标量循环替代。与 _softmax 逐位一致
+    （.optim/verify_rollout_e1_softmax.py：200,000 组随机 + 极端值验证
+    PASS，同机同 libm 下 math.exp 与 np.exp 结果逐位相同，除法同式）。
+    仅限 shape[0]==1 且 N<=16 的调用点使用，其余走通用版。
+    """
+    row = logits.reshape(-1)
+    n = row.shape[0]
+    m = float(row[0])
+    for i in range(1, n):
+        v = float(row[i])
+        if v > m:
+            m = v
+    out = np.empty(n, dtype=float)
+    s = 0.0
+    for i in range(n):
+        e = math.exp(float(row[i]) - m)
+        out[i] = e
+        s += e
+    denom = s + 1e-12
+    for i in range(n):
+        out[i] = out[i] / denom
+    return out.reshape(1, -1)
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
@@ -34,6 +61,34 @@ def _log_softmax(logits: np.ndarray) -> np.ndarray:
     x = logits - logits.max(axis=-1, keepdims=True)
     logsumexp = np.log(np.exp(x).sum(axis=-1, keepdims=True) + 1e-12)
     return x - logsumexp
+
+
+def _log_softmax_1row(logits: np.ndarray) -> np.ndarray:
+    """单行 (1,N) log_softmax 快速路径（E3，自治优化）。
+
+    采样热路径（collect_episode 每步一次）用小数组调用 numpy ufunc 的
+    调度开销占主导；用 math 标量循环替代。与 _log_softmax 逐位一致
+    （.optim/verify_e3_logsoftmax.py：2000 组随机 + 极端值验证 PASS，
+    同机同 libm 下 math.exp/log 与 np.exp/log 结果逐位相同）。
+    仅限 shape[0]==1 且 N<=16 的调用点使用，其余走通用版。
+    """
+    row = logits.reshape(-1)
+    n = row.shape[0]
+    m = float(row[0])
+    for i in range(1, n):
+        v = float(row[i])
+        if v > m:
+            m = v
+    out = np.empty(n, dtype=float)
+    s = 0.0
+    for i in range(n):
+        e = math.exp(float(row[i]) - m)
+        out[i] = e
+        s += e
+    lse = math.log(s + 1e-12)
+    for i in range(n):
+        out[i] = float(row[i]) - m - lse
+    return out.reshape(1, -1)
 
 
 class MLP:
@@ -104,7 +159,18 @@ class MLP:
         时 worker 并发调用 forward，此前共享 _ln_cache 的「重建+append」序列会被
         线程交错污染（collect 期无人读所以没炸，但属潜在地雷）且白费分配开销。
         """
-        acts = [np.asarray(x, dtype=float)]
+        # E2（自治优化）：单行 collect 快速路径——use_ln=False 且无需 backward
+        # 缓存（并行轨迹收集）时跳过 acts 列表构造/append/重复索引的 Python
+        # 开销；矩阵乘法与 ReLU 与原循环逐位相同（.optim/verify_e2_forward.py
+        # 随机权重×30 输入逐位验证 PASS）。返回结构与原 forward 一致（末元素=输出）。
+        x_arr = np.asarray(x, dtype=float)
+        if (not self.use_ln) and (not cache_for_backward) and x_arr.ndim == 2 and x_arr.shape[0] == 1:
+            h = x_arr
+            for i in range(len(self.W) - 1):
+                h = np.maximum(h @ self.W[i] + self.b[i], 0.0)
+            h = h @ self.W[-1] + self.b[-1]
+            return [x_arr, h]
+        acts = [x_arr]
         ln_idx = 0
         if cache_for_backward:
             self._ln_cache: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
@@ -129,11 +195,20 @@ class MLP:
     def predict_proba(self, x: np.ndarray, cache_for_backward: bool = True) -> np.ndarray:
         """Actor 输出：softmax 概率（n_actions）。x 可 1D 或 (batch, in)。"""
         self._last_logits = self.forward(x, cache_for_backward=cache_for_backward)[-1]
+        # E1（自治优化）：单行小输出走标量快速路径（greedy_action/部署采样热路径），
+        # 与通用版逐位一致（.optim/verify_rollout_e1_softmax.py：200,000 组随机 +
+        # 极端值验证 PASS，同机同 libm）。仅限 shape[0]==1 且 N<=16 的调用点。
+        if self._last_logits.ndim == 2 and self._last_logits.shape[0] == 1 \
+                and self._last_logits.shape[1] <= 16:
+            return _softmax_1row(self._last_logits)
         return _softmax(self._last_logits)
 
     def predict_log_proba(self, x: np.ndarray, cache_for_backward: bool = True) -> np.ndarray:
         """log_softmax 概率（数值稳定版，消除 softmax+log 下溢风险）。"""
         logits = self.forward(x, cache_for_backward=cache_for_backward)[-1]
+        # E3：单行小输出走标量快速路径（采样热路径），与通用版逐位一致
+        if logits.ndim == 2 and logits.shape[0] == 1 and logits.shape[1] <= 16:
+            return _log_softmax_1row(logits)
         return _log_softmax(logits)
 
     def predict_value(self, x: np.ndarray, cache_for_backward: bool = True) -> np.ndarray:

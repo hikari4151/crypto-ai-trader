@@ -29,13 +29,20 @@ def _order_fee_rate(cfg, sig: Signal) -> float:
     """
     if getattr(sig, "order_type", None) == "limit":
         maker = getattr(cfg, "maker_fee_rate", None)
-        if maker is not None:
-            return float(maker)
-        return float(cfg.fee_rate)
-    taker = getattr(cfg, "taker_fee_rate", None)
-    if taker is not None:
-        return float(taker)
-    return float(cfg.fee_rate)
+        fee = float(maker) if maker is not None else float(cfg.fee_rate)
+    else:
+        taker = getattr(cfg, "taker_fee_rate", None)
+        fee = float(taker) if taker is not None else float(cfg.fee_rate)
+    # P0-BUGFIX：内核层非负夹取——负费率等于凭空生钱，且 fee=-1 会让
+    # 买入夹取的 cash/(fill_price*(1+fee_rate)) 分母为 0 → ZeroDivisionError。
+    # API 层已用 ge=0 拦截，此处是绕过 API 直接构造 BacktestConfig 时的纵深防御。
+    return max(fee, 0.0)
+
+
+def _safe_slip(cfg) -> float:
+    """P0-BUGFIX：内核层非负滑点夹取——负滑点会让买入成交价低于市价（凭空生钱），
+    卖出成交价高于市价。API 层已用 ge=0 拦截，此处为纵深防御。"""
+    return max(float(getattr(cfg, "slippage", 0.0) or 0.0), 0.0)
 
 
 def _limit_fill_ratio(cfg, sig: Signal, low: float, high: float) -> tuple[float, float]:
@@ -45,16 +52,18 @@ def _limit_fill_ratio(cfg, sig: Signal, low: float, high: float) -> tuple[float,
     """
     lp = float(sig.limit_price)
     if sig.side == "buy":
+        # 买单市价 ≤ 限价时成交：bar 内可成交区 = [low, lp]
         if low <= lp <= high:
             fill_price = lp
-            fill_ratio = float(high - lp) / (high - low + 1e-12) if high > low else 1.0
+            fill_ratio = float(lp - low) / (high - low + 1e-12) if high > low else 1.0
         else:
             fill_price = lp
             fill_ratio = 0.0
     else:
+        # 卖单市价 ≥ 限价时成交：bar 内可成交区 = [lp, high]
         if low <= lp <= high:
             fill_price = lp
-            fill_ratio = float(lp - low) / (high - low + 1e-12) if high > low else 1.0
+            fill_ratio = float(high - lp) / (high - low + 1e-12) if high > low else 1.0
         else:
             fill_price = lp
             fill_ratio = 0.0
@@ -200,7 +209,7 @@ def run_matching_loop(
                             bar_volume: float) -> Optional[dict]:
         """盘中触价卖出（long 持仓的止损/止盈），返回 trade dict 或 None。"""
         nonlocal cash, position
-        fill_price = float(trigger_price) * (1 - cfg.slippage)
+        fill_price = float(trigger_price) * (1 - _safe_slip(cfg))
         sig = Signal(symbol, "sell", qty=position, strategy=strategy.name, reason=reason)
         filled, cash, position, trade = _execute_fill(
             cfg, sig, fill_price, symbol, data.index[i].isoformat(),
@@ -227,7 +236,7 @@ def run_matching_loop(
             tries = pending_tries
             pending_signal = None
             pending_tries = 0
-            fill_price = price_open * (1 + cfg.slippage) if sig.side == "buy" else price_open * (1 - cfg.slippage)
+            fill_price = price_open * (1 + _safe_slip(cfg)) if sig.side == "buy" else price_open * (1 - _safe_slip(cfg))
             skip_fill = False
             # ---- 限价单模拟（partial/probabilistic 模式） ----
             if (cfg.limit_order_model in ("partial", "probabilistic")
@@ -243,7 +252,18 @@ def run_matching_loop(
                     skip_fill = True
                 else:
                     # 触及成交：按 fill_ratio 部分成交
-                    qty_total = sig.qty if sig.qty else (cash * sig.size_pct / fill_price)
+                    # P1-BUGFIX（平仓信号被静默吞掉）：部分成交的"基础数量"必须按
+                    # 方向取基数。卖出曾一律用 `cash * size_pct / fill_price` ——
+                    # 全仓买入后 cash≈0，卖出量被算成 ≈0，_execute_fill 里
+                    # `if qty > 0` 为假 → 不成交、不平仓、平仓信号被丢弃
+                    # （持仓留到期末强平）。卖出基数取 position，与 _execute_fill
+                    # 卖出分支的 `qty = sig.qty or position` 同口径。
+                    if sig.qty:
+                        qty_total = sig.qty
+                    elif sig.side == "sell":
+                        qty_total = position
+                    else:
+                        qty_total = cash * sig.size_pct / fill_price
                     sig.qty = qty_total * fill_ratio
             # ---- 限价单结束 ----
             if not skip_fill:
@@ -320,7 +340,7 @@ def forced_liquidation(*, data: pd.DataFrame, cfg, closes: np.ndarray,
                        stats: Optional[dict] = None) -> None:
     """期末强制平仓（FIFO 成本摊销）。修改 cash/position/trades/equity_curve 就地。"""
     if position > 0 and lots:
-        fill_price = float(closes[-1]) * (1 - cfg.slippage)
+        fill_price = float(closes[-1]) * (1 - _safe_slip(cfg))
         qty = position
         proceeds = qty * fill_price
         fee = proceeds * _order_fee_rate(cfg, Signal("", "sell"))

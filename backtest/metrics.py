@@ -21,7 +21,9 @@ def compute_benchmark(closes: np.ndarray, start_cash: float, timeframe: str = "1
     权益曲线，由 engine 层调用后回填；此处初始化占位并仅保证键恒在。
     """
     eq = np.asarray(closes, dtype=float)
-    if len(eq) < 2 or eq[0] <= 0:
+    # P1-BUGFIX：start_cash≤0 会让 final_value/start_cash 除零
+    # （numpy 标量只发 RuntimeWarning 并返回 nan/inf → 下游 JSON 序列化 500）。
+    if len(eq) < 2 or eq[0] <= 0 or start_cash <= 0:
         return {
             "buy_hold_ret": 0.0, "excess_return": 0.0,
             "information_ratio": 0.0, "excess_max_drawdown": 0.0,
@@ -58,14 +60,19 @@ def compute_metrics(equity: list[float], trades: list[dict], timeframe: str = "1
     if n < 2:
         return {"total_return": 0.0, "max_drawdown": 0.0, "sharpe": 0.0, "win_rate": 0.0, "profit_factor": 0.0}
 
-    total_return = eq[-1] / start_cash - 1.0
+    # P1-BUGFIX（接口 500）：start_cash≤0 会让 total_return→±inf/NaN，
+    # starlette 的 JSONResponse 对 inf/NaN 直接抛 ValueError（HTTP 500）。
+    # 正常路径由 API 层约束 start_cash>0；此处兜底用首点权益，仍非正则退化为 0。
+    base = start_cash if start_cash > 0 else (float(eq[0]) if eq[0] > 0 else 0.0)
+    total_return = (eq[-1] / base - 1.0) if base > 0 else 0.0
     periods = PERIODS_PER_YEAR.get(timeframe, 8760)
     annual_return = (1 + total_return) ** (periods / n) - 1.0 if total_return > -1 else -1.0
 
-    # 最大回撤
+    # 最大回撤（peak≤0 时保护分母，避免 0/0→NaN、负峰值符号翻转）
     peak = np.maximum.accumulate(eq)
-    drawdown = (peak - eq) / peak
-    max_drawdown = float(drawdown.max())
+    safe_peak = np.where(peak > 0, peak, 1.0)
+    drawdown = np.where(peak > 0, (peak - eq) / safe_peak, 0.0)
+    max_drawdown = float(drawdown.max()) if drawdown.size else 0.0
 
     # 夏普（回测序列为总体，用 ddof=0 总体标准差，避免系统性高估）
     rets = np.diff(eq) / (eq[:-1] + 1e-9)
@@ -170,11 +177,17 @@ def finalize_metrics(equity_curve: list[float], trades: list[dict],
     if elapsed_sec is not None:
         metrics["elapsed_sec"] = round(elapsed_sec, 4)
     # 基准（含手续费/滑点口径由 compute_benchmark 内计算）
-    benchmark = metrics["benchmark"]
+    # P2-BUGFIX：closes=None 时 compute_metrics 不写 benchmark 键，原实现直接
+    # `metrics["benchmark"]` → KeyError（finalize_metrics(closes=None) 必抛）。
+    benchmark = metrics.get("benchmark")
+    if benchmark is None:
+        return metrics
     bench_eq = np.asarray(benchmark["bench_equity_curve"], dtype=float)
     seq = np.asarray(equity_curve, dtype=float)
     if len(bench_eq) == len(seq) and len(seq) >= 2:
-        excess = seq[-1] / start_cash - 1.0 - benchmark["buy_hold_ret"]
+        # P1-BUGFIX：start_cash≤0 时除零；退化用首点权益，仍非正则策略收益记 0
+        _base = start_cash if start_cash > 0 else (float(seq[0]) if seq[0] > 0 else 0.0)
+        excess = (seq[-1] / _base - 1.0 - benchmark["buy_hold_ret"]) if _base > 0 else -benchmark["buy_hold_ret"]
         periods = PERIODS_PER_YEAR.get(timeframe, 8760)
         s_ret = np.diff(seq) / (seq[:-1] + 1e-9)
         b_ret = np.diff(bench_eq) / (bench_eq[:-1] + 1e-9)
@@ -362,11 +375,16 @@ def block_bootstrap_sharpe_ci(returns, n_boot: int = 1000, alpha: float = 0.05,
         t = min(t + 1, k_max)
         # 块号索引 + 块内偏移（np.repeat 展开成逐位置数组）
         reps = eff[:t]
-        # 可能出现 cum 首块即 ≥ n（块长超过剩余容量），仍只取前 n 根
-        blk = np.repeat(np.arange(t), reps)
         starts_pos = np.concatenate(([0], c[: t - 1]))
-        off = np.arange(len(blk)) - np.repeat(starts_pos, reps)
-        idx = starts[k][blk] + off
+        # run17 E1：idx 构建算术重排——原式为
+        #   blk=repeat(arange(t),reps); off=arange(len(blk))-repeat(starts_pos,reps);
+        #   idx=starts[k][blk]+off（2 次 repeat + 1 次 fancy index）
+        # 重排为 idx=repeat(starts[k][:t]-starts_pos,reps)+arange(total)（1 次 repeat），
+        # 数学等价（块 b 内位置值 = starts[k][b]-starts_pos[b]+starts_pos[b]+j），
+        # 整数运算无浮点误差，bitwise 一致（.optim/probe_boot_idx.py：sharpe/rets
+        # 逐位 PASS，-27.7%）。
+        idx = (np.repeat(starts[k][:t] - starts_pos, reps)
+               + np.arange(int(c[t - 1])))
         idx = idx[:n]
         if len(idx) < n:  # 余量不足（几何长尾极小概率）：循环补足到 n
             s_need = n - len(idx)

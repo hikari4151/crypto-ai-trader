@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-import numpy as np
 
 from .validator import ValidationError, validate_ai_output
 
@@ -108,4 +107,97 @@ def evaluate_prompt(produce: Callable[[dict], dict],
         "validator_pass_rate": round(ok / total, 4) if total else 0.0,
         "direction_agreement_rate": round(agree_num / agree_den, 4) if agree_den else 0.0,
         "directional_accuracy": round(hit_num / hit_den, 4) if hit_den else 0.0,
+    }
+
+
+# ============ 设计 / 迭代提示词的回归评测（结构级） ============
+# 目的：让"改一句设计/迭代提示词"同样可度量——golden set 复用行情快照，
+# produce 返回对应通道的输出 dict，统计校验一次通过率与 schema 覆盖度。
+# 方向命中率对设计/迭代不适用（策略无"未来方向"单一答案），故不计算。
+
+def _structural_pass(feature: str, out: dict, ctx: dict) -> tuple[bool, int, int]:
+    """跑 validator + params schema 覆盖率，返回 (通过?, 覆盖键数, schema键数)。"""
+    try:
+        validate_ai_output(feature, out, ctx)
+        valid = True
+    except ValidationError:
+        valid = False
+    params = out.get("params") or {}
+    sch = ctx.get("param_schema") or {}
+    covered = sum(1 for k in params if k in sch)
+    return valid, covered, len(sch)
+
+
+def evaluate_design_prompt(produce: Callable[[dict], dict],
+                           golden: Optional[list[dict]] = None) -> dict:
+    """对 design 提示词做结构评测。
+
+    produce(snap) -> strategy_design 输出 dict（自由选执行器）。
+    返回 {cases, validator_pass_rate, param_schema_coverage, pine_provision_rate}。
+    """
+    from .strategy_designer import design_executor_catalog
+    catalog = design_executor_catalog()
+    schemas = {n: catalog[n]["param_schema"] for n in catalog}
+    ctx = {"param_schema": schemas["price_action"],
+           "allowed_executors": tuple(catalog), "executor_schemas": schemas}
+    golden = golden or GOLDEN_SET
+    total = ok = 0
+    cover_sum = cover_den = 0
+    pine_count = 0
+    for case in golden:
+        try:
+            out = produce(case["snap"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("[evals] design produce 异常，跳过: %s", e)
+            continue
+        if not isinstance(out, dict):
+            continue
+        total += 1
+        valid, covered, sch_len = _structural_pass("strategy_design", out, ctx)
+        ok += int(valid)
+        if sch_len:  # 覆盖率只统计"有 schema 可对照"的产出
+            cover_sum += covered / sch_len
+            cover_den += 1
+        if out.get("pine_code"):
+            pine_count += 1
+    return {
+        "cases": total,
+        "validator_pass_rate": round(ok / total, 4) if total else 0.0,
+        "param_schema_coverage": round(cover_sum / cover_den, 4) if cover_den else 0.0,
+        "pine_provision_rate": round(pine_count / total, 4) if total else 0.0,
+    }
+
+
+def evaluate_iterate_prompt(produce: Callable[[dict], dict],
+                            param_schema: Optional[dict] = None,
+                            golden: Optional[list[dict]] = None) -> dict:
+    """对 iterate 提示词做结构评测（默认用 dual_ma 的 schema 作对照）。
+
+    produce(snap) -> strategy_iterate 输出 dict。
+    返回 {cases, validator_pass_rate, param_schema_coverage}。
+    """
+    from strategies import _REGISTRY
+    sch = param_schema or _REGISTRY["dual_ma"].param_schema
+    ctx = {"param_schema": sch}
+    golden = golden or GOLDEN_SET
+    total = ok = 0
+    cover_sum = cover_den = 0
+    for case in golden:
+        try:
+            out = produce(case["snap"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("[evals] iterate produce 异常，跳过: %s", e)
+            continue
+        if not isinstance(out, dict):
+            continue
+        total += 1
+        valid, covered, sch_len = _structural_pass("strategy_iterate", out, ctx)
+        ok += int(valid)
+        if sch_len:
+            cover_sum += covered / sch_len
+            cover_den += 1
+    return {
+        "cases": total,
+        "validator_pass_rate": round(ok / total, 4) if total else 0.0,
+        "param_schema_coverage": round(cover_sum / cover_den, 4) if cover_den else 0.0,
     }

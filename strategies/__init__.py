@@ -19,6 +19,20 @@ _REGISTRY: dict[str, type[Strategy]] = {
 _DYNAMIC: dict[str, dict] = {}   # AI 设计策略 -> {name, title, description, logic, params, executor}
 
 
+def _draft_reason_from_flags(spec: dict) -> str:
+    """由检测标记推导草稿原因；返回空串 = 不是草稿（过了门）。
+
+    与 `ai/strategy_designer.py::draft_reason_for` 是同一条规则的两份实现：
+    strategies 是最底层模块，不能反向 import ai 层。两处一致性由
+    tests/test_ai_design_executor.py 的用例锁住（改一处必须改另一处）。
+    """
+    if spec.get("blocked_by_overfit"):
+        return "过拟合检测未通过（回炉后仍未过），证据不支持其稳健性"
+    if spec.get("overfit_inconclusive"):
+        return "证据不足（样本外成交太少，过拟合检测无法判定）"
+    return ""
+
+
 def register_dynamic(name: str, spec: dict) -> None:
     """注册动态策略。spec 可含 executor（默认 price_action）指定执行器类，
     param_schema / default_params 用于让前端参数面板正确渲染对应策略的参数。
@@ -42,6 +56,12 @@ def register_dynamic(name: str, spec: dict) -> None:
     else:
         spec.setdefault("param_schema", {})
         spec.setdefault("params", {})
+    # L2：状态归一化。status="draft" = 未证明（过拟合未过 / 样本外证据不足）：
+    # 仍保留在库里供用户手动启用，但不参与迭代链父代选择、不进引擎 AI 热更新通道。
+    # ⚠️ **由检测标记推导**，不依赖调用方记得设 status——否则漏设一处就会让草稿
+    # 重新长成"正常策略"。显式带合法 status 的以显式为准（留给"人工提升为可用"）。
+    if spec.get("status") not in ("active", "draft"):
+        spec["status"] = "draft" if _draft_reason_from_flags(spec) else "active"
     _DYNAMIC[name] = spec
 
 
@@ -89,6 +109,12 @@ def list_strategies() -> list[dict]:
             "created_by": spec.get("created_by", ""),
             "overfit": spec.get("overfit"),
             "blocked_by_overfit": spec.get("blocked_by_overfit", False),
+            # L2：草稿状态。"draft" = 未证明（过拟合未过 / 样本外证据不足），
+            # 前端据此分区显示，迭代父代选择与引擎 AI 热更新据此排除。
+            "status": spec.get("status", "active"),
+            "draft": spec.get("status") == "draft",
+            "draft_reason": spec.get("draft_reason") or _draft_reason_from_flags(spec),
+            "overfit_inconclusive": spec.get("overfit_inconclusive", False),
             "model_path": (spec.get("params") or {}).get("model_path", ""),
             "source": "ai",
             "ai_designed": True,
@@ -98,6 +124,16 @@ def list_strategies() -> list[dict]:
 
 def get_dynamic(name: str) -> Optional[dict]:
     return _DYNAMIC.get(name)
+
+
+def is_draft(name: str) -> bool:
+    """该动态策略是否为「未证明」草稿。
+
+    草稿 = 过拟合检测未过、或样本外证据不足，仍入库供人工审阅启用，
+    但：① 不能作为迭代链的父代（避免低交易/过拟合特征被继承放大）；
+        ② 引擎的 AI 参数热更新通道不采用（人工启用的策略由人负责，AI 不接管）。
+    """
+    return (_DYNAMIC.get(name) or {}).get("status") == "draft"
 
 
 def rename_dynamic(old_name: str, new_name: str) -> bool:

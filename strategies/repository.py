@@ -21,13 +21,6 @@ from .price_action import PriceActionStrategy
 # 读取的死参数），AI 优化会把这些无效旋钮当可调项。
 _PRICE_ACTION_SCHEMA: dict[str, dict[str, Any]] = PriceActionStrategy.param_schema
 
-CATEGORIES = [
-    {"key": "trend", "label": "趋势跟踪", "icon": "📈"},
-    {"key": "breakout", "label": "突破交易", "icon": "⚡"},
-    {"key": "mean_reversion", "label": "均值回归", "icon": "🎯"},
-    {"key": "grid", "label": "网格震荡", "icon": "🔲"},
-]
-
 REPOSITORY: list[dict[str, Any]] = [
     {
         "key": "dual_ma",

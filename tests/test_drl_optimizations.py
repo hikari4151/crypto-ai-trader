@@ -219,6 +219,46 @@ def test_meta_controller_train_explicit_seed_reproducible():
     assert [h["total_ret"] for h in r1["history"]] == [h["total_ret"] for h in r2["history"]]
 
 
+def test_meta_controller_signal_align_shaping():
+    """P4-E2：信号对齐塑形开启后训练仍完成、收益有界；顺势建仓当步奖励更高。
+
+    回归：元策略此前每轮 fitness=0.0（PPO 收敛到"空仓=0"的懒惰最优解），
+    OOS 从不交易被硬门拦截。塑形只进训练梯度、不污染 best_ret 真实口径，
+    本测试锁定「塑形开关不破坏训练契约 + 塑形确实按决策生效」。
+    """
+    from strategies.meta import MetaControllerEnv, train_meta_controller
+    df = generate_demo(timeframe="1h", n=500, seed=42)
+    res = train_meta_controller(df, {
+        "episodes": 3, "n_episodes": 2, "hidden": [8, 8], "seed": 5,
+        "sub_strategies": "dual_ma,factor_signal",
+        "reward_signal_align": 15.0,
+    })
+    assert res["agent"] is not None
+    assert -1e6 < res["best_ret"] < 1e6
+
+    # 塑形环境 vs 关闭塑形：找到一根有买入信号、已过 warmup 的K线，
+    # 两环境同步推进到该处后执行买入，顺势建仓的当步奖励应严格更高。
+    env_on = MetaControllerEnv(df, ["dual_ma", "factor_signal"], warmup=60,
+                               reward_signal_align=15.0)
+    env_off = MetaControllerEnv(df, ["dual_ma", "factor_signal"], warmup=60,
+                                reward_signal_align=0.0)
+    env_on.reset()
+    env_off.reset()
+    buy_t = None
+    for t in range(env_on.warmup, len(df) - 1):
+        sigs = env_on._collect(t)
+        if any(float(s.get("direction", 0.0) or 0.0) > 0 for s in sigs.values()):
+            buy_t = t
+            break
+    assert buy_t is not None, "demo 数据应存在买入信号K线"
+    for _ in range(env_on.warmup, buy_t):
+        env_on.step(0)
+        env_off.step(0)
+    _, r_on, _, _ = env_on.step(1)
+    _, r_off, _, _ = env_off.step(1)
+    assert r_on > r_off, f"顺势建仓塑形应提高当步奖励（on={r_on:.3f} off={r_off:.3f}）"
+
+
 # ============ T9. 级联因子注入 ============
 
 def test_train_drl_factor_values():

@@ -8,8 +8,7 @@
 
 环境完全向量化预计算特征序列，训练时按索引 O(1) 取状态，可高速反复试错。
 """
-import math
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -81,10 +80,19 @@ class TradingEnv:
         if self.n > 1:
             _rets[1:] = np.diff(closes) / closes[:-1]
         _vol5 = np.zeros(self.n)
-        for _i in range(self.n):
-            _seg = _rets[max(0, _i - 4):_i + 1]
-            if len(_seg) >= 3:
-                _vol5[_i] = float(np.std(_seg, ddof=1) * 100.0)
+        # 自治优化 E1：_vol5 预计算向量化（sliding_window_view 批量 np.std）。
+        # 原实现为逐元素循环（每根K线一次 np.std+切片，环境构造在每 worker×每轮
+        # 轨迹发生一次，占训练 wall 约 10%）；批量版 138x 加速且与逐元素版
+        # bitwise 一致（.optim/verify_e1_vol5_batch.py 全数据集验证，零浮点尾差）。
+        if self.n >= 3:
+            if self.n < 5:
+                for _i in range(2, self.n):
+                    _vol5[_i] = float(np.std(_rets[max(0, _i - 4):_i + 1], ddof=1) * 100.0)
+            else:
+                for _i in (2, 3):
+                    _vol5[_i] = float(np.std(_rets[:_i + 1], ddof=1) * 100.0)
+                _view = np.lib.stride_tricks.sliding_window_view(_rets, 5)
+                _vol5[4:] = np.std(_view, axis=1, ddof=1) * 100.0
         self._vol5_series = _vol5
         # P2-12：成交量序列（参与率约束用；缺 volume 列则视为无限流动性）
         if "volume" in df.columns:
@@ -238,22 +246,38 @@ class TradingEnv:
                         qty_delta = min(qty_delta, max_delta, vol_cap)
                     else:
                         qty_delta = max(qty_delta, -max_delta, -vol_cap)
-            # D2：成本 = 手续费 + 滑点（与回测/纸面 paper_slippage 同口径）。
+            # D2：成本率 = 手续费 + 滑点（与回测/纸面 paper_slippage 同口径）。
             # 滑点按成交额比例计（买卖对称，近似实际滑点成本），默认 0 向后兼容。
-            cost = abs(qty_delta) * price_now * (self.fee_rate * self.cost_scale + self.slippage)
-            self._cash -= cost
-            if diff > 0:  # 买入
-                self._cash -= qty_delta * price_now
-                self._qty += qty_delta
-            else:         # 卖出
-                self._cash += abs(qty_delta) * price_now
-                self._qty += qty_delta
-            if self._qty <= 1e-12:
-                self._qty = 0.0
-                self._entry_price = None
-            elif self._entry_price is None:
-                self._entry_price = price_now
-            self._cash = max(self._cash, 0.0)
+            unit_cost = self.fee_rate * self.cost_scale + self.slippage
+            # P0-BUGFIX（成本被退还）：现货语义下买入数量必须夹到现金可支付范围
+            # （成交额 + 费用 ≤ 现金），与回测 _execute_fill 的
+            # `qty = min(qty, cash / (fill_price * (1 + fee_rate)))` 同构。
+            # 原实现在扣款后用 `self._cash = max(self._cash, 0.0)` 抹平负现金，
+            # 而满仓买入时现金恰好被扣成 -cost，抹平 = 把买入腿的手续费+滑点
+            # 全额退还（实测恒价 1 次往返末权益 9990.00 vs 解析解 9980.01，
+            # 20 次往返退还 49.5%）。⇒ 训练学的是"交易半价"世界，
+            # 且成本瓶颈的幅度被低估约一半。
+            if qty_delta > 0:
+                max_affordable = self._cash / (price_now * (1.0 + unit_cost))
+                qty_delta = min(qty_delta, max(0.0, max_affordable))
+            if abs(qty_delta) > 1e-12:
+                cost = abs(qty_delta) * price_now * unit_cost
+                self._cash -= cost
+                if diff > 0:  # 买入
+                    self._cash -= qty_delta * price_now
+                    self._qty += qty_delta
+                else:         # 卖出
+                    self._cash += abs(qty_delta) * price_now
+                    self._qty += qty_delta
+                if self._qty <= 1e-12:
+                    self._qty = 0.0
+                    self._entry_price = None
+                elif self._entry_price is None:
+                    self._entry_price = price_now
+                # 现货账户不得透支：夹取后现金 ≥0 数学上成立，此处仅为浮点兜底
+                # （只归零 |cash|<1e-9 的尾差，不会退还任何真实成本）
+                if -1e-9 < self._cash < 0.0:
+                    self._cash = 0.0
         # 若目标清仓则重置入场价
         if target_ratio <= 1e-9 and self._qty <= 1e-12:
             self._entry_price = None

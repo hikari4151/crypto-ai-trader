@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from .engine import BacktestConfig
-from .metrics import compute_benchmark, compute_metrics, finalize_metrics
+from .metrics import compute_benchmark, compute_metrics
 
 log = logging.getLogger(__name__)
 

@@ -13,12 +13,11 @@
 import copy
 import json
 import logging
-import math
 import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -206,7 +205,8 @@ class ACAgent:
         else:
             self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
-    def sample_action_with_logp(self, state: np.ndarray, rng=None) -> tuple[int, float]:
+    def sample_action_with_logp(self, state: np.ndarray, rng=None,
+                                mask: Optional[np.ndarray] = None) -> tuple[int, float]:
         """纯策略采样并返回 (action, log_prob)（PPO 收集旧策略概率用）。
 
         关键：不叠加 epsilon 噪声——否则 log_prob 与真实行为策略不一致，
@@ -217,6 +217,11 @@ class ACAgent:
         rng：可传入 per-worker 的独立随机源。多线程并行收集轨迹时**必须**传独立
         rng，否则共享 self._rng（numpy Generator 非线程安全）会造成非确定性/
         潜在竞态，破坏 seed 可复现（D1 修复）。
+
+        mask：可选动作掩码（合法动作索引数组）。传入时把已选/非法动作概率置零
+        并重归一化（动作掩码标准做法：FactorMiningEnv 用它强制每步选新因子，
+        杜绝 argmax=首动作的重复选择浪费步数）。logp 按掩码后的分布计算，
+        exp(logp) 与采样概率严格一致（重要性采样比率不失真）。
         """
         rng = rng or self._rng
         # P2：collect 路径前向不写 _ln_cache（多线程并行收集时共享 MLP 的
@@ -224,7 +229,33 @@ class ACAgent:
         logp_all = self.actor.predict_log_proba(state.reshape(1, -1),
                                                 cache_for_backward=False)[0]
         proba = np.exp(logp_all)  # 从 log_softmax 恢复概率（exp 无下溢，因为 logp >= -inf）
-        action = int(rng.choice(self.n_actions, p=proba))
+        if mask is not None:
+            valid = np.zeros_like(proba, dtype=bool)
+            valid[np.asarray(mask, dtype=int)] = True
+            proba[~valid] = 0.0
+            total = float(proba.sum())
+            if total <= 0 or not np.isfinite(total):
+                # 防御：掩码后无正概率（理论上不会发生）→ 合法动作均匀分布
+                proba = np.zeros_like(proba)
+                proba[valid] = 1.0
+                proba /= float(valid.sum())
+            else:
+                proba /= total
+            # logp 同步到掩码后的分布（exp(logp)==proba 严格成立，
+            # 保证 old_log_probs 与真实行为策略一致）。近确定策略下
+            # 个别动作概率可下溢到 0（log=-inf），但被采样动作概率恒>0，
+            # 其 logp 不受影响；用 errstate 压掉无害告警。
+            with np.errstate(divide="ignore"):
+                logp_all = np.log(proba)
+        # run6 E1：手写 inverse-CDF 采样替代 rng.choice(n, p)——
+        # Generator.choice 对 p 恰好消耗 1 个随机数且等价于
+        # searchsorted(cumsum(p), u)（u 在同一序列同位置取）；
+        # 位级一致验证见 .optim/verify_sdrl_e1_choice.py（2000 步
+        # action/logp 全等 + rng 尾序列一致）。采样热路径 94k 步/回合
+        # 省 numpy choice 调度（~7µs/步 → ~2µs）。
+        u = rng.random()
+        action = int(np.searchsorted(np.cumsum(proba), u, side="left"))
+        action = min(action, len(proba) - 1)  # 浮点累计误差防御
         logp = float(logp_all[action])
         return action, logp
 
@@ -234,13 +265,17 @@ class ACAgent:
         env 需提供 reset/step；episode 长度上限优先取 env.max_steps
         （FactorMiningEnv 等序列决策环境），否则用 n - warmup - 1（TradingEnv）。
         rng：可选，透传给采样；多线程收集时传入 per-worker 独立 rng（见 D1）。
+        env.use_action_mask=True 时每步先取 env.valid_actions() 作为动作掩码
+        （强制选新动作；FactorMiningEnv 防重复选择浪费步数）。
         """
         state = env.reset()
         states, actions, rewards, log_probs = [], [], [], []
         total_ret = 1.0
+        use_mask = bool(getattr(env, "use_action_mask", False))
         max_steps = getattr(env, "max_steps", None) or (env.n - env.warmup - 1)
         for _ in range(max_steps):
-            action, logp = self.sample_action_with_logp(state, rng=rng)
+            mask = env.valid_actions() if use_mask else None
+            action, logp = self.sample_action_with_logp(state, rng=rng, mask=mask)
             nxt, reward, done, info = env.step(action)
             states.append(state)
             actions.append(action)
@@ -265,9 +300,18 @@ class ACAgent:
             "steps": len(rewards),
         }
 
-    def greedy_action(self, state: np.ndarray) -> int:
-        """确定性动作（评估/部署用）。"""
+    def greedy_action(self, state: np.ndarray,
+                      mask: Optional[np.ndarray] = None) -> int:
+        """确定性动作（评估/部署用）。
+
+        mask：可选动作掩码（合法动作索引数组），非法动作概率压到 -inf 再取
+        argmax（与采样端同口径：FactorMiningEnv 用它保证贪心决策也强制选新因子）。
+        """
         proba = self.actor.predict_proba(state.reshape(1, -1))[0]
+        if mask is not None:
+            invalid = np.ones_like(proba, dtype=bool)
+            invalid[np.asarray(mask, dtype=int)] = False
+            proba[invalid] = -1e18
         return int(np.argmax(proba))
 
     # ---------- 训练（真 PPO：GAE + 多轮 mini-batch 裁剪 + 熵正则） ----------
@@ -549,6 +593,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     extra_factors_val: Optional[np.ndarray] = None
     extra_factors_oos: Optional[np.ndarray] = None
     factor_expr = str(cfg.get("factor_expression", "") or "").strip()
+    # 级联组合因子复算配方（{weights: {因子key: 权重}}，见 CompositeFactorEvaluator）
+    factor_composite: Optional[dict] = None
     # 标准化统计量（训练段拟合）写入模型文件，部署端用同一口径标准化——
     # 曾只存表达式不存 mu/sd，部署喂原始值，状态分布与训练完全不同
     factor_mu: float = 0.0
@@ -576,6 +622,11 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         extra_factors_oos = vals[n_train + n_val:].reshape(-1, 1) if len(oos_df) > 0 else None
         factor_expr = ""  # 级联因子不再用表达式（值已给定）
         log.info("[drl] 已注入级联因子列（factor_miner 组合因子, mu=%.4f sd=%.4f）", factor_mu, factor_sd)
+        # 级联因子的复算配方（weights 映射）随结果透传，部署端写入模型文件：
+        # 实盘按配方在滚动缓冲上复算组合因子（CompositeFactorEvaluator，与训练
+        # expanding z + mu/sd 二次标准化同式）——曾只保存预计算数组，新K线
+        # 无值可取、因子列恒 None，带级联因子的模型实盘每根K线都"跳过本根"。
+        factor_composite = dict(cfg.get("factor_composite") or {}) or None
     elif factor_expr:
         from factors.mining import FactorExecutor
         try:
@@ -1065,6 +1116,9 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         "factor_sd": factor_sd,
         # 级联因子列（factor_miner 组合因子）的原始值，供部署端 rl_adaptive 用
         "factor_values": (factor_values.tolist() if factor_values is not None else None),
+        # 级联因子复算配方（weights 映射）：部署端写入模型文件，实盘按此在
+        # 滚动缓冲上复算组合因子（详见 factors.mining.CompositeFactorEvaluator）
+        "factor_composite": factor_composite,
         # DRL 神经引擎 → Pine Script v5 自动交易代码（可直接粘贴 TradingView）
         # D3：OOS 硬门触发时不产出 Pine（deployment_blocked=True），防止过拟合模型上线
         "pine_code": pine_code,
@@ -1208,7 +1262,6 @@ def search_reward_coefficients(df, cfg: dict,
         {"best_cfg": {...最优系数...}, "best_val_ret": float,
          "results": [{cfg, val_ret}], "search_space": {...}}
     """
-    import random as _random
     rng = random.Random(seed)
     base_cfg = dict(cfg)
     base_cfg["seed"] = base_cfg.get("seed", seed)

@@ -7,7 +7,6 @@ import numpy as np
 SR_LOOKBACK = 120          # 关键位/价格行为的滑动窗口（a=max(0,i-119), b=i+1）
 SR_WINDOW = 10             # 摆动高低点检测窗口（默认）
 SR_MIN_TOUCHES = 2         # 关键位最少触碰次数（默认）
-PA_BREAKOUT_WINDOW = 20    # 价格行为 breakout 窗口（需 >= PA_MIN_BARS）
 PA_MIN_BARS = 21           # price_action_features 最少K线数
 
 

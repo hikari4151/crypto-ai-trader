@@ -102,8 +102,11 @@ def _strategy_drl_train_cfg(episodes: int) -> dict:
 def _should_rollback(new_fit: float, old_fit: Optional[float], threshold: float) -> bool:
     """回退判据（P0-4）：旧 fitness 为正时按比例阈值比较；旧 fitness 非正时
     “×threshold”会让阈值更宽松（方向反转），改为新值更低即回退。
+
+    run24 修复：NaN 旧/新 fitness 必须视为不可比（NaN 与任何数比较恒 False，
+    会让回退保护永久失效——NaN 锚点污染后永不回退/永不拦截）。
     """
-    if old_fit is None:
+    if old_fit is None or not math.isfinite(old_fit) or not math.isfinite(new_fit):
         return False
     if old_fit <= 0:
         return new_fit < old_fit
@@ -144,21 +147,37 @@ def _strategy_deploy_gate(result: dict) -> tuple[bool, str]:
         oos_ret = float(oos.get("oos_ret", 0.0))
     except (TypeError, ValueError):
         oos_ret = 0.0
+    if not math.isfinite(oos_ret):
+        # run24 修复：NaN/Inf oos_ret 曾绕过硬门（float("nan") <= 0 为 False → 部署）。
+        # 行情数据缺口导致 NaN 指标时不得上线："无有效 OOS 收益"按非正拦截。
+        return False, f"OOS 段收益无效（{oos_ret}，非有限数值），数据缺口，暂不部署"
     if oos_ret <= 0:
         _regime_note = ("；且训练/样本外行情状态剧变(regime_shift)"
                         if oos.get("regime_shift") else "")
-        # P2-14：区分"样本外无信号"与"真亏损"——position_ratio 接近 0 说明
-        # 模型在样本外几乎不交易（无信号），与有交易但亏钱是两回事。
-        # 报告缺 position_ratio 时视为未知（老报告/精简报告），按真亏损口径给"非正"
-        raw_pos = oos.get("oos_position_ratio")
-        if raw_pos is not None:
+        # P2-14：区分"样本外无信号"与"真亏损"。
+        # P4-E2：优先用真实交易次数（oos_trades，元控制器/新报告提供）判断是否
+        # 在样本外行动过——段末持仓比例会误伤"交易后已平仓"的合理策略（段末空仓
+        # → 比例 0 被误判为从未交易）。报告缺 oos_trades 时回退到段末持仓比例
+        #（老报告/精简报告），再缺失视为未知，按真亏损口径给"非正"。
+        raw_trades = oos.get("oos_trades")
+        if raw_trades is not None:
             try:
-                pos_ratio = float(raw_pos)
+                n_trades = int(raw_trades)
             except (TypeError, ValueError):
-                pos_ratio = None
-            if pos_ratio is not None and pos_ratio < 0.05:
-                return False, (f"OOS 段几乎无信号(position_ratio={pos_ratio:.3f})，"
+                n_trades = None
+            if n_trades is not None and n_trades <= 0:
+                return False, (f"OOS 段模型从未发出交易指令(oos_trades={n_trades})，"
                                f"样本外未交易，暂不部署{_regime_note}")
+        else:
+            raw_pos = oos.get("oos_position_ratio")
+            if raw_pos is not None:
+                try:
+                    pos_ratio = float(raw_pos)
+                except (TypeError, ValueError):
+                    pos_ratio = None
+                if pos_ratio is not None and pos_ratio < 0.05:
+                    return False, (f"OOS 段几乎无信号(position_ratio={pos_ratio:.3f})，"
+                                   f"样本外未交易，暂不部署{_regime_note}")
         return False, f"OOS 段收益 {oos_ret:.4f} 非正，样本外不具备盈利能力{_regime_note}"
     return True, ""
 
@@ -239,6 +258,22 @@ class EvolveEngine:
         self._running = False
         self._paused = False
         self._tasks: list[asyncio.Task] = []
+        # 保活（watchdog）：_run_loop 只能兜住"逐轮训练"里的异常。一旦异常从
+        # 循环体之外逸出，那条 asyncio 任务会直接结束，而 _running/_enabled 仍是
+        # True——引擎对外依然显示"运行中"，实际已永久停训，只能重启进程或手动
+        # 关开一次开关。下面这组状态供 _supervise_loop 周期巡检并重建死循环。
+        self._loop_names = ("evolve_factor_miner", "evolve_strategy_drl",
+                            "evolve_meta_controller")
+        self._restarts: dict[str, int] = {n: 0 for n in self._loop_names}
+        self._last_restart: dict[str, float] = {n: 0.0 for n in self._loop_names}
+        self._supervise_interval = 30.0
+        # 同一管线两次自愈的最小间隔：防"一重建就崩"演变成重启风暴烧 CPU
+        self._restart_min_gap = 20.0
+        self._supervise_status: dict[str, Any] = {
+            "alive": False, "last_check": 0.0, "checks": 0, "restarts": 0,
+            "interval": self._supervise_interval, "last_restart_at": 0.0,
+            "last_restart_name": "",
+        }
         # P2-10：全局训练锁——三条训练管线串行执行（因子挖掘/策略DRL/元策略
         # 同时训练会吃满 CPU 拖垮实时引擎），手动触发与周期循环共用同一把锁。
         self._train_lock = asyncio.Lock()
@@ -253,15 +288,18 @@ class EvolveEngine:
         # 供 _run_loop 在交易所持续不可达时自动降频，避免 60s 一次全量烧 CPU）
         self._factor_miner_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
                                      "last_error": "", "next_run": 0, "last_success": False,
-                                     "oos_rejected": "", "_demo_streak": 0}
+                                     "oos_rejected": "", "_demo_streak": 0,
+                                     "loop_beat": 0.0, "restarts": 0}
         self._strategy_drl_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
                                      "last_error": "", "next_run": 0, "last_success": False,
                                      "oos_rejected": "", "_demo_streak": 0,
+                                     "loop_beat": 0.0, "restarts": 0,
                                      # P0-族群：冠军/挑战者轮次计数与当前谱系（展示用）
                                      "_pop_round": 0, "lineage": "main"}
         self._meta_controller_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
                                         "last_error": "", "next_run": 0, "last_success": False,
                                         "oos_rejected": "", "_demo_streak": 0,
+                                        "loop_beat": 0.0, "restarts": 0,
                                         "sub_strategies": DEFAULT_META_SUBS}
         # 锁死自检：连续多少轮没有任何模型被接受。进化引擎只看 episode/fitness 时
         # "一直在训"和"训了但全被锚点拒绝"长得一模一样（实测 72/72 全 rollback，
@@ -339,13 +377,15 @@ class EvolveEngine:
             log.warning("[evolve] 启动恢复训练轮次失败: %s", e)
         if self._enabled:
             # 首次训练在启动 15s 后进行（等待系统初始化完成），之后按间隔定期训练
-            self._tasks.append(asyncio.create_task(self._factor_miner_loop(), name="evolve_factor_miner"))
-            self._tasks.append(asyncio.create_task(self._strategy_drl_loop(), name="evolve_strategy_drl"))
-            # 元策略控制器训练（间隔较长，依赖策略 DRL 产出）
-            self._tasks.append(asyncio.create_task(self._meta_controller_loop(), name="evolve_meta_controller"))
-            log.info("[evolve] 持续进化引擎已启动（因子挖掘=%ds，策略DRL=%ds，元策略=%ds，首次训练将在15s后开始）",
+            self._spawn_loops()
+            # 保活监督：三条循环任一条意外退出，都由巡检发现并重建
+            self._spawn_supervisor()
+            self._supervise_status["alive"] = True
+            log.info("[evolve] 持续进化引擎已启动（因子挖掘=%ds，策略DRL=%ds，元策略=%ds，"
+                     "首次训练将在15s后开始；保活巡检间隔=%ds）",
                      self._factor_miner_interval, self._strategy_drl_interval,
-                     getattr(settings, "evolve_meta_interval", 600))
+                     getattr(settings, "evolve_meta_interval", 600),
+                     int(self._supervise_interval))
         else:
             log.info("[evolve] 持续进化引擎已禁用（evolve_enabled=false）")
 
@@ -357,6 +397,7 @@ class EvolveEngine:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        self._supervise_status["alive"] = False
         # 等在跑的 to_thread 训练跑完（取消只停协程；executor 线程会跑到底）。
         # 用 to_thread 等 threading.Event，避免阻塞事件循环；超时仅告警不阻断。
         await self._wait_training_done()
@@ -495,6 +536,12 @@ class EvolveEngine:
                 if st == "ok":
                     seen.add(model)
                     continue
+                if st == "demo_blocked":
+                    # run24 修复：与运行时 _log_round 口径一致——demo_blocked
+                    # 行不计入连续拒绝（P1-3 修复只覆盖了运行时路径，重启恢复
+                    # 曾把交易所故障期计入 streak，误报 stalled/诱导重置锚点）
+                    seen.add(model)
+                    continue
                 streaks[model] += 1
             self._reject_streak.update(streaks)
         except Exception as e:  # noqa: BLE001
@@ -511,20 +558,24 @@ class EvolveEngine:
         if enabled == self._enabled:
             return
         self._enabled = enabled
-        if enabled and self._running and not self._tasks:
-            # 从禁用状态切换为启用：立即启动训练循环
+        if enabled and self._running:
+            # 从禁用状态切换为启用：补齐缺失的训练循环。
             # P4-A2：三条管线都要恢复（此前遗漏 meta_controller_loop → 热切换后
-            # 元策略控制器永久停训，直到进程重启）
-            self._tasks.append(asyncio.create_task(self._factor_miner_loop(), name="evolve_factor_miner"))
-            self._tasks.append(asyncio.create_task(self._strategy_drl_loop(), name="evolve_strategy_drl"))
-            self._tasks.append(asyncio.create_task(self._meta_controller_loop(), name="evolve_meta_controller"))
-            log.info("[evolve] 持续进化已启用（因子挖掘/策略DRL/元策略 三管线均恢复）")
+            # 元策略控制器永久停训，直到进程重启）。现在改为"缺哪条补哪条"，
+            # 判定不再依赖 `not self._tasks`——保活监督自身也占一个任务槽，
+            # 拿列表空否当开关会让热切换漏建整组循环。
+            created = self._spawn_loops()
+            self._spawn_supervisor()
+            self._supervise_status["alive"] = True
+            if created:
+                log.info("[evolve] 持续进化已启用（补齐 %d 条训练循环，保活监督已就位）", created)
         elif not enabled:
             # 禁用：取消所有训练循环（正在训练的任务会被取消，但 executor 线程
             # 会跑完——等待其结束再返回，避免"已禁用仍在后台烧 CPU"）
             for t in self._tasks:
                 t.cancel()
             self._tasks.clear()
+            self._supervise_status["alive"] = False
             await self._wait_training_done()
             log.info("[evolve] 持续进化已禁用")
 
@@ -828,6 +879,24 @@ class EvolveEngine:
         # P4-E1：锚点画像只读一次（_pipeline_view 与 anchor 字段共用），
         # 消除秒级轮询下的重复 meta.json 磁盘读
         anchors = {m: self.zoo.best_info(m) for m in self._models}
+        # 保活视角：应当存活的训练循环里，有哪几条已经不在了。
+        # 「引擎开着但已停训」此前完全不可观测（tasks_alive 算了却无人消费），
+        # 这里把它升级为带判定的健康信号，前端/AI 都能据此判断是否真的在跑。
+        _now = time.time()
+        loops_alive: dict[str, bool] = {}
+        for _n in self._loop_names:
+            _t = self._find_task(_n)
+            loops_alive[_n] = bool(_t is not None and not _t.done())
+        _expected = bool(self._running and self._enabled)
+        _last_check = float(self._supervise_status.get("last_check") or 0.0)
+        supervisor = {
+            **self._supervise_status,
+            "loops_alive": loops_alive,
+            "restarts_by_loop": dict(self._restarts),
+            "heartbeat_age": (_now - _last_check) if _last_check else None,
+            "expected_running": _expected,
+            "degraded": bool(_expected and not all(loops_alive.values())),
+        }
         return {
             "running": self._running,
             "paused": self._paused,
@@ -847,6 +916,8 @@ class EvolveEngine:
             "rolling_window": self._rolling_window,
             "rollback_threshold": self._rollback_threshold,
             "tasks_alive": tasks_alive,
+            # 保活状态：巡检心跳、各循环存活情况、自愈次数与降级判定
+            "supervisor": supervisor,
         }
 
     async def reset_anchor(self, name: str, reason: str = "") -> dict:
@@ -1109,7 +1180,13 @@ class EvolveEngine:
         except asyncio.CancelledError:
             raise
         status["next_run"] = time.time() + start_delay
+        status["loop_beat"] = time.time()
         while self._running:
+            # 每轮先给 retry_interval 兜底初值：此前它只在 try 内赋值，若异常在
+            # 赋值之前逸出，循环尾部的 `time.time() + retry_interval` 会抛
+            # UnboundLocalError——而异常处理器已在 try 内，兜不住尾部，
+            # 整条任务就此终结。这是"训练循环静默死亡"的一条真实路径。
+            retry_interval = interval
             try:
                 if self._paused:
                     await asyncio.sleep(10)
@@ -1153,7 +1230,7 @@ class EvolveEngine:
                         # 真实训练尝试完成 → 标记当前标的该管线已训练（P4-A1）
                         if pipeline:
                             self._mark_pipeline_done(pipeline)
-                retry_interval = interval
+                # 训练轮正常结束：恢复常规间隔（失败分支在上面各自改写）
                 # P4-C1：交易所持续不可达（连续 demo 训练）时自动降频——
                 # 故障 1 小时若仍每 60s 全量训练合成数据，纯烧 CPU 拖垮实盘。
                 # 连续 demo ≥2 次后放大到 10 分钟；恢复正常（streak 清零）即恢复。
@@ -1194,9 +1271,24 @@ class EvolveEngine:
                 # 异常也算一次训练尝试（防某管线长期失败导致标的永卡，P4-A1）
                 if pipeline:
                     self._mark_pipeline_done(pipeline)
+            except BaseException as e:  # noqa: BLE001
+                if isinstance(e, (SystemExit, KeyboardInterrupt, GeneratorExit)):
+                    raise  # 真正的退出请求不该被吞掉
+                # 兜底：训练本体可能抛出非 Exception 基类的错误。此前这类异常会
+                # 直接终结整条循环任务，而 _running 仍是 True——外部完全看不出
+                # 停训，只能靠保活监督事后重建。这里先降级为"一轮失败"，
+                # 多数情况不必动用监督。
+                err = f"{type(e).__name__}: {e}"[:200]
+                log.error("[evolve] %s 循环遭遇非 Exception 异常，已兜底保活: %s", name, err)
+                status["last_error"] = err
+                status["last_success"] = False
+                retry_interval = max(interval, self._RETRY_INTERVAL)
+                if pipeline:
+                    self._mark_pipeline_done(pipeline)
             finally:
                 status["active"] = False
             status["next_run"] = time.time() + retry_interval
+            status["loop_beat"] = time.time()
             await asyncio.sleep(retry_interval)
 
     async def _factor_miner_loop(self) -> None:
@@ -1217,6 +1309,135 @@ class EvolveEngine:
         await self._run_loop(self._meta_controller_status, self._train_meta_controller_once,
                              meta_interval, "元策略", start_delay=60, pipeline="meta_controller",
                              yield_to=("factor_miner", "strategy_drl"))
+
+    # ---- 保活（watchdog）：训练循环的统一创建与自愈 ----
+    # 背景：三条训练循环是 asyncio 任务。任务一旦结束就再也不会自己回来，而
+    # _running/_enabled 仍是 True，status() 照样报 running=true —— 「看起来在跑、
+    # 其实已经停训」是最难发现的一类故障。此前 status() 虽然算了 tasks_alive，
+    # 但全仓无人消费它（只读诊断），也没有任何重建逻辑，只能重启进程恢复。
+
+    def _loop_factories(self) -> dict:
+        """训练循环名 → 协程工厂。清单单一来源，避免多处硬编码走偏。"""
+        return {
+            "evolve_factor_miner": self._factor_miner_loop,
+            "evolve_strategy_drl": self._strategy_drl_loop,
+            "evolve_meta_controller": self._meta_controller_loop,
+        }
+
+    def _status_for(self, name: str) -> Optional[dict]:
+        """训练循环名 → 对应管线的状态字典。"""
+        return {
+            "evolve_factor_miner": self._factor_miner_status,
+            "evolve_strategy_drl": self._strategy_drl_status,
+            "evolve_meta_controller": self._meta_controller_status,
+        }.get(name)
+
+    def _find_task(self, name: str) -> Optional[asyncio.Task]:
+        """按任务名查任务；_tasks 里可能同时残留已终结的旧任务。"""
+        for t in self._tasks:
+            if t.get_name() == name:
+                return t
+        return None
+
+    def _spawn_loops(self) -> int:
+        """补齐缺失的训练循环任务（幂等），返回新建条数。
+
+        start() / set_enabled(True) / 保活监督三条路径共用同一入口，消除
+        "哪条路径漏建了哪条管线"这类只在热切换时才暴露的漏配。
+        """
+        factories = self._loop_factories()
+        created = 0
+        for name in self._loop_names:
+            t = self._find_task(name)
+            if t is not None:
+                if not t.done():
+                    continue
+                # 清掉已终结的旧任务，让 _tasks 与现实保持一致
+                self._tasks.remove(t)
+            self._tasks.append(asyncio.create_task(factories[name](), name=name))
+            created += 1
+        return created
+
+    def _spawn_supervisor(self) -> None:
+        """启动保活监督任务（幂等）。"""
+        t = self._find_task("evolve_supervisor")
+        if t is not None:
+            if not t.done():
+                return
+            self._tasks.remove(t)
+        self._tasks.append(asyncio.create_task(self._supervise_loop(),
+                                               name="evolve_supervisor"))
+
+    async def _supervise_loop(self) -> None:
+        """保活监督：周期巡检三条训练循环，发现已退出的就地重建。"""
+        log.info("[evolve] 保活监督已启动（巡检间隔 %.0fs，自愈最小间隔 %.0fs）",
+                 self._supervise_interval, self._restart_min_gap)
+        while True:
+            try:
+                await asyncio.sleep(self._supervise_interval)
+            except asyncio.CancelledError:
+                raise
+            self._supervise_status["last_check"] = time.time()
+            self._supervise_status["checks"] = int(self._supervise_status["checks"]) + 1
+            self._supervise_status["alive"] = True
+            if not self._running:
+                break
+            if not self._enabled:
+                continue  # 用户主动禁用：不重建
+            try:
+                for name in self._loop_names:
+                    t = self._find_task(name)
+                    if t is not None and not t.done():
+                        continue
+                    now = time.time()
+                    if now - self._last_restart.get(name, 0.0) < self._restart_min_gap:
+                        # 自愈最小间隔未到：留给下一轮，防"一重建就崩"变成重启风暴
+                        continue
+                    await self._restart_loop(name, now)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("[evolve] 保活巡检异常（下一轮继续）")
+        log.info("[evolve] 保活监督已停止")
+
+    async def _restart_loop(self, name: str, now: float) -> None:
+        """重建一条已退出的训练循环，记录自愈次数并通知（通知已去重）。"""
+        dead = self._find_task(name)
+        detail = "任务已丢失"
+        if dead is not None:
+            self._tasks.remove(dead)
+            if dead.cancelled():
+                detail = "任务被取消"
+            elif dead.done():
+                try:
+                    exc = dead.exception()
+                except asyncio.CancelledError:
+                    exc = None
+                detail = f"异常退出：{exc!r}" if exc is not None else "任务正常结束"
+        try:
+            self._tasks.append(
+                asyncio.create_task(self._loop_factories()[name](), name=name))
+        except Exception as e:  # noqa: BLE001
+            log.exception("[evolve] 保活：重建 %s 失败: %s", name, e)
+            return
+        self._restarts[name] = int(self._restarts.get(name, 0)) + 1
+        self._last_restart[name] = now
+        self._supervise_status["restarts"] = sum(self._restarts.values())
+        self._supervise_status["last_restart_at"] = now
+        self._supervise_status["last_restart_name"] = name
+        status = self._status_for(name)
+        if status is not None:
+            status["active"] = False
+            status["restarts"] = self._restarts[name]
+        log.error("[evolve] 保活：训练循环 %s 已自动重建（第 %d 次，%s）",
+                  name, self._restarts[name], detail)
+        try:
+            from core.notify import notify
+            await notify(self.db, f"进化引擎自愈：{name}",
+                         f"训练循环曾意外退出（{detail}），已自动重建，"
+                         f"累计自愈 {self._restarts[name]} 次。")
+        except Exception:  # noqa: BLE001
+            pass  # 通知不可用不阻断保活主流程
 
     async def _train_factor_miner_once(self, force: bool = False) -> Optional[bool]:
         """执行一次因子挖掘训练（轮换训练标的：BTC/ETH/SOL）。"""
@@ -1291,6 +1512,10 @@ class EvolveEngine:
                     "ic_window": 120,
                     "max_steps": 6,
                     "corr_threshold": 0.85,
+                    # E-EXP：动作掩码（强制每步选新因子，组合恒为 max_steps 个）。
+                    # .optim/exp_training/sweep_factor.py + verify_factor_win.py
+                    # 实测：OOS 秩IC 0.0088→0.0356、续训 OOS 门 0/3→3/3（3 seed）。
+                    "action_masking": True,
                     "base_agent": best_agent,   # 续训起点（None=首轮从零）
                     "time_budget": float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0),
                 },
@@ -1334,6 +1559,9 @@ class EvolveEngine:
                 "episodes": int(getattr(settings, "evolve_factor_miner_episodes", 8)),
                 "ic_window": 120, "corr_threshold": 0.85,
                 "train_ratio": 0.6, "val_ratio": 0.2,
+                # E-EXP：纳入身份——旧锚点（无掩码训练）自动判不可比，
+                # 重建基线而非与不同训练口径比较回退
+                "action_masking": True,
             })
         if best_agent is not None and anchor.get("comparable"):
             _factor_mismatch = _identity_mismatch(anchor, _factor_identity)
@@ -1564,6 +1792,9 @@ class EvolveEngine:
 
         # 级联因子值：按当前训练标的加载，保证注入的因子与训练标的一致（P4-A1）
         cascade_factor_values = self._load_cascade_factor_values(df, symbol=symbol)
+        # 级联因子复算配方（选中因子权重）：与 npy 同标保存，供部署端实盘复算
+        cascade_recipe = (self._load_cascade_factor_recipe(symbol)
+                          if cascade_factor_values is not None else None)
 
         # 训练配置提升到函数作用域：跨标传导 OOS（下方）需要复用 state_window，
         # 曾定义在 _train 闭包内导致成功路径必然 NameError
@@ -1580,7 +1811,10 @@ class EvolveEngine:
             # 作为策略 DRL 的额外状态特征（与训练/部署口径一致）
             if cascade_factor_values is not None:
                 train_cfg["factor_values"] = cascade_factor_values
-                log.info("[evolve] 已注入级联组合因子到策略 DRL 训练")
+                if cascade_recipe is not None:
+                    train_cfg["factor_composite"] = cascade_recipe
+                log.info("[evolve] 已注入级联组合因子到策略 DRL 训练（含复算配方 %s）",
+                         "有" if cascade_recipe is not None else "无")
             train_cfg["base_agent"] = best_agent   # 续训起点（None=首轮从零）
             train_cfg["time_budget"] = float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0)
             return train_drl(df, train_cfg, on_progress=None)
@@ -1881,6 +2115,26 @@ class EvolveEngine:
                 log.warning("[evolve] demo 模型存档失败: %s", e)
             log.warning("[evolve] 策略DRL使用演示数据训练，仅存档不部署（防实盘被未验证模型接管）")
         else:
+            # P0-族群加强：挑战者晋升时角色互换——旧冠军不丢弃，转入挑战者
+            # 槽位继续进化（PBT top-k 保留思想）。A/B 实验（scripts/ab_population3.py）
+            # 显示互换比"晋升即丢弃旧冠军" final 提升约 +92%（0.0161→0.0310）：
+            # 两条谱系都保持"曾当过冠军"的强度，多样性不减、信息不丢。
+            # 必须在本轮覆盖冠军槽位**之前**先读旧冠军权重，否则读到新模型。
+            if is_challenger:
+                try:
+                    old_champ = self.zoo.load_agent("strategy_drl")
+                    if old_champ is not None:
+                        await asyncio.to_thread(self.zoo.save_agent, old_champ, "strategy_drl_alt",
+                                                meta={"fitness": anchor.get("fitness"),
+                                                      "timestamp": time.time(),
+                                                      "data_source": anchor.get("data_source") or data_source_used,
+                                                      "oos_ret": anchor.get("oos_ret"),
+                                                      "lineage": "challenger",
+                                                      "swapped_from_champion": True,
+                                                      **_identity})
+                        log.info("[evolve] 策略DRL挑战者晋升：旧冠军已转入挑战者槽位（角色互换）")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("[evolve] 旧冠军转入挑战者槽位失败: %s", e)
             await asyncio.to_thread(self.zoo.save_agent, result["agent"], "strategy_drl",
                                     meta={"fitness": new_fitness, "timestamp": time.time(),
                                           "data_source": data_source_used,
@@ -1926,6 +2180,7 @@ class EvolveEngine:
                     import json
 
                     def _write_flat_meta() -> None:
+                        import json
                         with open(flat_path, "r", encoding="utf-8") as f:
                             _md = json.load(f)
                         _md["train_meta"] = {
@@ -1941,11 +2196,18 @@ class EvolveEngine:
                         _md["factor_expression"] = result.get("factor_expression", "")
                         _md["factor_mu"] = float(result.get("factor_mu", 0.0))
                         _md["factor_sd"] = float(result.get("factor_sd", 1.0))
+                        if result.get("factor_composite"):
+                            # 级联因子复算配方：实盘 rl_adaptive 据此在滚动缓冲
+                            # 上复算组合因子（曾只读写死数组，实盘因子列恒 None）
+                            _md["factor_composite"] = result["factor_composite"]
                         _md["min_trade_zone"] = 0.05
                         _md["pine_code"] = result.get("pine_code", "")
                         _md["pine_note"] = result.get("pine_note", "")
-                        with open(flat_path, "w", encoding="utf-8") as f:
-                            json.dump(_md, f, ensure_ascii=False)
+                        # run25 R5 修复：原 open("w")+json.dump 非原子重写，
+                        # 写盘窗口内读取方（rl_adaptive/回测/load_agent flat 回退）
+                        # 可能读到截断 JSON；改走 ModelZoo 原子写（tmp+fsync+replace）
+                        ModelZoo._atomic_write_bytes(flat_path,
+                                                     ModelZoo._json_bytes(_md))
 
                     await asyncio.to_thread(_write_flat_meta)
             except Exception as e:
@@ -2040,6 +2302,10 @@ class EvolveEngine:
                     "meta_window": 20,
                     "base_agent": best_agent,   # 续训起点（None=首轮从零）
                     "time_budget": float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0),
+                    # 信号对齐塑形（P4-E2）：让元控制器学会跟随高置信子策略信号，
+                    # 逃出"空仓=0"陷阱——此前 289 轮全部 fitness=0.0 被回退/拦截。
+                    # 塑形只进训练梯度，best_ret/OOS 仍按真实收益，验证口径不变。
+                    "reward_signal_align": float(getattr(settings, "evolve_meta_signal_align", 6.0) or 0.0),
                 },
                 on_progress=None,
             )
@@ -2361,15 +2627,17 @@ class EvolveEngine:
                 # P2-9：每模型保留最近 N 轮（含 demo/oos_rejected/rollback），
                 # 防止 evolve_rounds 表长期运行无界增长、重启全表扫描变慢
                 keep = max(100, int(getattr(settings, "evolve_rounds_keep", 500)))
-                cutoff_id = (await s.execute(
-                    select(EvolveRound.id)
-                    .where(EvolveRound.model == model)
-                    .order_by(EvolveRound.id.desc())
-                    .offset(keep).limit(1))).scalar_one_or_none()
-                if cutoff_id is not None:
-                    await s.execute(delete(EvolveRound)
-                                    .where(EvolveRound.model == model,
-                                           EvolveRound.id < cutoff_id))
+                # run12 E1：cutoff 查询 + delete 合并为单条 DELETE（标量子查询），
+                # 省一次 aiosqlite 往返（约 -17% 全序列）；无 cutoff 时（表未超
+                # keep 行）子查询返回 NULL，`id < NULL` 恒假 → 不删行，语义等价
+                # （.optim/probe_evolve_merge.py：超阈/未超阈边界逐行对比 PASS）
+                cutoff_subq = (select(EvolveRound.id)
+                               .where(EvolveRound.model == model)
+                               .order_by(EvolveRound.id.desc())
+                               .offset(keep).limit(1).scalar_subquery())
+                await s.execute(delete(EvolveRound)
+                                .where(EvolveRound.model == model,
+                                       EvolveRound.id < cutoff_subq))
                 await s.commit()
         except Exception as e:  # noqa: BLE001
             log.warning("[evolve] 训练轮次落库失败(%s): %s", model, e)
@@ -2490,6 +2758,34 @@ class EvolveEngine:
             return None
         except Exception as e:  # noqa: BLE001
             log.warning("[evolve] 加载级联因子失败: %s", e)
+            return None
+
+    def _load_cascade_factor_recipe(self, symbol: str = "") -> Optional[dict]:
+        """加载级联组合因子的复算配方（选中因子权重映射）。
+
+        与 _cascade_factor_values_{symbol}.npy 同标同轮保存
+        （_cascade_weights_{symbol}.json），部署端把它写进模型文件，
+        实盘 rl_adaptive/meta_controller 按配方在滚动缓冲上复算组合因子。
+        返回 {"weights": {因子key: 权重}}，找不到/解析失败返回 None（不阻断）。
+        """
+        try:
+            if not symbol:
+                return None
+            import json as _json
+            weights_path = (self.zoo.models_dir
+                            / f"_cascade_weights_{symbol.replace('/', '_')}.json")
+            if not weights_path.exists():
+                return None
+            weights = _json.loads(weights_path.read_text(encoding="utf-8"))
+            if not isinstance(weights, dict) or not weights:
+                return None
+            clean = {str(k): float(v) for k, v in weights.items()
+                     if isinstance(v, (int, float)) and v}
+            if not clean:
+                return None
+            return {"weights": clean}
+        except Exception as e:  # noqa: BLE001
+            log.warning("[evolve] 加载级联因子配方失败: %s", e)
             return None
 
     def _next_symbol(self) -> str:

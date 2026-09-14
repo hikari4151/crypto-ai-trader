@@ -168,11 +168,18 @@ def _atr_vec(highs, lows, closes, period: int = 14):
     tr = xp.maximum(highs - lows,
                     xp.maximum(xp.abs(highs - prev_close), xp.abs(lows - prev_close)))
     out = xp.full_like(closes, xp.nan)
-    if len(closes) < period:
+    if len(closes) < period + 1:
         return out
-    first = float(xp.nanmean(tr[1:period + 1]))
-    out[period - 1] = first
-    for i in range(period, len(closes)):
+    # P0-BUGFIX（1 根前视 + 与实盘口径错位一格）：原实现为
+    #   first = nanmean(tr[1:period+1]); out[period-1] = first
+    # —— 写到第 period-1 根，却用了含第 period 根 TR 的窗口，即暖机期最后一根
+    # ATR 偷看了下一根K线（前视偏差 A1）；而实盘 compute_latest 走
+    # indicators/technical.py::atr（out[period] = mean(tr[1:period+1])），
+    # 二者错位一格 → 回测经 snapshot_at 取的 atr_pct 与实盘最大相对差 3.44%
+    # （A4 同口径红线）。dual_ma 的 atr_stop_mult 止损距离直接读该值。
+    # 修正：与 technical.atr 完全同构，逐位相同（验证 maxdiff=0.0）且无前视。
+    out[period] = float(xp.nanmean(tr[1:period + 1]))
+    for i in range(period + 1, len(closes)):
         out[i] = (out[i - 1] * (period - 1) + float(tr[i])) / period
     return out
 

@@ -14,7 +14,6 @@
 """
 import copy
 import logging
-import math
 import os
 import random
 import time
@@ -66,6 +65,30 @@ def meta_vol_feature(closes, window: int = _META_VOL_WINDOW) -> float:
     return float(min(realized_volatility(closes, window) / _META_VOL_SCALE, 1.0))
 
 
+def _precompute_vol_feats(closes: np.ndarray, window: int = _META_VOL_WINDOW) -> np.ndarray:
+    """整列预计算 meta_vol_feature（run19 E1）：vol[t] = meta_vol_feature(closes[max(0,t-window):t+1])。
+
+    t < window 边界逐点；t >= window 用 sliding_window_view 批量 np.std。
+    与逐步计算逐位一致（.optim/probe_meta_vol.py：5000 点含边界 bitwise PASS）。
+    """
+    n = len(closes)
+    vol = np.zeros(n)
+    bound = min(n, window)
+    for t in range(bound):
+        arr = closes[max(0, t - window):t + 1]
+        if arr.size < 3:
+            vol[t] = 0.0
+        else:
+            rets = np.diff(arr) / np.maximum(np.abs(arr[:-1]), 1e-9)
+            vol[t] = float(min(float(np.std(rets)) / _META_VOL_SCALE, 1.0))
+    if n > window:
+        from numpy.lib.stride_tricks import sliding_window_view
+        view = sliding_window_view(closes, window + 1)
+        rets = np.diff(view, axis=1) / np.maximum(np.abs(view[:, :-1]), 1e-9)
+        vol[window:] = np.minimum(np.std(rets, axis=1, ddof=0) / _META_VOL_SCALE, 1.0)
+    return vol
+
+
 def meta_performance(trades, window: int) -> tuple[float, float]:
     """子策略近期表现 → (胜率, 近期平均收益率)。"""
     trades = list(trades or [])
@@ -86,12 +109,16 @@ def record_meta_trade_result(trades: list, pnl: float, window: int) -> None:
 
 def build_meta_state(strategy_names, signals: dict, trades_by_name: dict, *,
                      meta_window: int, pos_ratio: float, pnl_ratio: float,
-                     vol_closes) -> np.ndarray:
+                     vol_closes, vol_feature: Optional[float] = None) -> np.ndarray:
     """拼装元控制器状态向量（训练 MetaControllerEnv 与实盘 MetaController 共用）。
 
     signals: {子策略名: {"direction": ±1/0, "confidence": float}}
     trades_by_name: {子策略名: [已平仓收益率, ...]}
     vol_closes: 截至当前K线的收盘序列尾部（含当前根）
+    vol_feature: 预计算的波动率特征值（run19 E1：训练端 MetaControllerEnv
+        __init__ 整列预计算后查表传入，省 96,900 次/回合逐步 np.diff+np.std；
+        实盘端不传则回落 meta_vol_feature(vol_closes)——两口径逐位一致
+        （.optim/probe_meta_vol.py：5000 点含边界 bitwise PASS））。
     """
     parts: list[float] = []
     for name in strategy_names:
@@ -100,7 +127,9 @@ def build_meta_state(strategy_names, signals: dict, trades_by_name: dict, *,
         conf = float(info.get("confidence", 0.0) or 0.0)
         win_rate, recent_avg = meta_performance(trades_by_name.get(name), meta_window)
         parts.extend([direction, conf, win_rate, recent_avg])
-    parts.extend([float(pos_ratio), float(pnl_ratio), meta_vol_feature(vol_closes)])
+    if vol_feature is None:
+        vol_feature = meta_vol_feature(vol_closes)
+    parts.extend([float(pos_ratio), float(pnl_ratio), float(vol_feature)])
     return np.asarray(parts, dtype=float)
 
 
@@ -179,6 +208,7 @@ class MetaController(Strategy):
         "stop_loss_pct": {"type": "float", "min": 0.001, "max": 0.2, "label": "止损比例"},
         "take_profit_pct": {"type": "float", "min": 0.001, "max": 0.5, "label": "止盈比例"},
         "size_pct": {"type": "float", "min": 0.05, "max": 1.0, "label": "下单比例"},
+        "per_strategy_trades": {"type": "bool", "label": "按子策略独立记战绩（训练/部署同构）"},
     }
 
     def reset(self) -> None:
@@ -197,6 +227,7 @@ class MetaController(Strategy):
         self._factor_mu: Optional[float] = None
         self._factor_sd: Optional[float] = None
         self._factor_expr: str = ""
+        self._factor_composite: Optional[dict] = None  # 级联组合因子配方（factor_miner 挖掘）
         self._closes: list[float] = []
         self._opens: list[float] = []
         self._highs: list[float] = []
@@ -236,7 +267,8 @@ class MetaController(Strategy):
         self._strategy_names = list(dict.fromkeys(names))  # 去重但保持顺序
         self._sub_strategies = []
         from . import get_strategy  # 延迟导入避免循环依赖
-        for name in self._strategy_names:
+        loaded = []
+        for name in list(self._strategy_names):
             try:
                 st = get_strategy(name)
                 st.reset()
@@ -244,9 +276,14 @@ class MetaController(Strategy):
                 # 初始化表现跟踪
                 if name not in self._strategy_trades:
                     self._strategy_trades[name] = []
+                loaded.append(name)
                 log.info("[meta] 子策略 %s 已加载", name)
             except ValueError as e:
-                log.warning("[meta] 子策略 %s 加载失败: %s", name, e)
+                # run24 修复：加载失败的名字若不剔除会留在 _strategy_names，
+                # 而 _sub_strategies 只含成功项 → _collect_sub_signals 按序号
+                # 取实例时错位/IndexError，前几个名字张冠李戴污染集成信号
+                log.warning("[meta] 子策略 %s 加载失败，剔除: %s", name, e)
+        self._strategy_names = loaded
 
     @property
     def managed_executors(self) -> list[str]:
@@ -270,6 +307,7 @@ class MetaController(Strategy):
         """
         self._meta_agent = None
         self._meta_state_dim = 0
+        self._factor_composite = None  # 换模型后清空旧配方，防跨模型残留
         return self._load_meta_agent()
 
     def _load_meta_agent(self) -> bool:
@@ -293,11 +331,21 @@ class MetaController(Strategy):
             return False
 
     def _factor_value(self) -> Optional[float]:
-        """计算因子信号列（与 rl_adaptive 同口径）。"""
+        """计算因子信号列（与 rl_adaptive 同口径：配方优先，其次表达式）。"""
+        import pandas as pd
+        if self._factor_composite:
+            from factors.mining import CompositeFactorEvaluator
+            ev = CompositeFactorEvaluator(
+                self._factor_composite.get("weights") or {},
+                mu=self._factor_mu, sd=self._factor_sd)
+            df = pd.DataFrame({
+                "open": self._opens, "high": self._highs, "low": self._lows,
+                "close": self._closes, "volume": self._volumes,
+            })
+            return ev.eval(df)
         if not self._factor_expr or len(self._closes) < 5:
             return None
         from factors.mining import FactorExecutor
-        import pandas as pd
         df = pd.DataFrame({
             "open": self._opens, "high": self._highs, "low": self._lows,
             "close": self._closes, "volume": self._volumes,
@@ -448,6 +496,9 @@ class MetaController(Strategy):
                             self._factor_mu = md.get("factor_mu")
                             self._factor_sd = md.get("factor_sd")
                             self._factor_expr = str(md.get("factor_expression", "") or "")
+                            fc = md.get("factor_composite")
+                            if isinstance(fc, dict) and fc.get("weights"):
+                                self._factor_composite = fc
                     except Exception:
                         pass
 
@@ -467,9 +518,13 @@ class MetaController(Strategy):
                         )
                         reason = f"元策略DRL回退(conf={action_conf:.2f}), 加权={weighted_sum:.2f}"
                     else:
-                        # DRL 选择：0=清仓, 1=买入, 2=卖出
-                        action_map = {0: 0, 1: 1, 2: -1}
-                        mapped = action_map.get(action, 0)
+                        # DRL 选择：0=清仓, 1=买入, 2=卖出（训练端 MetaControllerEnv
+                        # action 0 与 2 均触发 _close_position 清仓；实盘执行段只有
+                        # 1(买)/-1(卖) 分支，0 曾无映射 → 持仓中选 0 实盘不动作，
+                        # 训练/部署语义不一致。0 映射到 -1（卖出清仓）对齐训练端，
+                        # 空仓时 position==0 执行段自然无操作，与训练端一致）
+                        action_map = {0: -1, 1: 1, 2: -1}
+                        mapped = action_map.get(action, -1)
                         reason = f"元策略DRL选择子策略#{action}(conf={action_conf:.2f})"
                         action = mapped
                 else:
@@ -513,14 +568,30 @@ class MetaController(Strategy):
         if side == "buy":
             self._entry = price
         else:
-            # 卖出成交后，记录本次交易的收益到各子策略的胜率跟踪
-            # 注意：这里是简化的跟踪，每个子策略都记同一个收益
+            # 卖出成交后，记录本次交易的收益到各子策略的胜率跟踪。
+            # 默认（per_strategy_trades=False）：每个子策略都记同一个收益（简化跟踪）；
+            # 开启后与训练端 MetaControllerEnv 同构：顺向信号记真实收益、逆向记 0、
+            # 无信号不记（缺席≠错误），让状态里的 win_rate 具备子策略区分度。
             if self._entry and self._entry > 0:
                 pnl = (price - self._entry) / self._entry
                 window = self._meta_window()
-                for name in self._strategy_names:
-                    record_meta_trade_result(
-                        self._strategy_trades.setdefault(name, []), pnl, window)
+                if bool(self.params.get("per_strategy_trades", False)):
+                    for name in self._strategy_names:
+                        sig = (self._strategy_signals or {}).get(name)
+                        if sig is None:
+                            continue  # 无信号不记
+                        d = (1.0 if sig.side == "buy"
+                             else (-1.0 if sig.side == "sell" else 0.0))
+                        if d > 0:
+                            record_meta_trade_result(
+                                self._strategy_trades.setdefault(name, []), pnl, window)
+                        elif d < 0:
+                            record_meta_trade_result(
+                                self._strategy_trades.setdefault(name, []), 0.0, window)
+                else:
+                    for name in self._strategy_names:
+                        record_meta_trade_result(
+                            self._strategy_trades.setdefault(name, []), pnl, window)
             self._entry = None
 
 
@@ -550,7 +621,16 @@ class MetaControllerEnv:
                  fee_rate: float = 0.001,
                  meta_window: int = _DEFAULT_META_WINDOW,
                  symbol: str = "META",
-                 timeframe: str = ""):
+                 timeframe: str = "",
+                 reward_signal_align: float = 0.0,
+                 random_start: bool = False,
+                 min_ep_len: int = 0,
+                 seed: Optional[int] = None,
+                 trade_penalty: float = 0.0,
+                 per_strategy_trades: bool = False,
+                 align_maintain_scale: float = 0.15,
+                 align_novelty_gate: bool = False,
+                 align_exit_penalty: bool = False):
         self.df = df
         self.strategy_names, self.sub_strategies = _resolve_sub_strategies(strategy_names)
         self.n_strategies = len(self.strategy_names)
@@ -560,6 +640,58 @@ class MetaControllerEnv:
         self.meta_window = max(5, int(meta_window))
         self.symbol = symbol
         self.timeframe = timeframe
+        # E-EXP：随机起点（多区间采样）。True 时 reset 在
+        # [warmup, n-2-min_ep_len] 均匀取起点，episode 跑到段尾结束——
+        # 每轮轨迹覆盖不同行情区段，样本去相关、探索更充分；
+        # 验证/OOS 评估环境必须保持 False（整段确定性评估口径不变）。
+        self.random_start = bool(random_start)
+        self.min_ep_len = max(50, int(min_ep_len)) if min_ep_len else 50
+        self._rng = np.random.default_rng(seed)
+        # 信号对齐塑形系数（>0 开启，0=关闭保持旧行为）：奖励里追加
+        # "仓位方向 × 最强子策略信号方向 × 置信度"项，让 PPO 学会在信号
+        # 高置信时真正持仓（元控制器本职——何时信任哪个子策略），
+        # 而不是停在"空仓=0"的懒惰最优解上。塑形只进训练梯度，
+        # 选模/OOS 的 best_ret 仍按真实收益计算，不改变验证口径。
+        self.reward_signal_align = float(reward_signal_align or 0.0)
+        # E-EXP：成交惩罚（>0 开启）。每次实际成交（开仓/平仓）从奖励扣固定值：
+        # 手续费真实损耗已进 equity（验证/OOS 口径），但逐根收益信号弱、惩罚薄，
+        # 控制器学到高频进出（OOS 段 300~900 笔、换手吞噬收益）；显式成交惩罚
+        # 把"换手代价"直接压进训练梯度，逼策略只在信号真正有利时交易。
+        # 只进训练梯度；best_ret/OOS 仍按真实收益，验证口径不变。
+        self.trade_penalty = float(trade_penalty or 0.0)
+        # 实验证伪记录（.optim/exp_training/confirm_meta_penalty.py，4 seed）：
+        # trade_penalty>0 会把验证选模推向"从不交易"的退化策略（oos_fills→0、
+        # 验证收益 0.0 反而被选为最优），重新诱发 signal_align 塑形要解决的
+        # 空仓=0 懒惰最优解；且真实成交率本就低（OOS 段 18~36 笔/千根，
+        # 此前 300~900 的"换手"统计的是无效动作）。勿在生产启用该惩罚。
+        # E-EXP：按子策略独立记战绩。默认关（所有子策略共享同一笔收益——状态里
+        # win_rate/recent_avg 对全部子策略相同，无区分度）；开启后只有信号方向与
+        # 持仓方向一致的子策略记真实收益、逆向记0、无信号不记（缺席≠错误）。
+        # 训练端（本 env）与部署端 MetaController.on_fill 同构，必须一起开。
+        # 实验证伪记录（.optim/exp_training/confirm_meta_pst.py，3 seed）：
+        # 独立记账使 OOS 收益坍缩、退化到三 seed 逐位相同的不交易策略，不采纳。
+        self.per_strategy_trades = bool(per_strategy_trades)
+        # 塑形"顺势维持"项系数（0.15=现状）。实验发现：密集信号子策略
+        # （factor_signal 54%K线发信号、conf=1）下维持项逐根叠加
+        # （0.15×align×conf/根），压过真实收益信号 → 元控制器恒多坍缩
+        # （.optim/exp_training/confirm_sub_pools.py：oos -0.17、fills524、
+        # 全 seed 逐位相同）。调小/归零可缓解，见 sweep_align_maintain.py。
+        self.align_maintain_scale = float(align_maintain_scale)
+        # E-EXP：入场塑形的新颖性门控（默认关）。密集单边信号下入场奖励
+        # （align×conf/次）逐次叠加、压过真实收益 → 恒多坍缩（align=12）
+        # 或反向坍缩不交易（align=6/3），见 sweep_meta_align_dense.py。
+        # 门控开启后只有最强信号【方向变化】才发一次性入场奖励——恒买信号
+        # 重复刷分失效，塑形回归"奖励新决策"本职。只影响训练梯度。
+        self.align_novelty_gate = bool(align_novelty_gate)
+        self._last_align_dir = 0.0  # 上一步最强信号方向（新颖性门控用）
+        # E-EXP：反向离场惩罚（默认关）。生产归档证据（data/models/meta_controller/meta.json +
+        # archive/，9/13~9/14 每小时）：元策略每轮 fitness≈-0.217、OOS -0.206~-0.210 被安检
+        # 门拦截、连续多轮逐位相同——正是离线复现的"买→卖逐根换手"坍缩（.optim/exp_training/
+        # confirm_sub_pools.py）。机制：入场奖励(+align×conf)每轮换手净赚，而顺向信号下的
+        # 平仓无塑形成本（aligned_new=0 不触发逆势惩罚）。开启后：持仓时最强信号仍顺向
+        # （best_dir==持仓方向）却平仓 → 罚 _align，与入场奖励对称，换手循环塑形净收益归零，
+        # 真实收益/手续费重新主导。只影响训练梯度。
+        self.align_exit_penalty = bool(align_exit_penalty)
         self.n = len(df)
 
         # 状态维度：每子策略 (方向 + 置信度 + 胜率 + 近期均值) + 全局(持仓比+盈亏+波动率)
@@ -570,6 +702,7 @@ class MetaControllerEnv:
         self._cash = start_cash
         self._qty = 0.0
         self._entry_price = None
+        self._fills = 0  # 实际成交笔数（开/平仓都算；区别于"动作次数"——空仓按卖出等无效动作不算）
         self._t = min(warmup, max(0, self.n - 2))
         self._strategies_trades: dict[str, list[float]] = {n: [] for n in self.strategy_names}
         self._sigs_t = -1
@@ -577,6 +710,12 @@ class MetaControllerEnv:
 
         # 指标序列向量化预计算一次（与回测引擎同一函数、同一 MA 口径）
         self._closes = df["close"].to_numpy(float)
+        # run19 E1：波动率特征整列预计算（原 _build_state 每步
+        # meta_vol_feature(vol_closes) → np.diff+np.std 切片，96,900 次/回合
+        # ≈9.2% meta 管线 wall；__init__ 一次算完，_build_state 查表。
+        # sliding_window_view 主体 + 边界逐点的实现与逐步计算逐位一致
+        # （.optim/probe_meta_vol.py：5000 点含 t<window 边界 bitwise PASS）。
+        self._vol_feats = _precompute_vol_feats(self._closes, _META_VOL_WINDOW)
         opens = df["open"].to_numpy(float) if "open" in df.columns else self._closes
         highs = df["high"].to_numpy(float) if "high" in df.columns else self._closes
         lows = df["low"].to_numpy(float) if "low" in df.columns else self._closes
@@ -656,7 +795,8 @@ class MetaControllerEnv:
                                 meta_window=self.meta_window,
                                 pos_ratio=(parts_price / equity) if equity > 0 else 0.0,
                                 pnl_ratio=pnl_ratio,
-                                vol_closes=self._closes[max(0, t - _META_VOL_WINDOW):t + 1])
+                                vol_closes=self._closes[max(0, t - _META_VOL_WINDOW):t + 1],
+                                vol_feature=self._vol_feats[t])
 
     def _notify_fill(self, side: str, price: float) -> None:
         """成交回报透传子策略（与 MetaController.on_fill 同构）。"""
@@ -667,14 +807,31 @@ class MetaControllerEnv:
                 pass
 
     def _close_position(self, price_now: float) -> None:
-        """按现价清仓，并把这笔收益记进各子策略的表现跟踪。"""
+        """按现价清仓，并把这笔收益记进各子策略的表现跟踪。
+
+        per_strategy_trades=True 时（训练/部署同构）按子策略当前信号方向分开记账：
+        顺向（信号方向==持仓方向，本控制器只做多→direction>0）记真实收益；
+        逆向记0；无信号不记（缺席≠错误）。让 win_rate/recent_avg 具备子策略区分度。
+        """
         sell_value = self._qty * price_now
         self._cash += sell_value - sell_value * self.fee_rate
         if self._entry_price and self._entry_price > 0:
             pnl = (price_now - self._entry_price) / self._entry_price
-            for name in self.strategy_names:
-                record_meta_trade_result(self._strategies_trades.setdefault(name, []),
-                                         pnl, self.meta_window)
+            if self.per_strategy_trades:
+                sigs = self._sigs or {}
+                for name in self.strategy_names:
+                    d = float((sigs.get(name) or {}).get("direction", 0.0) or 0.0)
+                    if d > 0:  # 顺向（做多信号）
+                        record_meta_trade_result(self._strategies_trades.setdefault(name, []),
+                                                 pnl, self.meta_window)
+                    elif d < 0:  # 逆向（做空信号）→记0
+                        record_meta_trade_result(self._strategies_trades.setdefault(name, []),
+                                                 0.0, self.meta_window)
+                    # d == 0（无信号）→不记
+            else:
+                for name in self.strategy_names:
+                    record_meta_trade_result(self._strategies_trades.setdefault(name, []),
+                                             pnl, self.meta_window)
         self._qty = 0.0
         self._entry_price = None
         self._notify_fill("sell", price_now)
@@ -690,27 +847,45 @@ class MetaControllerEnv:
     def reset(self) -> np.ndarray:
         for st in self.sub_strategies:
             st.reset()
-        self._t = self.warmup
+        # run24 修复：与 __init__ 的 min(warmup, max(0, n-2)) 钳制保持一致——
+        # 短数据（len(df) <= warmup）时 reset 曾直接 IndexError（_closes[warmup] 越界）
+        if self.random_start:
+            # E-EXP：随机起点（多区间采样）——[warmup, n-2-min_ep_len] 均匀取，
+            # 至少保留 min_ep_len 根窗口。短数据无法容纳时回退固定起点。
+            lo = self.warmup
+            hi = max(lo + 1, self.n - 2 - self.min_ep_len)
+            if hi > lo:
+                self._t = int(self._rng.integers(lo, hi))
+            else:
+                self._t = min(self.warmup, max(0, self.n - 2))
+        else:
+            self._t = min(self.warmup, max(0, self.n - 2))
         self._cash = self.start_cash
         self._qty = 0.0
         self._entry_price: Optional[float] = None
         self._prev_equity = self.start_cash
         self._final_equity = self.start_cash
         self._final_position_ratio = 0.0
+        self._fills = 0
         self._done = False
         self._strategies_trades: dict[str, list[float]] = {n: [] for n in self.strategy_names}
         # 子策略推进游标：暖机段（0..warmup-1）也要按顺序喂进去，状态才与实盘一致
         self._sigs_t = -1
         self._sigs = None
         self._last_trade_time = 0
+        self._last_align_dir = 0.0  # 新颖性门控：episode 内信号方向记忆
         return self._build_state(self._t)
 
     def step(self, action: int) -> tuple:
         """执行动作：0=清仓, 1=买入, 2=卖出。"""
         assert not self._done, "环境已终止"
 
-        price_now = self.df["close"].iloc[self._t]
-        price_next = self.df["close"].iloc[self._t + 1] if self._t + 1 < self.n else price_now
+        price_now = self._closes[self._t]  # E1：numpy 数组索引（与 df["close"].iloc 同值，
+        # 消除每步 2 次 pandas iget/__getitem__——profile 中 193,900 次 pandas 列访问
+        # 占 meta 训练回合大头；self._closes 与 df["close"] 同一底层 float64 数据）
+        price_next = self._closes[self._t + 1] if self._t + 1 < self.n else price_now
+        _qty_before = self._qty
+        traded = False
 
         # 执行动作
         if action == 1 and self._qty <= 0:  # 买入
@@ -720,11 +895,16 @@ class MetaControllerEnv:
             self._qty = buy_value / price_now
             self._entry_price = price_now
             self._notify_fill("buy", price_now)
+            traded = True
         elif action == 2 and self._qty > 0:  # 卖出（清仓）
             self._close_position(price_now)
+            traded = True
         elif action == 0:  # 清仓
             if self._qty > 0:
                 self._close_position(price_now)
+                traded = True
+        if traded:
+            self._fills += 1
 
         # 推进到下一根K线
         self._t += 1
@@ -738,11 +918,57 @@ class MetaControllerEnv:
         self._final_position_ratio = float(self._qty * price_next / max(equity_next, 1e-9))
         # 奖励 = 收益率（bp），软裁剪
         reward = float(150.0 * np.tanh(ret * 10000.0 / 150.0))
+        # 成交惩罚（实验证伪，勿启用：会诱发空仓=0退化策略，见 __init__ 注释）
+        if traded and self.trade_penalty > 0:
+            reward -= self.trade_penalty
+        # 元控制器本职塑形：跟随最强子策略信号（reward_signal_align>0 时开启）。
+        # 设计成"决策塑形"而非"持仓塑形"：
+        #   - 空仓 → 顺势建仓：一次性 +align×conf（奖励"跟随高置信信号"这一决策本身）
+        #   - 顺势持仓维持：轻 +align×conf×0.15（防止一买就卖，学会拿住信号）
+        #   - 逆势持仓（最强信号已转空而仍持多）：-align×conf（罚背离，学会离场）
+        # 塑形只进训练梯度；选模/OOS 的 total_ret 按真实收益计算，验证口径不变。
+        # 目的：让 PPO 学会"信号高置信时建仓、信号转弱时离场"，逃出
+        # "空仓=0"的懒惰最优解——此前元策略 289 轮 fitness 全 0、从不交易。
+        if self.reward_signal_align > 0:
+            best_dir, best_conf = 0.0, 0.0
+            for _s in (self._sigs or {}).values():
+                _d = float(_s.get("direction", 0.0) or 0.0)
+                _c = float(_s.get("confidence", 0.0) or 0.0)
+                if _d != 0.0 and _c > best_conf:
+                    best_conf, best_dir = _c, _d
+            if self.align_novelty_gate:
+                # 新颖性：最强信号方向相对上一步是否变化（无信号=0，
+                # 因此 无信号→有信号 也算变化）。恒买/恒卖重复信号不算新颖。
+                novel = best_dir != self._last_align_dir
+                self._last_align_dir = best_dir
+            else:
+                novel = True
+            if best_dir != 0.0 and best_conf > 0.0:
+                _align = float(self.reward_signal_align) * best_conf
+                _held_before = 1.0 if _qty_before > 1e-12 else 0.0
+                _held_after = 1.0 if self._qty > 1e-12 else 0.0
+                aligned_old = _held_before * best_dir   # ∈ {-1, 0, +1}
+                aligned_new = _held_after * best_dir
+                if aligned_new > 0:
+                    # 顺势建仓（空仓→持仓）：一次性奖励（新颖性门控时仅新方向发）；
+                    # 顺势维持：轻奖励（维持项——实验证伪其对密集池坍缩无影响）
+                    if novel:
+                        reward += _align * max(0.0, aligned_new - aligned_old)
+                    reward += _align * self.align_maintain_scale * aligned_new
+                elif aligned_new < 0:
+                    # 逆势持仓（信号已空/转弱仍持多）：惩罚
+                    reward -= _align
+                if self.align_exit_penalty:
+                    # 反向离场惩罚：持仓时最强信号仍顺向却平仓（aligned_old>0 且离场）→
+                    # 罚 _align，与入场奖励对称（换手循环塑形净收益归零）
+                    if aligned_old > 0 and _held_after <= 0:
+                        reward -= _align
         self._prev_equity = equity_next
 
         info = {
             "equity": equity_next,
             "ret_pct": ret * 100.0,
+            "fills": self._fills,
         }
         return self._build_state(self._t), reward, self._done, info
 
@@ -815,10 +1041,21 @@ def train_meta_controller(df, cfg: dict,
 
     env_kwargs = dict(warmup=warmup, start_cash=start_cash, fee_rate=fee_rate,
                       meta_window=meta_window, symbol=str(cfg.get("symbol", "META")),
-                      timeframe=str(cfg.get("timeframe", "") or ""))
+                      timeframe=str(cfg.get("timeframe", "") or ""),
+                      reward_signal_align=float(cfg.get("reward_signal_align", 0.0) or 0.0),
+                      random_start=bool(cfg.get("random_start", False)),
+                      seed=seed,
+                      trade_penalty=float(cfg.get("trade_penalty", 0.0) or 0.0),
+                      per_strategy_trades=bool(cfg.get("per_strategy_trades", False)),
+                      align_maintain_scale=float(cfg.get("align_maintain_scale", 0.15)),
+                      align_novelty_gate=bool(cfg.get("align_novelty_gate", False)),
+                      align_exit_penalty=bool(cfg.get("align_exit_penalty", False)))
+    # E-EXP：学习率退火（与 train_drl 同口径）；默认关
+    lr_anneal = bool(cfg.get("lr_anneal", False))
+    lr_final_ratio = float(cfg.get("lr_final_ratio", 0.2))
 
-    def _make_env(seg):
-        return MetaControllerEnv(seg, sub_names, **env_kwargs)
+    def _make_env(seg, **over):
+        return MetaControllerEnv(seg, sub_names, **{**env_kwargs, **over})
 
     state_dim = meta_state_dim(len(sub_names))
     agent = ACAgent(state_dim, 3, hidden=hidden,
@@ -849,8 +1086,9 @@ def train_meta_controller(df, cfg: dict,
     # 单轮训练时间预算（秒）：>0 时超时提前结束（连续训练控成本）
     time_budget = float(cfg.get("time_budget", 0.0) or 0.0)
 
-    # 验证环境全程复用：run_episode 内部 reset 会把子策略退回起点重推
-    val_env = None if split_skipped else _make_env(val_df)
+    # 验证环境全程复用：run_episode 内部 reset 会把子策略退回起点重推。
+    # 验证/OOS 必须整段确定性评估（random_start=False），只有训练环境用随机起点。
+    val_env = None if split_skipped else _make_env(val_df, random_start=False, seed=seed + 90001)
 
     # 训练循环（PPO 批量收集 + 多轮 mini-batch）
     history: list[dict] = []
@@ -860,7 +1098,12 @@ def train_meta_controller(df, cfg: dict,
     val_eval_interval = max(1, int(cfg.get("val_eval_interval", 5)))
     total_ret = 0.0
 
-    with ThreadPoolExecutor(max_workers=min(n_episodes, 4)) as pool:
+    # E-EXP：并行收集线程数（默认 4 与旧行为一致；大核数机器上配合
+    # n_episodes>=8 可显著降低每轮墙钟，见 .optim/exp_training/bench_parallel.py）
+    max_workers = min(n_episodes, int(cfg.get("max_workers", 4)))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        lr_actor_init = agent.actor.lr
+        lr_critic_init = agent.critic.lr
         for ep in range(1, episodes + 1):
             # 时间预算：至少完成 1 轮后超时即提前收尾
             if time_budget > 0 and ep > 1 and (time.time() - t0) >= time_budget:
@@ -868,11 +1111,17 @@ def train_meta_controller(df, cfg: dict,
                          time_budget, ep - 1)
                 break
             agent.set_episode_epsilon(ep - 1)
+            # E-EXP：学习率退火（训练后期降低更新幅度，收敛更稳，与 train_drl 同口径）
+            if lr_anneal:
+                frac = ep / episodes
+                lr_scale = lr_final_ratio + (1 - lr_final_ratio) * (1 - frac)
+                agent.actor.lr = lr_actor_init * lr_scale
+                agent.critic.lr = lr_critic_init * lr_scale
 
             def _collect_one(args: tuple) -> dict:
                 ep_i, worker_i = args
-                local_env = _make_env(train_df)
-                local_rng = np.random.default_rng(seed + ep_i * 1000 + worker_i)
+                local_env = _make_env(train_df, seed=seed + ep_i * 1000 + worker_i)
+                local_rng = np.random.default_rng(seed + ep_i * 2000 + worker_i)
                 return agent.collect_episode(local_env, rng=local_rng)
 
             trajs = list(pool.map(_collect_one, [(ep, i) for i in range(n_episodes)]))
@@ -942,7 +1191,7 @@ def train_meta_controller(df, cfg: dict,
     deployment_blocked = False
     if len(oos_df) >= min_seg:
         try:
-            oos_env = _make_env(oos_df)
+            oos_env = _make_env(oos_df, random_start=False, seed=seed + 90002)
             otraj = run_episode(oos_env, lambda s: final_agent.greedy_action(s))
             oos_ret = float(otraj["total_ret"])
             train_ref = best_train_ret if best_train_ret > -1e8 else total_ret
@@ -958,6 +1207,13 @@ def train_meta_controller(df, cfg: dict,
                 "overfit_likely": bool(decay > 0.5),
                 "oos_equity_final": round(float(otraj["final_equity"]), 2),
                 "oos_position_ratio": round(float(otraj["final_position_ratio"]), 4),
+                # P4-E2：OOS 交易次数——段末持仓比例会误伤"交易后已平仓"的合理策略
+                #（段末恰为空仓→比例0 被判"样本外未交易"），改用真实下单次数判断
+                # 模型在样本外是否真正行动过（部署硬门据此区分"未交易"与"真亏损"）。
+                "oos_trades": int(((otraj["actions"] == 1) | (otraj["actions"] == 2)).sum()),
+                # 真实成交笔数（开/平仓，不含无效动作；与 oos_trades 的区别：
+                # 空仓反复按"卖出"、持仓反复按"买入"这类无效动作不计入）
+                "oos_fills": int(getattr(oos_env, "_fills", 0)),
                 "oos_sharpe": round(_equity_sharpe(o_eq), 4) if len(o_eq) > 2 else 0.0,
                 "oos_max_drawdown": round(_equity_drawdown(o_eq), 4) if len(o_eq) > 2 else 0.0,
             }

@@ -7,15 +7,14 @@ backtest/_matching.py 共享内核，本引擎与 fast_engine 共用同一实现
 import logging
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
-import numpy as np
 import pandas as pd
 
 from factors.library import ignoring_factor_liveness
 from indicators.technical import SR_MIN_TOUCHES, SR_WINDOW, price_action_features_series, support_resistance_series
 from indicators.vectorized import precompute_indicator_series
-from strategies.base import Strategy, strategy_ma_periods
+from strategies.base import strategy_ma_periods
 
 from ._matching import forced_liquidation, needs_sr, run_matching_loop
 from .metrics import finalize_metrics

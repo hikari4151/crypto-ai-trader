@@ -129,6 +129,50 @@ _FEWSHOT_EXAMPLES: dict[str, str] = {
 }
 
 
+def _fewshot_for(feature: str, ctx: Optional[dict]) -> Optional[str]:
+    """按功能返回合规示例；strategy_design 在"执行器已固定"时按该执行器
+    schema 动态生成参数键——静态示例用的是 price_action 键，AI 在 dual_ma/
+    grid 等执行器上照抄会直接参数越界，白烧一轮校验重试。"""
+    example = _FEWSHOT_EXAMPLES.get(feature)
+    if feature != "strategy_design" or not example or not ctx:
+        return example
+    allowed = ctx.get("allowed_executors") or []
+    schemas = ctx.get("executor_schemas") or {}
+    if len(allowed) == 1:
+        sch = schemas.get(allowed[0]) or {}
+        if sch:
+            params: dict = {}
+            for k, spec in list(sch.items())[:4]:
+                t = spec.get("type")
+                if t in ("float", "int"):
+                    lo, hi = spec.get("min"), spec.get("max")
+                    params[k] = (lo if isinstance(lo, (int, float))
+                                 else (hi if isinstance(hi, (int, float)) else 0))
+                elif t == "str":
+                    choices = spec.get("choices") or []
+                    params[k] = choices[0] if choices else "x"
+                elif t == "bool":
+                    params[k] = True
+            return json.dumps({
+                "name": "ai_example", "title": "示例策略", "description": "示例描述",
+                "logic": "示例入场出场逻辑", "executor": allowed[0], "params": params,
+                "risk_tips": ["示例风控提示"], "pine_code": "",
+            }, ensure_ascii=False)
+    return example
+
+
+def _compact_output(data: dict) -> str:
+    """校验重试回灌时压缩大字段：AI 设计/迭代输出含整段 Pine 代码，
+    全量回灌一次重试 token 成本接近翻倍（P4-D5 只解决了 max_tokens 预配）。
+    Pine 无需重发——校验重试只关心 params/logic/结构，修正后参数才是执行依据。"""
+    out = dict(data)
+    pc = out.get("pine_code")
+    if isinstance(pc, str) and len(pc) > 1500:
+        out["pine_code"] = (pc[:1500]
+                            + "\n// …（重试回灌已截断 Pine；请沿用修正后的参数，无需重发整段代码）")
+    return json.dumps(out, ensure_ascii=False)
+
+
 class AINotConfigured(Exception):
     """AI 尚未配置（缺少 API Key 等）。"""
 
@@ -526,9 +570,9 @@ class AIClient:
                 # 修正消息必须把 AI 输出序列化为字符串（assistant content 只接受 str，
                 # 传 dict 会被 OpenAI 兼容接口 400 拒绝 → 修复重试机制整体失效）
                 msgs.append({"role": "assistant",
-                             "content": json.dumps(data, ensure_ascii=False)})
+                             "content": _compact_output(data)})
                 # P4：注入合规示例（few-shot），提升复杂 schema 的一次修正通过率
-                example = _FEWSHOT_EXAMPLES.get(feature)
+                example = _fewshot_for(feature, ctx or {})
                 retry_prompt = fb + "\n请严格按修正要求重新输出完整 JSON。"
                 if example:
                     retry_prompt = (

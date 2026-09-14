@@ -6,12 +6,10 @@
   此处保留统一的 backend 参数便于扩展
 """
 import logging
-from typing import Any, Iterable, Optional
+from typing import Iterable, Optional
 
-import numpy as np
 import pandas as pd
 
-from .base import Factor
 from .library import factor_keys, get_factor
 
 log = logging.getLogger(__name__)
@@ -55,13 +53,6 @@ def compute_factor_matrix(df: pd.DataFrame, keys: Optional[Iterable[str]] = None
     # 全 NaN 列剔除（避免后续相关性/IC 崩坏）
     valid = mat.columns[mat.notna().sum() > 5]
     return mat[list(valid)]
-
-
-def factor_matrix_from_series(series_dict: dict[str, pd.Series]) -> pd.DataFrame:
-    """从已算好的 Series 构造矩阵（用于合并外部/合成因子）。"""
-    if not series_dict:
-        raise ValueError("无因子序列可合并")
-    return pd.DataFrame(series_dict)
 
 
 def factor_frame_meta(keys: Iterable[str]) -> list[dict]:

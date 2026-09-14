@@ -4,9 +4,7 @@
 因子计算纯向量化（pandas/numpy），支持 GPU 后端（与 fast_engine 对齐）。
 """
 import asyncio
-import json
 import logging
-from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -164,7 +162,9 @@ async def factor_usage(body: FactorComputeIn):
         raise HTTPException(status_code=400, detail=str(e))
 
     close = df["close"]
-    ic_table = factor_ic_table(mat, close, h=body.horizon, method="rank")
+    # IC 表计算是 CPU 密集（26 因子 × 全量相关 + 滚动 IC + Newey-West），
+    # 与上方 compute_factor_matrix 一样放后台线程，避免阻塞事件循环
+    ic_table = await asyncio.to_thread(factor_ic_table, mat, close, h=body.horizon, method="rank")
     latest = df.iloc[-1]
 
     # 每个因子的当前信号：z-score 方法
@@ -265,8 +265,8 @@ async def mine_factors(body: FactorMineIn, engine=Depends(get_engine),
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # 现有因子 IC 表现（给 AI 参考，避免重复）
-    ic_table = factor_ic_table(mat, df["close"], h=body.horizon, method="rank")
+    # 现有因子 IC 表现（给 AI 参考，避免重复）；CPU 密集，放后台线程（同上方口径）
+    ic_table = await asyncio.to_thread(factor_ic_table, mat, df["close"], h=body.horizon, method="rank")
     existing = [{"name": r["key"], "rank_ic": r["rank_ic"]} for r in ic_table[:12]]
 
     # 上一轮 AI 挖掘结果（IC 反馈自进化）：从自定义因子库取 AI 挖掘的历史因子
@@ -281,11 +281,17 @@ async def mine_factors(body: FactorMineIn, engine=Depends(get_engine),
     # 市场特征描述
     close = df["close"]
     ret = close.pct_change().dropna()
+    # 20 期动量需至少 21 根K线；数据不足时降级为整段区间收益（曾直接
+    # iloc[-21] → 短数据 IndexError → HTTP 500，因子挖掘端点崩溃）
+    if len(close) >= 21:
+        mom_desc = f"近期动量(20期): {(close.iloc[-1] / close.iloc[-21] - 1) * 100:.1f}%"
+    else:
+        mom_desc = "近期动量(20期): 数据不足（<21 根），跳过"
     market_desc = (
         f"数据量: {len(df)} 根K线, 周期: {body.timeframe}\n"
         f"区间收益: {(close.iloc[-1] / close.iloc[0] - 1) * 100:.1f}%, "
         f"日波动率均值: {ret.std() * 100:.2f}%\n"
-        f"近期动量(20期): {(close.iloc[-1] / close.iloc[-21] - 1) * 100:.1f}%"
+        f"{mom_desc}"
     )
 
     try:

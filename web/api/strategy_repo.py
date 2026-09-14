@@ -147,6 +147,10 @@ async def repo_all(db=Depends(get_db)):
         "source": "内置", "kind": "builtin", "executor": s["name"],
         "version": "", "iter_no": None, "based_on": "",
         "overfit": None, "blocked_by_overfit": False,
+        # L2：内置策略恒为 active（草稿只可能出现在 AI 产物上），补齐字段让前端
+        # 不必对两类条目做分支判断
+        "status": "active", "draft": False, "draft_reason": "",
+        "overfit_inconclusive": False,
         "can_edit": False,
         "has_pine": s["name"] in PINE_TEMPLATE_EXECUTORS,
         "pine_note": "" if s["name"] in PINE_TEMPLATE_EXECUTORS
@@ -185,6 +189,11 @@ async def repo_all(db=Depends(get_db)):
             "version": s.get("version") or "", "iter_no": iter_no,
             "based_on": s.get("based_on", ""),
             "overfit": s.get("overfit"), "blocked_by_overfit": s.get("blocked_by_overfit", False),
+            # L2：草稿（未证明）标记——过拟合未过 / 样本外证据不足的产物。
+            # 前端据此分区显示与二次确认；后端已禁止它当迭代父代、也不让 AI 接管调参。
+            "status": s.get("status", "active"), "draft": bool(s.get("draft")),
+            "draft_reason": s.get("draft_reason", ""),
+            "overfit_inconclusive": s.get("overfit_inconclusive", False),
             "is_evolve": kind == "进化" or s["name"] == "rl_evolve",
             "can_edit": True,
             # 代码本体不内嵌：一份 DRL 权重脚本约 44KB，几十条列表会撑爆响应，

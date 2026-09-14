@@ -20,6 +20,22 @@ from web.api.tasks_cache import mark_done, prune_task_cache
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
+try:
+    import orjson  # type: ignore
+    _ORJSON = True
+except ImportError:  # pragma: no cover - 依赖缺失回退标准 json
+    _ORJSON = False
+
+
+def _loads(text: str) -> Any:
+    """快速 JSON 解析：orjson 优先（run32 E1，get_result 大 JSON 87KB 解析
+    5.9x），缺失回退标准 json。orjson 与 json 对同一文本逐位等价
+    （run16 probe_orjson_eq.py：1.93MB 全 dict 递归 PASS，JSON 浮点为
+    确定性最近舍入）。"""
+    if _ORJSON:
+        return orjson.loads(text)
+    return json.loads(text)
+
 
 def _load_csv_guarded(csv_path: str):
     """加载 CSV：先校验路径必须位于 data/ 目录内（防任意文件读取）。"""
@@ -64,9 +80,13 @@ class BacktestRequest(BaseModel):
     timeframe: str = "1h"
     strategy_name: str = "dual_ma"
     strategy_params: dict = {}
-    start_cash: float = 10000.0
-    fee_rate: float = 0.001
-    slippage: float = 0.0005
+    # P0-BUGFIX（负数成本凭空生钱 / fee=-1 除零崩溃）：成本类字段全部加边界约束，
+    # 与 web/api/live.py 的 PaperConfigIn 同一标准。此前 40 个 float 字段只有
+    # 4 个带约束：fee_rate=-0.1 → 总收益 +48.6%（诚实值 +1.08%）；
+    # fee_rate=-1.0 → backtest/_matching.py 的 cash/(1+fee_rate) 分母为 0 → 500。
+    start_cash: float = Field(default=10000.0, gt=0, allow_inf_nan=False)
+    fee_rate: float = Field(default=0.001, ge=0, le=0.1, allow_inf_nan=False)
+    slippage: float = Field(default=0.0005, ge=0, le=0.1, allow_inf_nan=False)
     since: str = ""
     until: str = ""                 # 结束时间（含当日；空=不限制）
     limit: int = Field(default=1000, ge=100, le=5000)   # 封顶防任意大值阻塞
@@ -74,10 +94,10 @@ class BacktestRequest(BaseModel):
     stream: bool = True               # 是否推送实时进度
     limit_order_model: str = "none"   # "none" | "partial" | "probabilistic"
     # ---- P0 成本/成交约束（缺省 = 沿用 fee_rate，向后兼容） ----
-    maker_fee_rate: Optional[float] = None   # 限价单费率（None → fee_rate）
-    taker_fee_rate: Optional[float] = None   # 市价单费率（None → fee_rate）
-    funding_rate: float = 0.0                # 每根K线按持仓价值收取的资金费率
-    participation_rate: float = 0.0          # 买单成交量参与率上限（0=不限）
+    maker_fee_rate: Optional[float] = Field(default=None, ge=0, le=0.1, allow_inf_nan=False)
+    taker_fee_rate: Optional[float] = Field(default=None, ge=0, le=0.1, allow_inf_nan=False)
+    funding_rate: float = Field(default=0.0, ge=-0.01, le=0.01, allow_inf_nan=False)
+    participation_rate: float = Field(default=0.0, ge=0, le=1.0, allow_inf_nan=False)
     intrabar_stops: bool = True              # intrabar 止损/止盈触价建模
     cleaning_mode: str = "mark"              # 数据清洗：mark（默认标记）| replace
 
@@ -91,19 +111,20 @@ class GridScanIn(BaseModel):
     strategy_name: str = "dual_ma"
     param_grid: dict = {}             # {参数名: [候选值]}
     base_params: dict = {}            # 非扫描参数的固定值
-    start_cash: float = 10000.0
-    fee_rate: float = 0.001
-    slippage: float = 0.0005
+    # P0-BUGFIX：成本类字段边界约束（同 BacktestRequest，见上方说明）
+    start_cash: float = Field(default=10000.0, gt=0, allow_inf_nan=False)
+    fee_rate: float = Field(default=0.001, ge=0, le=0.1, allow_inf_nan=False)
+    slippage: float = Field(default=0.0005, ge=0, le=0.1, allow_inf_nan=False)
     limit: int = Field(default=1000, ge=100, le=5000)
-    top_n: int = 10                   # 返回绩效最好的前 N 组
+    top_n: int = Field(default=10, ge=1, le=100)   # 返回绩效最好的前 N 组
     limit_order_model: str = "none"   # "none" | "partial" | "probabilistic"
     # P2-10：并行扫描 worker 数（默认 1=串行；>1 用进程池，回测是纯 Python 撮合循环，
     # GIL 下线程不并行，多进程才能真正并行。CPU 密集场景建议 2~4）
     workers: int = Field(default=1, ge=1, le=8)
-    maker_fee_rate: Optional[float] = None
-    taker_fee_rate: Optional[float] = None
-    funding_rate: float = 0.0
-    participation_rate: float = 0.0
+    maker_fee_rate: Optional[float] = Field(default=None, ge=0, le=0.1, allow_inf_nan=False)
+    taker_fee_rate: Optional[float] = Field(default=None, ge=0, le=0.1, allow_inf_nan=False)
+    funding_rate: float = Field(default=0.0, ge=-0.01, le=0.01, allow_inf_nan=False)
+    participation_rate: float = Field(default=0.0, ge=0, le=1.0, allow_inf_nan=False)
     intrabar_stops: bool = True
     cleaning_mode: str = "mark"
 
@@ -129,14 +150,15 @@ class PortfolioRequest(BaseModel):
     strategy_name: str = "dual_ma"
     strategy_params: dict = {}
     weights: str = "equal"             # equal | vol_inv
-    vol_lookback: int = 120
-    start_cash: float = 20000.0
-    fee_rate: float = 0.001
-    slippage: float = 0.0005
-    maker_fee_rate: Optional[float] = None
-    taker_fee_rate: Optional[float] = None
-    funding_rate: float = 0.0
-    participation_rate: float = 0.0
+    vol_lookback: int = Field(default=120, ge=10, le=2000)
+    # P0-BUGFIX：成本类字段边界约束（同 BacktestRequest）
+    start_cash: float = Field(default=20000.0, gt=0, allow_inf_nan=False)
+    fee_rate: float = Field(default=0.001, ge=0, le=0.1, allow_inf_nan=False)
+    slippage: float = Field(default=0.0005, ge=0, le=0.1, allow_inf_nan=False)
+    maker_fee_rate: Optional[float] = Field(default=None, ge=0, le=0.1, allow_inf_nan=False)
+    taker_fee_rate: Optional[float] = Field(default=None, ge=0, le=0.1, allow_inf_nan=False)
+    funding_rate: float = Field(default=0.0, ge=-0.01, le=0.01, allow_inf_nan=False)
+    participation_rate: float = Field(default=0.0, ge=0, le=1.0, allow_inf_nan=False)
     intrabar_stops: bool = True
     cleaning_mode: str = "mark"
     limit: int = Field(default=1000, ge=100, le=5000)
@@ -411,7 +433,12 @@ async def list_results(limit: int = 20, db: Database = Depends(get_db)):
     from core.database import BacktestResult
     from sqlalchemy import select
     async with db.session() as s:
-        rows = (await s.execute(select(BacktestResult).order_by(BacktestResult.id.desc()).limit(limit))).scalars().all()
+        # 列投影：列表只需 id/created_at/metrics_json，整行 select 会把每条的
+        # equity_curve_json/trades_json（几十~上百 KB）也搬出 SQLite 再丢弃，
+        # UI 轮询该端点时每页浪费 ~1MB+ 传输与 ORM 物化（P2-13 同思路）。
+        rows = (await s.execute(
+            select(BacktestResult.id, BacktestResult.created_at, BacktestResult.metrics_json)
+            .order_by(BacktestResult.id.desc()).limit(limit))).all()
         out = []
         for r in rows:
             m = json.loads(r.metrics_json or "{}")
@@ -433,10 +460,10 @@ async def get_result(result_id: int, db: Database = Depends(get_db)):
             raise HTTPException(status_code=404, detail="回测结果不存在")
         return {
             "id": row.id,
-            "config": json.loads(row.config_json or "{}"),
-            "metrics": json.loads(row.metrics_json or "{}"),
-            "equity_curve": json.loads(row.equity_curve_json or "[]"),
-            "trades": json.loads(row.trades_json or "[]"),
+            "config": _loads(row.config_json or "{}"),
+            "metrics": _loads(row.metrics_json or "{}"),
+            "equity_curve": _loads(row.equity_curve_json or "[]"),
+            "trades": _loads(row.trades_json or "[]"),
             "created_at": row.created_at.isoformat(),
         }
 

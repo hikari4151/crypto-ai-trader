@@ -25,8 +25,6 @@ log = logging.getLogger(__name__)
 FLIP_COOLDOWN_HOURS = 2.0
 # 短时反手时 AI confidence 上限
 FLIP_CONFIDENCE_CAP = 0.45
-# 方向强确认阈值：|score|>=3 视为程序高置信方向，AI 相反则打回
-DIRECTION_STRONG_SCORE = 3
 # 交易者方程参数
 MIN_RISK_REWARD_RATIO = 1.0
 

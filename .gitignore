@@ -5,6 +5,10 @@ __pycache__/
 venv/
 *.egg-info/
 .pytest_cache/
+.pytest_tmp*/
+.pytest_run_*/
+.pytest_precommit/
+.pytest_ka*/
 
 # 密钥与敏感配置（绝对不要提交）
 .env

@@ -4,7 +4,7 @@
 """
 import logging
 import time
-from typing import Any, Optional
+from typing import Optional
 
 from core.bus import EventBus
 from core.database import Database

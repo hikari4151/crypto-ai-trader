@@ -3,7 +3,7 @@ import asyncio
 import ccxt
 import logging
 import time
-from typing import Any, Optional
+from typing import Optional
 
 from config.settings import settings
 from core.bus import EventBus
@@ -483,7 +483,17 @@ class OrderManager:
                 oid = order.get("id")
                 if oid:
                     for _ in range(3):
-                        order = await self.exchange.fetch_order(oid, signal.symbol)
+                        try:
+                            order = await self.exchange.fetch_order(oid, signal.symbol)
+                        except Exception as e:  # noqa: BLE001
+                            # 轮询期间网络异常：订单在交易所侧仍挂单/可能已成交，
+                            # 但本地无 Trade 记录、未进注册表——对账循环无从得知它的
+                            # 存在，静默丢失 = 隐性敞口。立即登记注册表交给对账兜底
+                            # （曾异常冒泡到外层宽泛 except 被吞，仅留一行日志）。
+                            log.warning("[order] 轮询订单状态失败，登记对账兜底 oid=%s: %s",
+                                        oid, e)
+                            self._register_open_order(oid, signal, qty, price)
+                            return None
                         if order.get("status") == "closed" or float(order.get("filled") or 0.0) > 0:
                             break
                         await asyncio.sleep(1.0)
@@ -555,7 +565,8 @@ class OrderManager:
                           strategy=strategy_name, order_id=order_id, reason=signal.reason)
             s.add(trade)
             await s.commit()
-            await s.refresh(trade)
+        # commit 已完成 flush，自增主键已回填（expire_on_commit=False）；refresh 是
+        # 多余的一次 SELECT 往返（信号→下单热路径）。返回 id 供 update_trade_pnl 使用。
         return trade.id
 
     async def cancel(self, order_id: str, symbol: str) -> None:

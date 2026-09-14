@@ -8,6 +8,7 @@
 import numpy as np
 import pytest
 
+import strategies
 from ai import strategy_designer as sd
 from engine.trading_engine import TradingEngine
 
@@ -200,3 +201,29 @@ async def test_takeover_gate_still_applies_when_guard_clears(monkeypatch):
         "dual_ma", dict(_PARAMS), dict(_PARAMS))
 
     assert ok is True, info.get("reason")
+
+
+@pytest.mark.asyncio
+async def test_takeover_gate_refuses_draft():
+    """L2：草稿（未证明）策略不接受 AI 参数热更新。
+
+    人工手动启用草稿是人的决定，但 AI 不该在"证据不足 / 过拟合未过"的策略上
+    无人值守地继续调参并接管实盘——那等于系统自动化把一个没通过验证的策略推上线。
+    这条守卫必须在任何回测之前生效（理由里直接给出草稿原因，不消耗算力）。
+    """
+    snap = dict(strategies._DYNAMIC)
+    try:
+        strategies.register_dynamic("l2_draft_probe",
+                                    {"overfit_inconclusive": True, "executor": "dual_ma",
+                                     "params": dict(_PARAMS)})
+        assert strategies.is_draft("l2_draft_probe") is True
+
+        ok, info = await _ValStub(_candles(500))._validate_param_update(
+            "l2_draft_probe", dict(_PARAMS), dict(_PARAMS))
+
+        assert ok is False
+        assert info.get("draft") is True
+        assert "草稿" in info["reason"]
+    finally:
+        strategies._DYNAMIC.clear()
+        strategies._DYNAMIC.update(snap)

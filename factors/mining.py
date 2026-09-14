@@ -8,9 +8,8 @@
 """
 import ast
 import logging
-import math
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -272,6 +271,56 @@ def composite_factor(mat: pd.DataFrame, weights: dict[str, float],
     return out
 
 
+class CompositeFactorEvaluator:
+    """实盘复算 factor_miner 级联组合因子（训练口径不变式）。
+
+    背景：持续进化挖掘的组合因子在训练端由 composite_factor(z_mode="expanding")
+    在整段历史因子矩阵上算出，train_drl 再用训练段拟合的 mu/sd 二次标准化后
+    作为策略状态特征。部署端拿不到整段历史，此前把预计算数组打进模型文件、
+    声称"rl_adaptive 按索引取用"——但数组无法覆盖实盘新K线，实盘因子列实际
+    全为 None，带级联因子的模型每根K线都走"跳过本根"分支、永不交易。
+
+    本类在滚动缓冲上按**同一公式**复算：选中因子的序列用 compute_factor_matrix
+    （与训练同函数同口径）计算，expanding z 只用截至当下的统计量（无前视、
+    早样本填 0，与 composite_factor/z_mode="expanding" 逐位一致），权重按
+    参与合成列的绝对值归一，最后用模型内训练段统计量 mu/sd 做二次标准化
+    （与 train_drl 注入口径一致）。滚动缓冲长度与训练窗口不同会造成数值
+    漂移（与 factor_signal 局部 z 同类限制），但方向与量级信息保持有效。
+    """
+
+    def __init__(self, weights: dict, mu: Optional[float] = None,
+                 sd: Optional[float] = None) -> None:
+        self.weights = {str(k): float(w) for k, w in (weights or {}).items() if w}
+        self.mu = float(mu) if mu is not None else None
+        self.sd = float(sd) if sd else None
+
+    def eval(self, df: pd.DataFrame) -> Optional[float]:
+        """在 df（标准 OHLCV，越长的滚动历史越接近训练口径）上复算最新组合因子值。"""
+        if not self.weights or df is None or len(df) < 5:
+            return None
+        keys = [k for k in self.weights if k]
+        try:
+            mat = compute_factor_matrix(df, keys=keys)
+        except (ValueError, TypeError, KeyError):
+            return None
+        cols = [c for c in mat.columns if mat[c].notna().sum() > 5]
+        if not cols:
+            return None
+        total = sum(abs(self.weights[c]) for c in cols)
+        if total <= 0:
+            return None
+        # expanding z（无前视）：与 composite_factor(z_mode="expanding") 同式，
+        # 早样本不足填 0（均值）；权重按参与合成列的绝对值归一
+        z = ((mat[cols] - mat[cols].expanding().mean())
+             / (mat[cols].expanding().std() + 1e-12)).fillna(0.0)
+        w = {c: self.weights[c] / total for c in cols}
+        out = sum(float(z[c].iloc[-1]) * w[c] for c in cols)
+        # 二次标准化（模型内训练段统计量；无统计量的旧模型返回原始 z 合成值）
+        if self.mu is not None and self.sd:
+            out = (out - self.mu) / self.sd
+        return float(out) if out == out else None
+
+
 def ic_weighted_composite(mat: pd.DataFrame, close: pd.Series, h: int = 1,
                           top_n: int = 8, min_abs_ic: float = 0.03) -> dict:
     """IC 加权合成：选 |rank_ic| 最高且方向明确的 top_n 个因子，按 |rank_ic| 加权。
@@ -329,12 +378,14 @@ def dynamic_composite(mat: pd.DataFrame, close: pd.Series, h: int = 1,
     cols = list(mat.columns)
     for t in range(n):
         row = ic_avail.iloc[t]
-        sel = [(c, abs(v)) for c, v in row.items() if v == v and abs(v) >= min_abs_ic]
+        # 保留符号：负 IC 因子反向暴露（权重为负）。筛选/排序/归一按 |IC|，
+        # 写入权重带原符号——与 ic_weighted_composite 的方向语义一致。
+        sel = [(c, v) for c, v in row.items() if v == v and abs(v) >= min_abs_ic]
         if not sel:
             continue
-        sel.sort(key=lambda x: -x[1])
+        sel.sort(key=lambda x: -abs(x[1]))
         sel = sel[:top_n]
-        total = sum(v for _, v in sel)
+        total = sum(abs(v) for _, v in sel)
         for c, v in sel:
             weight_rows[t, cols.index(c)] = v / total if total > 0 else 0.0
 

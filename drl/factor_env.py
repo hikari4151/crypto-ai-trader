@@ -23,7 +23,8 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
-from factors.analysis import factor_quality_gate
+from factors.analysis import (forward_returns, _spearman, factor_turnover,
+                              factor_fitness)
 from factors.mining import composite_factor
 
 log = logging.getLogger(__name__)
@@ -43,7 +44,9 @@ class FactorMiningEnv:
                  duplicate_penalty: float = 0.05,
                  seed: Optional[int] = None,
                  precomputed_ics: Optional[pd.DataFrame] = None,
-                 precomputed_icir: Optional[pd.DataFrame] = None) -> None:
+                 precomputed_icir: Optional[pd.DataFrame] = None,
+                 precomputed_z: Optional[dict[str, pd.Series]] = None,
+                 use_action_mask: bool = False) -> None:
         self.mat = mat
         self.close = close
         self.h = max(1, int(h))
@@ -52,6 +55,10 @@ class FactorMiningEnv:
         self.corr_threshold = corr_threshold
         self.reward_scale = reward_scale
         self.duplicate_penalty = duplicate_penalty
+        # 动作掩码（E-EXP）：True 时 collect/greedy 每步只允许选未加入的因子
+        # （valid_actions），组合大小恒为 max_steps 且无重复选择浪费步数。
+        # 训练与最终决策同口径（_greedy_select 传 mask）。
+        self.use_action_mask = bool(use_action_mask)
         self.cols = list(mat.columns)
         self.n_factors = len(self.cols)
         n = len(mat)
@@ -87,10 +94,25 @@ class FactorMiningEnv:
         # P2-12：组合因子 z-score 统计量预计算一次（expanding 口径与 composite_factor
         # 逐位一致：只用截至当期的 mean/std，无前视）。fitness 每步直接从预计算 z
         # 加权求和，不再每步全量重算各列 expanding 统计量（O(n×k) → O(k)）。
-        self._z_exp: dict[str, pd.Series] = {}
-        for c in self.cols:
-            s = mat[c]
-            self._z_exp[c] = ((s - s.expanding().mean()) / (s.expanding().std() + 1e-12)).fillna(0.0)
+        # run5 E3：支持传入预计算 z（factor_miner 训练内所有 env 共享一次计算；
+        # 此前每个 worker env 构造都重算 26 列 expanding mean/std，profile 中
+        # expanding.std 1692 次 cumtime 1.9s。预计算与现场计算同公式同输入
+        # → 逐位一致；.optim/verify_evolve_e3_zenv.py PASS）。
+        if precomputed_z is not None:
+            self._z_exp = precomputed_z
+        else:
+            self._z_exp: dict[str, pd.Series] = {}
+            for c in self.cols:
+                s = mat[c]
+                self._z_exp[c] = ((s - s.expanding().mean()) / (s.expanding().std() + 1e-12)).fillna(0.0)
+
+        # run4 E5：_ics/_icir 预转 numpy 数组——_state_feats 每步 2 次
+        # DataFrame.iloc[t].to_numpy(float) 行提取（pandas 行索引调度开销，profile
+        # _state_feats 619 次 cumtime 1.33s），数组行索引与 iloc 行逐位一致
+        # （.optim/verify_fm_e5_state.py PASS）。_ics/_icir DataFrame 保留给
+        # 外部 API（factor_miner 等用 .iloc），内部热路径一律走数组。
+        self._ics_arr = self._ics.to_numpy(dtype=float)
+        self._icir_arr = self._icir.to_numpy(dtype=float)
 
         # ---- 账户状态 ----
         self._t = 0            # 决策时点（训练段内的随机位置）
@@ -122,20 +144,29 @@ class FactorMiningEnv:
 
     def _state_feats(self) -> np.ndarray:
         """每因子特征（t 时点已实现信息）。"""
-        ic_row = self._ics.iloc[self._t].to_numpy(float)
-        icir_row = self._icir.iloc[self._t].to_numpy(float)
+        # E5：numpy 数组行索引（与 iloc[t].to_numpy(float) 逐位一致）
+        ic_row = self._ics_arr[self._t]
+        icir_row = self._icir_arr[self._t]
+        # run5 E4（复用 run4 E6 方案）：循环 np.max 改为整列矩阵一次
+        # （np.max 与逐元素版同归约顺序，结果逐位一致——verify_fm_e6_state_vec.py
+        # 59 组对比 PASS；run4 基础 4.4s 时增量 1.9%<5% 回滚，run5 基础 0.85s
+        # 下重新判定；selected 为空时返回全 0）
         feats = np.zeros((self.n_factors, _FEAT_PER_FACTOR))
-        for i in range(self.n_factors):
-            ic = ic_row[i]
-            ic = 0.0 if ic != ic else ic  # NaN→0（无已实现 IC）
-            icir = icir_row[i]
-            icir = 0.0 if icir != icir else icir
-            # 与已选集合的最大相关
-            max_corr = 0.0
-            if self._selected:
-                max_corr = float(np.max(np.abs(self._corr[i, self._selected])))
-            feats[i] = [ic, abs(ic), icir, self._turnover[i],
-                        max_corr, 1.0 if i in self._selected else 0.0]
+        ic_safe = np.where(np.isnan(ic_row), 0.0, ic_row)   # NaN→0（无已实现 IC）
+        icir_safe = np.where(np.isnan(icir_row), 0.0, icir_row)
+        if self._selected:
+            max_corr = np.abs(self._corr[:, self._selected]).max(axis=1)
+        else:
+            max_corr = np.zeros(self.n_factors)
+        sel_mask = np.zeros(self.n_factors, dtype=float)
+        for i in self._selected:
+            sel_mask[i] = 1.0
+        feats[:, 0] = ic_safe
+        feats[:, 1] = np.abs(ic_safe)
+        feats[:, 2] = icir_safe
+        feats[:, 3] = self._turnover
+        feats[:, 4] = max_corr
+        feats[:, 5] = sel_mask
         return feats
 
     def _composite_fitness(self) -> float:
@@ -145,6 +176,13 @@ class FactorMiningEnv:
         old/new fitness 与状态构造重复计算同一集合时直接命中（奖励路径只对
         真正的新集合做一次合成 + 安检门）；z-score 统计量已在 __init__ 预计算
         （expanding 口径，无前视），合成从 O(n×k) 降到 O(k)。
+
+        run5 E1：fitness 只消费 factor_quality_gate 的 fitness 字段，而该字段
+        = round(factor_fitness(round(rank_ic,6), turnover), 4)——rank_ic 即组合
+        因子全段 _spearman、turnover 即 factor_turnover。原实现先 composite_factor
+        合成组合因子、再过完整 gate（滚动 IR/Newey-West/分层收益全部丢弃），
+        每步 miss 约 5.4ms；轻量路径逐位一致（.optim/verify_evolve_e1_fitness.py
+        600 组含 NaN/并列/常数 PASS），回合级耗时约降 80%。
         """
         if not self._selected:
             return 0.0
@@ -154,17 +192,27 @@ class FactorMiningEnv:
             return cached
         weights = {}
         for i in self._selected:
-            ic = self._ics.iloc[self._t, i]
+            ic = self._ics_arr[self._t, i]  # E5：数组标量索引（与 iloc[_t,i] 一致）
             ic = 0.0 if ic != ic else ic
             weights[self.cols[i]] = ic if abs(ic) > 1e-6 else 0.01  # 未实现 IC 给极小权重
+        # E1：轻量 fitness（与 gate["fitness"] 逐位一致，省合成+多余质检字段）
         combo = composite_factor(self.mat, weights, method="ic", z_mode="expanding",
                                  z_map=self._z_exp)
-        gate = factor_quality_gate(combo.iloc[self.n_train:self.n_val],
-                                   self.close.iloc[self.n_train:self.n_val],
-                                   h=self.h)
-        fitness = gate["fitness"]
+        val_slice = combo.iloc[self.n_train:self.n_val]
+        val_close = self.close.iloc[self.n_train:self.n_val]
+        s = val_slice.to_numpy(dtype=float)
+        fwd = forward_returns(val_close, self.h).to_numpy(dtype=float)
+        rank_ic = float(round(_spearman(s, fwd), 6))
+        turnover = factor_turnover(val_slice)
+        fitness = round(factor_fitness(rank_ic, turnover), 4)
         self._fitness_cache[key] = fitness
         return fitness
+
+    def valid_actions(self) -> np.ndarray:
+        """未选因子索引（动作掩码）。use_action_mask=True 时每步强制选新因子，
+        组合大小恒为 max_steps，杜绝"argmax=首动作"的重复选择浪费步数。"""
+        sel = set(self._selected)
+        return np.asarray([i for i in range(self.n_factors) if i not in sel], dtype=int)
 
     def reset(self) -> np.ndarray:
         """回到起点：随机决策时点 + 清空选择，返回初始状态。"""

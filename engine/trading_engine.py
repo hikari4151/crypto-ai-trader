@@ -6,7 +6,7 @@ import math
 import re
 import time
 from collections import deque
-from typing import Any, Optional
+from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -98,6 +98,9 @@ class TradingEngine:
         self._last_reconcile_date: str = ""
         # 断链平仓状态（T5）
         self._stale_alerted: bool = False
+        # run25 R1：断链自动平仓失败后待重试标志（_stale_alerted 只控制告警；
+        # 平仓失败若不复位该标志会永不重试，仓位裸奔直到行情恢复）
+        self._stale_close_pending: bool = False
 
         bus.subscribe(EventType.MARKET_CANDLE, self._on_candle)
         # 高频价格采样：供风控闪崩/暴涨检测使用（hub 约每秒发布一次 ticker）
@@ -175,12 +178,31 @@ class TradingEngine:
                  self.portfolio, self.exchange, self.hub)
         tasks_created: list[asyncio.Task] = []
         try:
-            # 纸面 / 模拟实盘：用模拟账户撮合（不下真实单）
-            if mode in ("paper", "simulated"):
+            # 纸面：用模拟账户撮合（不下真实单）
+            if mode == "paper":
                 self.paper_account = PaperAccount(start_cash=self.start_cash, fee_rate=self.paper_fee_rate,
                                                   slippage=self.paper_slippage)
                 self.order_manager = OrderManager(self.db, self.bus, True, self.paper_account)
                 self.portfolio = PortfolioManager(self.db, self.bus, True, self.paper_account, None)
+            # 模拟实盘：真实走 _place_live 订单状态机（本地撮合交易所）——
+            # 曾与 paper 同路径（paper=True→_place_paper），实盘状态机从未被模拟演练
+            elif mode == "simulated":
+                from exchange.simulated import SimulatedExchange
+                # 重启复用既有模拟交易所实例：其现金/持仓/成交历史是账户真相
+                # （等价实盘重启后交易所侧持仓仍在）。曾每次新建实例 → 重启即丢
+                # 现金重置/持仓清零/历史清空，策略误判持续开仓（exp17 修复）。
+                if not isinstance(self.exchange, SimulatedExchange):
+                    self.exchange = SimulatedExchange(start_cash=self.start_cash,
+                                                      fee_rate=self.paper_fee_rate,
+                                                      slippage=self.paper_slippage)
+                self.paper = False
+                self.paper_account = None
+                self.order_manager = OrderManager(self.db, self.bus, False, None)
+                self.order_manager.attach_exchange(self.exchange)
+                self.order_manager.set_stop_pct_source(
+                    lambda: getattr(self.strategy, "params", {}).get("stop_loss_pct"))
+                self.portfolio = PortfolioManager(self.db, self.bus, False, None, self.exchange)
+                log.info("[engine] 模拟实盘：本地撮合，订单走 _place_live 全状态机")
             # 读取交易所密钥（解密失败降级为空串，避免纸面/模拟模式因密钥损坏无法启动）
             try:
                 api_key = await self.db.kv_get_secret(f"exchange_{self.exchange_id}_api_key") or ""
@@ -205,9 +227,10 @@ class TradingEngine:
                     lambda: getattr(self.strategy, "params", {}).get("stop_loss_pct"))
                 self.portfolio = PortfolioManager(self.db, self.bus, False, None, self.exchange)
             elif mode == "simulated" and api_key and secret:
-                self.exchange = ExchangeManager(self.exchange_id)
-                await self.exchange.start(api_key, secret, password)
-                log.info("[engine] 模拟实盘：已连接 %s（仅展示余额，订单走模拟撮合）", self.exchange_id)
+                # 注：simulated 已在上面分支创建 SimulatedExchange（本地撮合），
+                # 不再连真实交易所覆盖 self.exchange——行情仍走真实 hub，
+                # 撮合/余额/持仓全部本地模拟（曾连交易所仅展示余额，掩盖实盘状态机）
+                log.info("[engine] 模拟实盘：本地撮合（配置了真实密钥，但订单/余额均走模拟）")
 
             # 预热风控的每日盈亏（跨重启恢复 + 跨日归档），引擎不再持有副本
             try:
@@ -217,8 +240,10 @@ class TradingEngine:
             # 连亏/冷却/人工确认状态同样要跨重启保留：曾纯内存，
             # 重启一次就把"连续亏损暂停交易"这道防线清零
             await self.risk.restore_state()
-            if mode == "live":
-                # 实盘持仓状态回放（FIFO 成本队列 + 策略入口价），否则重启后无止损
+            if mode in ("live", "simulated"):
+                # 实盘/模拟实盘持仓状态回放（FIFO 成本队列 + 策略入口价）——
+                # 否则重启后无止损；simulated 的 Trade 同样落 exchange="live"
+                #（paper=False），回放逻辑天然复用（exp17）
                 await self._restore_live_position_state()
 
             self.hub = MarketDataHub(self.exchange_id, [self.symbol], [self.timeframe], self.bus,
@@ -348,7 +373,13 @@ class TradingEngine:
         失败时保留上次成功的缓存：曾清空为 {}，导致 position=0 → 风控
         "平仓豁免"判定失效，止损卖单在冷却规则下再次被拦截（行情剧烈、
         交易所限流概率最高的场景）。缓存陈旧的风险远小于丢持仓口径。
+
+        本地撮合交易所（SimulatedExchange）无网络成本，且状态必须实时——
+        走缓存会让 simulated 模式在 <30s 内读到陈旧持仓（cash/position 恒为
+        初始值），策略误判持续开仓直到余额耗尽。标记 is_local_matching 即跳过缓存。
         """
+        if getattr(self.exchange, "is_local_matching", False):
+            return await self.exchange.fetch_balance()
         now = time.time()
         if now - self._live_balance_ts > 30:
             try:
@@ -381,6 +412,13 @@ class TradingEngine:
         indicators = snap.get("indicators", {})
         price = float(indicators.get("close") or 0.0)
         vol_ratio = float(indicators.get("vol_ratio") or 1.0)
+        # 价格有限性守卫：交易所脏数据（NaN/Inf/0）不得进入交易路径——
+        # NaN 价格会把纸面账户现金/持仓污染成 NaN、_record_trade 抛 IntegrityError，
+        # 0 价格导致 _resolve_qty 除零被宽泛 except 静默吞掉（信号丢单无告警）。
+        if not math.isfinite(price) or price <= 0.0:
+            log.warning("[engine] K线收盘价非法，跳过本根处理: price=%s symbol=%s",
+                        price, symbol)
+            return
 
         # ---- 成交时点：trade_on_open=True 时，先在当前K线开盘成交上一根收盘产生的信号 ----
         # （与回测引擎口径一致：信号在第 i 根收盘产生、第 i+1 根开盘成交，杜绝前视）
@@ -751,6 +789,12 @@ class TradingEngine:
             closed_qty, close_err = (0.0, "")
             if live:
                 closed_qty, close_err = await self._force_close_stale_position()
+                if close_err:
+                    # run25 R1：平仓失败——标记待重试，断链期间每轮循环重试
+                    # （曾一次性尝试，失败后仓位裸奔直到行情恢复）
+                    self._stale_close_pending = True
+                else:
+                    self._stale_close_pending = False
             try:
                 from core.notify import notify
                 if closed_qty > 0:
@@ -764,8 +808,27 @@ class TradingEngine:
                              f"（阈值 {threshold}s）" + tail)
             except Exception:  # noqa: BLE001
                 pass
+        elif stale and self._stale_alerted and self._stale_close_pending:
+            # run25 R1：断链期间平仓失败重试（不重复告警；无持仓/成功后 pending 清空）
+            closed_qty, close_err = await self._force_close_stale_position()
+            if not close_err:
+                self._stale_close_pending = False
+                if closed_qty > 0:
+                    log.warning("[ws] 断链平仓重试成功：已市价平仓 %s", closed_qty)
+                    try:
+                        from core.notify import notify
+                        # run40 E1：独立标题——L771 首次告警同标题会被 60s 防抖误伤，
+                        # 重试通常在断链初期快速成功（落在首次告警防抖窗内），
+                        # 曾致平仓成功确认被吞、用户收不到"已平仓"
+                        await notify(self.db, "行情断链：平仓重试成功",
+                                     f"{self.symbol} {self.timeframe} 自动平仓重试成功：已平仓 {closed_qty}")
+                    except Exception:  # noqa: BLE001
+                        pass
+            else:
+                log.warning("[ws] 断链平仓重试仍失败: %s（下次循环再试）", close_err)
         elif not stale and self._stale_alerted:
             self._stale_alerted = False
+            self._stale_close_pending = False
             await self.bus.publish(Event(EventType.SYSTEM, {
                 "kind": "market_recovered", "symbol": self.symbol,
                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -829,15 +892,18 @@ class TradingEngine:
                     # 自动行情解读：受开关控制
                     auto_on = (await self.db.kv_get("ai_auto_analysis_enabled", "1")) != "0"
                     if auto_on and now - self._last_analysis >= settings.ai_market_analysis_interval:
-                        self._last_analysis = now
                         # 注入真实持仓（曾恒传 0/空，提示词持仓死数据）
                         pos, _recent = await self._analysis_context(snap)
                         # safe_analyze 签名 (snap, position)——recent_trades 仅 analyze
                         # 支持、safe_analyze 不转发，曾传 recent_trades=… 必抛 TypeError，
                         # 自动分析每次触发即失败被循环体吞掉（"看似运行实则已死"）
                         await self.analyst.safe_analyze(snap, position=pos)
+                        # run37 E1：置位从调用前移到调用成功后——外层异常（_analysis_context/
+                        # DB locked 等）被循环体吞掉时不置位，下轮 30s 重试而非静默跳过
+                        # 一整周期（600s/86400s/604800s）；AI 错误已由 safe_analyze 内部
+                        # 吞掉返回 None，置位语义与旧版一致（配置缺失等间隔再试）
+                        self._last_analysis = now
                     if now - self._last_optimize >= settings.ai_optimize_interval:
-                        self._last_optimize = now
                         perf = await self._recent_performance()
                         # 锁内仅快照策略名与参数（短持锁；AI 网络调用最坏数分钟，
                         # 不得阻塞 K 线处理——_on_candle_locked 需要同一把锁）
@@ -861,8 +927,10 @@ class TradingEngine:
                                          vinfo.get("reason", ""))
                             else:
                                 await self.apply_strategy_params(name, result["params"])
+                        # run37 E1：成功返回后置位（含 optimize_price_action 内部已吞的
+                        # AI 错误返回 None）；仅外层异常路径不置位 → 下轮 30s 重试
+                        self._last_optimize = now
                     if now - self._last_review >= settings.ai_review_interval:
-                        self._last_review = now
                         trades = await self._recent_trades(limit=100)
                         if trades:
                             # 用真实交易累计构建权益曲线（曾传假曲线 [x]*2，
@@ -876,6 +944,8 @@ class TradingEngine:
                             # validator 反谄媚校验依赖 total_pnl（compute_metrics 无此键，补上）
                             summary["total_pnl"] = round(float(summary.get("final_equity", 0.0)) - self._paper_equity, 4)
                             await self.reviewer.review(trades, summary)
+                        # run37 E1：成功返回后置位；外层异常不置位 → 下轮 30s 重试
+                        self._last_review = now
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -1146,7 +1216,9 @@ class TradingEngine:
             or snap.get("candles", [])
         return await self.designer.design(snap, trades, backtests, guard_candles=guard_candles,
                                           strategy_type=strategy_type,
-                                          custom_requirement=custom_requirement)
+                                          custom_requirement=custom_requirement,
+                                          baseline_strategy=self.strategy.name if self.strategy else None,
+                                          baseline_params=dict(self.strategy.params or {}) if self.strategy else None)
 
     async def _recent_trades(self, limit: int = 100) -> list[dict]:
         from core.database import Trade
@@ -1155,12 +1227,26 @@ class TradingEngine:
             return [{"ts": t.ts.isoformat(), "symbol": t.symbol, "side": t.side, "price": t.price,
                      "qty": t.qty, "fee": t.fee, "pnl": t.pnl, "strategy": t.strategy, "reason": t.reason} for t in rows]
 
-    async def _recent_performance(self) -> dict:
-        trades = await self._recent_trades(50)
+    async def _recent_performance(self, trades_limit: int = 200) -> dict:
+        """取近期交易绩效（胜率/盈亏 + 按日盈亏序列）。
+
+        daily_pnl：按交易日聚合已实现盈亏（最多 30 天），供 AI 深度反思迭代观察
+        "策略是否正在退化"（近期 vs 早期对比），而不只是一堆聚合数字。
+        """
+        trades = await self._recent_trades(trades_limit)
         pnls = [t["pnl"] for t in trades if t["side"] == "sell" and t["pnl"]]
         wins = [p for p in pnls if p > 0]
+        daily: dict[str, float] = {}
+        for t in trades:
+            if t["side"] == "sell" and t.get("pnl") is not None:
+                day = str(t.get("ts") or "")[:10]
+                if day:
+                    daily[day] = round(daily.get(day, 0.0) + float(t["pnl"]), 4)
+        days = sorted(daily)
         return {"total_trades": len(pnls), "win_rate": round(len(wins) / len(pnls), 4) if pnls else 0,
-                "total_pnl": round(sum(pnls), 4), "recent_pnl": round(sum(pnls[-10:]), 4)}
+                "total_pnl": round(sum(pnls), 4), "recent_pnl": round(sum(pnls[-10:]), 4),
+                "daily_pnl": [{"date": d, "pnl": daily[d]} for d in days[-30:]],
+                "sample_days": len(days)}
 
     # ---------------- AI 参数热更新验证门 ----------------
     async def _validation_df(self, bars: int):
@@ -1184,6 +1270,14 @@ class TradingEngine:
         返回 (ok, info)。数据不足或无法验证时一律不应用（ok=False）。
         回测/过拟合为 CPU 密集，放 asyncio.to_thread 避免阻塞事件循环。
         """
+        # L2：草稿（未证明）策略不接受 AI 参数热更新。人工手动启用草稿是人的决定，
+        # 但 AI 不该在"证据不足 / 过拟合未过"的策略上无人值守地继续调参并接管实盘
+        # ——那等于让系统的自动化把一个没通过验证的策略推上线。
+        from strategies import is_draft
+        if is_draft(name):
+            return False, {"reason": f"策略 {name} 是草稿（未证明：过拟合未过或样本外证据不足），"
+                                    "AI 不接管其参数更新；如需使用请人工确认后手动应用",
+                           "applied": False, "draft": True}
         df = await self._validation_df(settings.ai_optimize_validation_bars)
         if df is None or len(df) < 200:
             return False, {"reason": f"验证数据不足（<200 根），跳过应用", "applied": False}
@@ -1231,9 +1325,14 @@ class TradingEngine:
                     overfit = {"verdict": rep.verdict, "score": rep.score,
                                "oos_ret": rep.oos_ret, "pbo": rep.pbo,
                                "decay": rep.decay, "n_folds": rep.n_folds}
-                    if rep.verdict in ("严重过拟合", "无法判定"):
+                    if rep.verdict in ("严重过拟合", "无法判定", "疑似过拟合"):
                         # 无法判定＝证据不足（样本外交易太少）：可以留在策略库里人工用，
-                        # 但不允许 AI 无人值守地接管实盘
+                        # 但不允许 AI 无人值守地接管实盘。
+                        # "疑似过拟合" 同样拦截（2026-09-12）：verdict=通过 现在要求
+                        # 统计显著（DSR≥0.95 或 bootstrap 夏普 CI 下界>0），达不到的会被
+                        # 降级为"疑似过拟合"——若这里放行，降级就形同虚设。
+                        # 实测 BTC/USDT 1h 近 3000 根上内置执行器默认参数的 DSR 全在
+                        # 0.0002~0.13，即"检测不出技术优势"，本就不该无人值守接管实盘。
                         return False, {"reason": f"过拟合检测未通过（{rep.verdict}，score={rep.score}）",
                                        "overfit": overfit, "current": cur_m, "proposed": prop_m}
                 except Exception as e:  # noqa: BLE001

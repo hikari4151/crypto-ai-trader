@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -131,6 +132,10 @@ app = FastAPI(title="Crypto AI Trader", version="1.0.0", lifespan=lifespan)
 # 不启用跨域 CORS：前端由本服务同源托管，无需跨域；移除通配 CORS 可阻止恶意网站读取 API。
 # 若需从其它来源访问，请显式配置允许的源（勿用 *）。
 app.add_middleware(AuthMiddleware)
+# run13 E1：gzip 传输压缩（minimum_size=100KB 只压大响应——前端 index.html 497KB
+# → 128KB，-74%；API JSON 均 <100KB 不压缩，热路径零开销）。协商正确：
+# 无 Accept-Encoding 客户端收到原文，带 gzip 收到压缩版（probe_gzip_mw.py 验证）。
+app.add_middleware(GZipMiddleware, minimum_size=100_000, compresslevel=6)
 
 from web.api import (  # noqa: E402
     ai_router, backtest_router, data_router, drl_router, evolve_router, exchanges_router,

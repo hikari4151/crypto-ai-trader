@@ -1,9 +1,9 @@
 """策略参数动态优化：AI 依据近期表现与市场特征给出新参数，程序热更新。"""
 import json
 import logging
-from typing import Any, Optional
+from typing import Optional
 
-from core.database import Database
+from core.database import Database, _run_on_main
 from strategies.base import Strategy
 from .client import AIClient, AICallError, AINotConfigured
 from .prompts import price_action_optimize_messages
@@ -39,15 +39,19 @@ class ParamOptimizer:
         # 由调用方持策略锁应用（曾错误返回 dict(strategy.params) 旧参数快照，
         # 导致 AI 优化建议从不生效——仅写 OptimizationLog）
         applied = strategy.update_params(new_params) if apply else new_params
-        async with self._db.session() as s:
+
+        async def _persist_optimize() -> None:
             from core.database import OptimizationLog
-            s.add(OptimizationLog(
-                kind="auto_optimize",
-                summary=f"策略[{strategy.name}] 全自动优化（{focus}）",
-                suggestion=json.dumps({"reason": result.get("reason", ""), "focus": result.get("focus", "")}, ensure_ascii=False),
-                params_json=json.dumps(applied, ensure_ascii=False),
-            ))
-            await s.commit()
+            async with self._db.session() as s:
+                s.add(OptimizationLog(
+                    kind="auto_optimize",
+                    summary=f"策略[{strategy.name}] 全自动优化（{focus}）",
+                    suggestion=json.dumps({"reason": result.get("reason", ""), "focus": result.get("focus", "")}, ensure_ascii=False),
+                    params_json=json.dumps(applied, ensure_ascii=False),
+                ))
+                await s.commit()
+        # run26 R3：session 使用经主循环调度（worker 跨 loop 连接池安全）
+        await _run_on_main(self._db, _persist_optimize)
         log.info("[ai] 策略 %s 已按关键位/价格行为优化: %s", strategy.name, applied)
         out = {"params": applied, "reason": result.get("reason", ""),
                "focus": result.get("focus", "")}

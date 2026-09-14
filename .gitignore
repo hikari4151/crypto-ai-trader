@@ -93,3 +93,7 @@ _trash_archive/
 .idea/
 .vscode/
 *.swp
+
+# SDD 工作区（临时产物，不进版本库）
+.superpowers/
+

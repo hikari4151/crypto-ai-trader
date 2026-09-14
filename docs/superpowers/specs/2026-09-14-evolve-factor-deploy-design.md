@@ -119,9 +119,10 @@ cfg = BacktestConfig(
 
 - `await asyncio.to_thread(run_backtest, df, cfg)`（CPU 密集，放线程池）。
 - 摘要字段：总收益、最大回撤、夏普、交易次数、基准收益。
-- 回填 `_factor_miner_status["backtest_summary"]` 与 spec 的
-  `evolve_meta["backtest"]`（后者需重新 upsert 落库或仅内存展示——
-  实现时以内存 status 为主，落库可选）。
+- 回填 `_factor_miner_status["backtest_summary"]`；spec 的
+  `evolve_meta["backtest"]` 仅内存更新、不重新落库（重启后回测摘要为空，
+  由用户手动「去回测」或下一次自动部署重新生成——避免每次部署都多一次
+  AiStrategy 表写放大）。
 - 失败只记 `deploy_error`，不影响部署状态。
 
 ### 4.4 API（`web/api/evolve.py` 新增）

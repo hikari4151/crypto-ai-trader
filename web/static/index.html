@@ -3025,9 +3025,9 @@
             <!-- 因子挖掘独有：进化组合因子部署状态（Task 5） -->
             <div v-if="m.key==='factor_miner'" class="mt-1 grid gap-1 text-[12px] text-slate-400">
               <!-- 错误横幅独立展示：空权重/部署异常/回测失败时与「已部署」并存，不被后者隐藏（Task 3 修复轮结论） -->
-              <div v-if="evolveModel(m.key).combo_deploy_error" class="evolve-model-warning">
+              <div v-if="evolveModel(m.key).combo_deploy_error || evolveModel(m.key).combo_backtest_error" class="evolve-model-warning">
                 <span>⚠</span>
-                <span>{{evolveModel(m.key).combo_deploy_error}}</span>
+                <span>{{evolveModel(m.key).combo_deploy_error || evolveModel(m.key).combo_backtest_error}}</span>
               </div>
               <div v-if="evolveModel(m.key).combo_strategy" class="flex items-center gap-2 flex-wrap">
                 <span class="pill" style="background:rgba(48,209,88,.15);color:#30d158">已部署</span>

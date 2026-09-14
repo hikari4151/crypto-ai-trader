@@ -96,14 +96,14 @@ if report valid:
     self._factor_miner_status["combo_version"] = deploy_result["version"]
     self._factor_miner_status["combo_deployed_at"] = time.time()
     self._factor_miner_status["combo_deploy_error"] = ""
-    # 触发后台回测摘要（fire-and-forget，不阻塞训练循环）
-    asyncio.create_task(self._refresh_factor_strategy_backtest(deploy_result["name"], symbol, df))
+    # 触发后台回测摘要（fire-and-forget，不阻塞训练循环；带 version 供归属守卫）
+    asyncio.create_task(self._refresh_factor_strategy_backtest(deploy_result["name"], symbol, df, deploy_result["version"]))
 ```
 
 部署失败（权重缺失等异常）只记 `combo_deploy_error`，**不阻断训练流程**（部署是训练后
 的附加动作，训练主体照常完成）。
 
-### 4.3 后台回测摘要 `_refresh_factor_strategy_backtest(name, symbol, df)`
+### 4.3 后台回测摘要 `_refresh_factor_strategy_backtest(name, symbol, df, version)`
 
 - 用本轮训练同一份 df（rolling_window 根 K 线）+ `BacktestConfig`：
 
@@ -123,7 +123,9 @@ cfg = BacktestConfig(
   `evolve_meta["backtest"]` 仅内存更新、不重新落库（重启后回测摘要为空，
   由用户手动「去回测」或下一次自动部署重新生成——避免每次部署都多一次
   AiStrategy 表写放大）。
-- 失败只记 `combo_deploy_error`，不影响部署状态。
+- 回测失败写独立键 `combo_backtest_error`（不再复用 `combo_deploy_error`，两者
+  语义分离：部署错误 vs 回测错误）；写回前校验 `combo_strategy`/`combo_version`
+  归属（跨轮竞态守卫），不归属则丢弃。
 
 ### 4.4 API（`web/api/evolve.py` 新增）
 
@@ -131,8 +133,10 @@ cfg = BacktestConfig(
   （策略名/标的/权重/OOS 报告/版本/回测摘要/部署时间/上线状态）。实现：从
   `strategies.get_dynamic` 过滤 `created_by == "evolve_engine"` 且
   executor 为 factor_signal 且 name 前缀 `evolve_combo_`，必要时并入
-  `_factor_miner_status` 的最新部署信息。
-- `POST /api/evolve/factor/{symbol}/deploy`：手动重新部署。读取
+  `_factor_miner_status` 的最新部署信息。backtest 仅透出最近部署标的的
+  摘要（`combo_backtest`，内存态）。
+- `POST /api/evolve/factor/deploy?symbol=...`：手动重新部署（symbol 走 query
+  参数，避免路径段斜杠问题）。读取
   `models_dir/_cascade_weights_<symbol_flat>.json`，构造 meta（fitness 取
   best 信息或状态值、selected_factors 取最近轮次），调用部署方法；
   权重文件不存在返回 404。

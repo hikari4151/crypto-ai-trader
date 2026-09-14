@@ -99,3 +99,93 @@ def test_backtest_summary_written_to_status(tmp_path, monkeypatch):
     assert summary["benchmark_ret"] == 0.03
     assert captured["cfg"].strategy_name == "evolve_combo_BTC_USDT"
     assert eng._factor_miner_status["deploy_error"] == ""
+
+
+class _StubAgent:
+    def to_dict(self) -> dict:
+        return {"stub": True}
+
+
+def _factor_result(weights=None, valid=True):
+    return {
+        "agent": _StubAgent(),
+        "history": [{"best_fitness": 0.02}],
+        "selected_factors": list((weights or {"vol_ratio": 0.5}).keys()),
+        "weights": weights or {"vol_ratio": 0.5},
+        "composite": None,   # 跳过级联 npy 保存，聚焦部署断言
+        "report": {"enabled": True, "valid": valid, "rank_ic": 0.04,
+                   "icir": 1.2, "reason": ""},
+        "meta": {},
+    }
+
+
+async def test_passing_factor_miner_auto_deploys(tmp_path, monkeypatch):
+    import drl.evolve_engine as ev
+    from backtest.data_loader import generate_demo
+    from strategies import get_dynamic
+    eng = _engine(tmp_path)
+    eng._rolling_window = 200
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    async def _stub_fetch(symbol=""):
+        return df
+    monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
+    holder = {"result": _factor_result()}
+    monkeypatch.setattr(ev, "train_factor_miner",
+                        lambda df_, mat=None, cfg=None, on_progress=None: holder["result"])
+    saved = []
+    monkeypatch.setattr(eng.zoo, "save_agent",
+                        lambda agent, name, *, meta=None, is_best=True: saved.append(name))
+    calls = []
+    async def _stub_refresh(name, symbol, df_):
+        calls.append((name, symbol))
+    monkeypatch.setattr(eng, "_refresh_factor_strategy_backtest", _stub_refresh)
+
+    try:
+        await eng._train_factor_miner_once(force=True)
+        # fire-and-forget 的后台回测任务要等训练协程返回、事件循环下一轮
+        # 才被调度（CPython asyncio 语义），先让出一次循环再断言调用记录
+        await asyncio.sleep(0)
+
+        # 环境差异：repo config/config.yaml 的 evolve_symbols 被覆盖为 [ETH/USDT]，
+        # 首轮标的并非简报默认假设的 BTC/USDT——按简报 Step4 注释改为动态取 symbol。
+        _symbol = eng._factor_miner_status["symbol"]
+        _strat = f"evolve_combo_{_symbol.replace('/', '_')}"
+
+        assert saved == ["factor_miner"]
+        assert eng._factor_miner_status["deployed_strategy"] == _strat
+        assert eng._factor_miner_status["deployed_version"] == "v1"
+        assert eng._factor_miner_status["deploy_error"] == ""
+        spec = get_dynamic(_strat)
+        assert spec is not None and spec["executor"] == "factor_signal"
+        assert calls == [(_strat, _symbol)]
+        # 状态键经 _pipeline_view 透传（前端消费入口）
+        view = eng.status()["factor_miner"]
+        assert view["deployed_strategy"] == _strat
+    finally:
+        from strategies import remove_dynamic
+        _strat_n = locals().get("_strat")
+        if _strat_n:
+            remove_dynamic(_strat_n)
+
+
+async def test_rejected_factor_miner_does_not_deploy(tmp_path, monkeypatch):
+    import drl.evolve_engine as ev
+    from backtest.data_loader import generate_demo
+    from strategies import get_dynamic
+    eng = _engine(tmp_path)
+    eng._rolling_window = 200
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    async def _stub_fetch(symbol=""):
+        return df
+    monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
+    holder = {"result": _factor_result(valid=False)}
+    monkeypatch.setattr(ev, "train_factor_miner",
+                        lambda df_, mat=None, cfg=None, on_progress=None: holder["result"])
+    monkeypatch.setattr(eng.zoo, "save_agent",
+                        lambda agent, name, *, meta=None, is_best=True: None)
+
+    await eng._train_factor_miner_once(force=True)
+
+    assert eng._factor_miner_status["deployed_strategy"] == ""
+    _symbol = eng._factor_miner_status["symbol"]
+    assert get_dynamic(f"evolve_combo_{_symbol.replace('/', '_')}") is None

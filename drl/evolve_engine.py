@@ -277,6 +277,8 @@ class EvolveEngine:
         # P2-10：全局训练锁——三条训练管线串行执行（因子挖掘/策略DRL/元策略
         # 同时训练会吃满 CPU 拖垮实时引擎），手动触发与周期循环共用同一把锁。
         self._train_lock = asyncio.Lock()
+        # 部署后后台回测摘要任务引用（防 GC；done 回调里弹出）
+        self._backtest_tasks: dict[str, asyncio.Task] = {}
         # P2-11：数据增量门——记录各管线最近一次训练时的数据末根时间戳；
         # 数据无新增 K 线时跳过本轮（避免 60s 间隔 + 5 分钟数据缓存下的空转重训）
         self._last_tail_ts: dict[str, float] = {}
@@ -289,7 +291,11 @@ class EvolveEngine:
         self._factor_miner_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
                                      "last_error": "", "next_run": 0, "last_success": False,
                                      "oos_rejected": "", "_demo_streak": 0,
-                                     "loop_beat": 0.0, "restarts": 0}
+                                     "loop_beat": 0.0, "restarts": 0,
+                                     # 进化组合因子部署状态（Task：进化因子使用场景）
+                                     "deployed_strategy": "", "deployed_version": "",
+                                     "last_deploy_ts": 0, "deploy_error": "",
+                                     "backtest_summary": None}
         self._strategy_drl_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
                                      "last_error": "", "next_run": 0, "last_success": False,
                                      "oos_rejected": "", "_demo_streak": 0,
@@ -1822,6 +1828,32 @@ class EvolveEngine:
             "fitness": new_fitness,
             "selected_factors": result.get("selected_factors", []),
         }, source="evolve_engine"))
+
+        # 9. 自动部署：OOS 安检已过（gate_ok），把组合权重部署为按标的的组合因子策略。
+        # 部署失败只记 deploy_error，不阻断训练流程（训练主体已完成并落库）。
+        try:
+            _weights = result.get("weights") or {}
+            if _weights:
+                _meta = {
+                    "fitness": float(new_fitness),
+                    "selected_factors": result.get("selected_factors", []),
+                    "round_no": self._factor_miner_status.get("episode", 0),
+                }
+                _dep = await self._deploy_factor_strategy(
+                    symbol, _weights, result.get("report"), _meta)
+                self._factor_miner_status["deployed_strategy"] = _dep["name"]
+                self._factor_miner_status["deployed_version"] = _dep["version"]
+                self._factor_miner_status["last_deploy_ts"] = time.time()
+                self._factor_miner_status["deploy_error"] = ""
+                # 后台回测摘要（fire-and-forget，不阻塞训练循环；持有任务引用防 GC）
+                _task = asyncio.create_task(
+                    self._refresh_factor_strategy_backtest(_dep["name"], symbol, df))
+                self._backtest_tasks[_dep["name"]] = _task
+                _task.add_done_callback(
+                    lambda t, n=_dep["name"]: self._backtest_tasks.pop(n, None))
+        except Exception as e:  # noqa: BLE001
+            self._factor_miner_status["deploy_error"] = f"自动部署失败: {e}"
+            log.warning("[evolve] 组合因子策略自动部署失败(%s): %s", symbol, e)
 
     # ---- 策略 DRL 持续训练循环 ----
 

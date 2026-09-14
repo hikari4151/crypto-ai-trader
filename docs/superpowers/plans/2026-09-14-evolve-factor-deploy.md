@@ -727,16 +727,17 @@ git commit -m "feat: 进化因子部署 API（策略列表 + 手动重新部署�
 ```html
             <!-- 因子挖掘独有：进化组合因子部署状态（Task 5） -->
             <div v-if="m.key==='factor_miner'" class="mt-1 grid gap-1 text-[12px] text-slate-400">
+              <!-- 错误横幅独立展示：空权重/部署异常/回测失败时与「已部署」并存，不被后者隐藏（Task 3 修复轮结论） -->
+              <div v-if="evolveModel(m.key).combo_deploy_error" class="evolve-model-warning">
+                <svg width="12" height="12" style="flex:none;margin-top:2px"><use href="#i-warn"/></svg>
+                <span>{{evolveModel(m.key).combo_deploy_error}}</span>
+              </div>
               <div v-if="evolveModel(m.key).combo_strategy" class="flex items-center gap-2 flex-wrap">
                 <span class="pill" style="background:rgba(48,209,88,.15);color:#30d158">已部署</span>
                 <span class="font-mono">{{evolveModel(m.key).combo_strategy}} {{evolveModel(m.key).combo_version}}</span>
                 <span v-if="evolveModel(m.key).combo_deployed_at">{{fmtTs(evolveModel(m.key).combo_deployed_at*1000)}}</span>
               </div>
-              <div v-else-if="evolveModel(m.key).combo_deploy_error" class="evolve-model-warning">
-                <svg width="12" height="12" style="flex:none;margin-top:2px"><use href="#i-warn"/></svg>
-                <span>{{evolveModel(m.key).combo_deploy_error}}</span>
-              </div>
-              <div v-else class="text-slate-500">尚未部署 · OOS 安检通过后自动部署</div>
+              <div v-else-if="!evolveModel(m.key).combo_deploy_error" class="text-slate-500">尚未部署 · OOS 安检通过后自动部署</div>
               <div v-if="evolveModel(m.key).combo_backtest" class="flex items-center gap-x-3 gap-y-0.5 flex-wrap">
                 <span>回测收益 <span class="font-mono" :class="(evolveModel(m.key).combo_backtest.total_ret||0)>=0?'pos':'neg'">{{((evolveModel(m.key).combo_backtest.total_ret||0)*100).toFixed(2)}}%</span></span>
                 <span>回撤 <span class="font-mono">{{((evolveModel(m.key).combo_backtest.max_drawdown||0)*100).toFixed(2)}}%</span></span>

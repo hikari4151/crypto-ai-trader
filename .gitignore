@@ -60,6 +60,31 @@ dsh-memory-setup/
 # 备份文件
 *.bak
 
+# 清理归档区（2026-09-13 从工作区移出的缓存/残留/一次性脚本；人工核对后再删）
+_trash_archive/
+
+# 自治优化协议工作产物（state/result/log/知识库/探针/备份，不随项目提交；
+# 如需归档可分拣后手工提交）
+.optim/
+
+# 根目录调试/运行时产物（一次性探测脚本、pytest JUnit 报告、服务日志）
+/probe*.py
+/_probe*.py
+/_inspect*.py
+/_guard_test.py
+/_restore_test.py
+/_*.xml
+/_patch_bt_group.py
+/patch_bt_group.py
+/server*.log
+/server*.err.log
+/try
+/'
+
+# 本地智能体工作目录（会话记忆/临时截图/日志，属本机运行态，不进版本库）
+.workbuddy/
+.zcode/
+
 # IDE
 .idea/
 .vscode/

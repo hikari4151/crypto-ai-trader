@@ -36,7 +36,7 @@ from drl.agent import train_drl
 from drl.factor_miner import train_factor_miner
 from factors.engine import compute_factor_matrix
 from strategies.meta import train_meta_controller
-from strategies import register_dynamic
+from strategies import get_dynamic, register_dynamic
 from strategies.rl_adaptive import RLAdaptiveStrategy
 
 from .model_zoo import ModelZoo
@@ -466,6 +466,63 @@ class EvolveEngine:
         await self._upsert_ai_strategy("rl_evolve", spec)
         log.info("[evolve] 策略 %s 已注册（pine %s）",
                  "rl_evolve", f"{len(pine_code)}B" if pine_code else "不可导出")
+
+    # ---- 进化组合因子策略部署（Task：进化因子使用场景）----
+
+    def _combo_strategy_name(self, symbol: str) -> str:
+        """进化组合因子策略名：evolve_combo_<symbol>，/ 替换为 _，与级联文件命名一致）。"""
+        return f"evolve_combo_{symbol.replace('/', '_')}"
+
+    async def _deploy_factor_strategy(self, symbol: str, weights: dict,
+                                      report: Optional[dict],
+                                      meta: Optional[dict] = None) -> dict:
+        """把进化产出的组合因子权重部署为 factor_signal 组合策略（幂等覆盖）。
+        spec 落 AiStrategy 表（重启后由 dynamic_store.restore_from_db 恢复）；
+        同标的重复部署 = 覆盖更新同名 spec，version 递增。返回 {name, version, spec}。
+        """
+        from strategies.factor_signal import FactorSignalStrategy
+        name = self._combo_strategy_name(symbol)
+        prev = get_dynamic(name)
+        prev_version = 0
+        if prev and prev.get("version"):
+            try:
+                prev_version = int(str(prev["version"]).lstrip("v"))
+            except ValueError:
+                prev_version = 0
+        version = f"v{prev_version + 1}"
+        spec = {
+            "name": name,
+            "title": f"进化组合因子·{symbol}",
+            "description": f"持续进化引擎因子挖掘（factor_miner）产出的组合因子策略（{symbol}）",
+            "logic": "RL因子挖掘选出因子组合，按IC方向加权合成，z-score后与阈值比较产生买卖信号",
+            "executor": "factor_signal",
+            "param_schema": FactorSignalStrategy.param_schema,
+            "params": {
+                "factor": "combo",
+                "combo_spec": json.dumps(weights, ensure_ascii=False),
+                "mode": "trend",
+                "buy_threshold": 0.0,
+                "sell_threshold": 0.0,
+            },
+            "risk_tips": ["因子IC可能衰减，因子库下线后该因子自动跳过"],
+            "created_by": "evolve_engine",
+            "version": version,
+            "base_symbol": symbol,
+            "base_timeframe": self._effective_timeframe(),
+            "evolve_meta": {
+                "fitness": (meta or {}).get("fitness"),
+                "oos_report": report,
+                "selected_factors": (meta or {}).get("selected_factors", []),
+                "deployed_at": time.time(),
+                "round_no": (meta or {}).get("round_no"),
+                "backtest": None,
+            },
+        }
+        register_dynamic(name, spec)
+        await self._upsert_ai_strategy(name, spec)
+        log.info("[evolve] 进化组合因子策略 %s v%s 已部署（%d 个因子）",
+                 name, version, len(weights))
+        return {"name": name, "version": version, "spec": spec}
 
     async def _restore_evolve_strategies(self) -> None:
         """启动时按已训练模型补齐动态策略注册（幂等）。

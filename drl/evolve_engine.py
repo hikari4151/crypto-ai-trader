@@ -524,6 +524,40 @@ class EvolveEngine:
                  name, version, len(weights))
         return {"name": name, "version": version, "spec": spec}
 
+    async def _refresh_factor_strategy_backtest(self, name: str, symbol: str,
+                                                df) -> None:
+        """后台跑一次部署策略的回测，把摘要写回 factor_miner 状态（仅展示用）。
+
+        用训练轮同一份 df（rolling_window 根K线）+ 部署策略参数回测；
+        异常自吞只记 deploy_error，不影响部署状态与训练流程。
+        """
+        try:
+            from backtest.engine import BacktestConfig, run_backtest
+            spec = get_dynamic(name) or {}
+            cfg = BacktestConfig(
+                symbol=symbol,
+                timeframe=self._effective_timeframe(),
+                strategy_name=name,
+                strategy_params=dict(spec.get("params", {})),
+                start_cash=10000.0, fee_rate=0.001, slippage=0.0005,
+            )
+            res = await asyncio.to_thread(run_backtest, df, cfg)
+            m = res.get("metrics") or {}
+            summary = {
+                "total_ret": float(m.get("total_return", 0.0)),
+                "max_drawdown": float(m.get("max_drawdown", 0.0)),
+                "sharpe": float(m.get("sharpe", 0.0)),
+                "trades": int(m.get("total_trades", 0)),
+                "benchmark_ret": float((res.get("benchmark") or {}).get("buy_hold_ret", 0.0)),
+                "at": time.time(),
+            }
+            self._factor_miner_status["backtest_summary"] = summary
+            self._factor_miner_status["deploy_error"] = ""
+            log.info("[evolve] %s 回测摘要已刷新: %s", name, summary)
+        except Exception as e:  # noqa: BLE001
+            self._factor_miner_status["deploy_error"] = f"回测摘要失败: {e}"
+            log.warning("[evolve] %s 回测摘要失败: %s", name, e)
+
     async def _restore_evolve_strategies(self) -> None:
         """启动时按已训练模型补齐动态策略注册（幂等）。
 

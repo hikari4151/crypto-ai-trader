@@ -1,4 +1,5 @@
 """进化因子自动部署为组合因子策略——部署方法单测（Task 1/3）。"""
+import asyncio
 import json
 
 from core.bus import EventBus
@@ -69,3 +70,32 @@ async def test_deployed_strategy_instantiates_as_factor_signal(tmp_path):
         assert st.params["combo_spec"] == '{"vol_ratio": 0.5}'
     finally:
         _cleanup("evolve_combo_BTC_USDT")
+
+
+def test_backtest_summary_written_to_status(tmp_path, monkeypatch):
+    import backtest.engine as be
+    from backtest.data_loader import generate_demo
+    eng = _engine(tmp_path)
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    captured = {}
+
+    def _fake_run(df_, cfg, **kw):
+        captured["cfg"] = cfg
+        return {"metrics": {"total_return": 0.12, "max_drawdown": 0.05,
+                            "sharpe": 1.1, "total_trades": 7},
+                "benchmark": {"buy_hold_ret": 0.03}}
+    monkeypatch.setattr(be, "run_backtest", _fake_run)
+
+    async def _go():
+        await eng._refresh_factor_strategy_backtest(
+            "evolve_combo_BTC_USDT", "BTC/USDT", df)
+
+    asyncio.run(_go())
+    summary = eng._factor_miner_status["backtest_summary"]
+    assert summary["total_ret"] == 0.12
+    assert summary["max_drawdown"] == 0.05
+    assert summary["sharpe"] == 1.1
+    assert summary["trades"] == 7
+    assert summary["benchmark_ret"] == 0.03
+    assert captured["cfg"].strategy_name == "evolve_combo_BTC_USDT"
+    assert eng._factor_miner_status["deploy_error"] == ""

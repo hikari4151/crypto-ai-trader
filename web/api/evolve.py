@@ -268,3 +268,76 @@ async def reset_anchor(payload: dict, request: Request):
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error", "锚点重置失败"))
     return result
+
+
+@router.get("/factor-strategies")
+async def factor_strategies(request: Request):
+    """列出全部已部署的进化组合因子策略（权重/OOS报告/版本/回测摘要）。
+
+    实现：扫描 strategies 动态注册表，过滤 created_by=evolve_engine 且
+    name 前缀 evolve_combo_；回测摘要优先取该策略最近一次部署（内存 status）。
+    """
+    from strategies import dynamic_names, get_dynamic
+    evolve = _get_evolve(request)
+    fm = evolve._factor_miner_status
+    latest_name = fm.get("combo_strategy") or ""
+    latest_bt = fm.get("combo_backtest")
+    out = []
+    for name in sorted(dynamic_names()):
+        if not name.startswith("evolve_combo_"):
+            continue
+        spec = get_dynamic(name) or {}
+        if spec.get("created_by") != "evolve_engine":
+            continue
+        params = spec.get("params") or {}
+        combo_spec = params.get("combo_spec", "")
+        weights = {}
+        if combo_spec:
+            try:
+                weights = json.loads(combo_spec)
+            except Exception:  # noqa: BLE001
+                weights = {}
+        em = spec.get("evolve_meta") or {}
+        out.append({
+            "name": name,
+            "symbol": spec.get("base_symbol", ""),
+            "timeframe": spec.get("base_timeframe", ""),
+            "version": spec.get("version", ""),
+            "weights": weights,
+            "oos_report": em.get("oos_report"),
+            "selected_factors": em.get("selected_factors", []),
+            "fitness": em.get("fitness"),
+            "deployed_at": em.get("deployed_at"),
+            "backtest": latest_bt if name == latest_name else None,
+        })
+    return {"strategies": out, "count": len(out)}
+
+
+@router.post("/factor/deploy")
+async def deploy_factor(symbol: str = Query(..., description="交易对，如 BTC/USDT"),
+                        request: Request = None):
+    """手动重新部署进化组合因子策略（读最新 _cascade_weights_<symbol>.json）。
+
+    symbol 走 query 参数（路径段含 / 无法路由）；与训练写路径互斥持 _train_lock。
+    """
+    if not _SYMBOL_RE.fullmatch(str(symbol or "")):
+        raise HTTPException(status_code=400, detail=f"非法交易对: {symbol!r}")
+    evolve = _get_evolve(request)
+    wpath = evolve.zoo.models_dir / f"_cascade_weights_{symbol.replace('/', '_')}.json"
+    if not wpath.exists():
+        raise HTTPException(status_code=404,
+                            detail=f"{symbol} 暂无进化因子权重（先训练 factor_miner）")
+    try:
+        weights = json.loads(wpath.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"权重文件解析失败: {e}")
+    if not isinstance(weights, dict) or not weights:
+        raise HTTPException(status_code=400, detail="权重文件为空")
+    meta = {
+        "fitness": float(evolve._factor_miner_status.get("fitness") or 0.0),
+        "selected_factors": list(weights.keys()),
+        "round_no": int(evolve._factor_miner_status.get("episode", 0)),
+    }
+    async with evolve._train_lock:
+        result = await evolve._deploy_factor_strategy(symbol, weights, None, meta)
+    return {"ok": True, **result}

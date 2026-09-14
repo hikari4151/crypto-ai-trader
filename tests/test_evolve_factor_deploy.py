@@ -91,14 +91,14 @@ def test_backtest_summary_written_to_status(tmp_path, monkeypatch):
             "evolve_combo_BTC_USDT", "BTC/USDT", df)
 
     asyncio.run(_go())
-    summary = eng._factor_miner_status["backtest_summary"]
+    summary = eng._factor_miner_status["combo_backtest"]
     assert summary["total_ret"] == 0.12
     assert summary["max_drawdown"] == 0.05
     assert summary["sharpe"] == 1.1
     assert summary["trades"] == 7
     assert summary["benchmark_ret"] == 0.03
     assert captured["cfg"].strategy_name == "evolve_combo_BTC_USDT"
-    assert eng._factor_miner_status["deploy_error"] == ""
+    assert eng._factor_miner_status["combo_deploy_error"] == ""
 
 
 class _StubAgent:
@@ -152,15 +152,15 @@ async def test_passing_factor_miner_auto_deploys(tmp_path, monkeypatch):
         _strat = f"evolve_combo_{_symbol.replace('/', '_')}"
 
         assert saved == ["factor_miner"]
-        assert eng._factor_miner_status["deployed_strategy"] == _strat
-        assert eng._factor_miner_status["deployed_version"] == "v1"
-        assert eng._factor_miner_status["deploy_error"] == ""
+        assert eng._factor_miner_status["combo_strategy"] == _strat
+        assert eng._factor_miner_status["combo_version"] == "v1"
+        assert eng._factor_miner_status["combo_deploy_error"] == ""
         spec = get_dynamic(_strat)
         assert spec is not None and spec["executor"] == "factor_signal"
         assert calls == [(_strat, _symbol)]
         # 状态键经 _pipeline_view 透传（前端消费入口）
         view = eng.status()["factor_miner"]
-        assert view["deployed_strategy"] == _strat
+        assert view["combo_strategy"] == _strat
     finally:
         from strategies import remove_dynamic
         _strat_n = locals().get("_strat")
@@ -186,6 +186,6 @@ async def test_rejected_factor_miner_does_not_deploy(tmp_path, monkeypatch):
 
     await eng._train_factor_miner_once(force=True)
 
-    assert eng._factor_miner_status["deployed_strategy"] == ""
+    assert eng._factor_miner_status["combo_strategy"] == ""
     _symbol = eng._factor_miner_status["symbol"]
     assert get_dynamic(f"evolve_combo_{_symbol.replace('/', '_')}") is None

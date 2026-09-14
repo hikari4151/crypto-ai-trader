@@ -292,10 +292,11 @@ class EvolveEngine:
                                      "last_error": "", "next_run": 0, "last_success": False,
                                      "oos_rejected": "", "_demo_streak": 0,
                                      "loop_beat": 0.0, "restarts": 0,
-                                     # 进化组合因子部署状态（Task：进化因子使用场景）
-                                     "deployed_strategy": "", "deployed_version": "",
-                                     "last_deploy_ts": 0, "deploy_error": "",
-                                     "backtest_summary": None}
+                                     # 进化组合因子部署状态（Task：进化因子使用场景；combo_ 前缀
+                                     # 避开 _pipeline_view/_mark_deployment_status 的 deployed_* 键覆盖）
+                                     "combo_strategy": "", "combo_version": "",
+                                     "combo_deployed_at": 0, "combo_deploy_error": "",
+                                     "combo_backtest": None}
         self._strategy_drl_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
                                      "last_error": "", "next_run": 0, "last_success": False,
                                      "oos_rejected": "", "_demo_streak": 0,
@@ -535,7 +536,7 @@ class EvolveEngine:
         """后台跑一次部署策略的回测，把摘要写回 factor_miner 状态（仅展示用）。
 
         用训练轮同一份 df（rolling_window 根K线）+ 部署策略参数回测；
-        异常自吞只记 deploy_error，不影响部署状态与训练流程。
+        异常自吞只记 combo_deploy_error，不影响部署状态与训练流程。
         """
         try:
             from backtest.engine import BacktestConfig, run_backtest
@@ -557,11 +558,11 @@ class EvolveEngine:
                 "benchmark_ret": float((res.get("benchmark") or {}).get("buy_hold_ret", 0.0)),
                 "at": time.time(),
             }
-            self._factor_miner_status["backtest_summary"] = summary
-            self._factor_miner_status["deploy_error"] = ""
+            self._factor_miner_status["combo_backtest"] = summary
+            self._factor_miner_status["combo_deploy_error"] = ""
             log.info("[evolve] %s 回测摘要已刷新: %s", name, summary)
         except Exception as e:  # noqa: BLE001
-            self._factor_miner_status["deploy_error"] = f"回测摘要失败: {e}"
+            self._factor_miner_status["combo_deploy_error"] = f"回测摘要失败: {e}"
             log.warning("[evolve] %s 回测摘要失败: %s", name, e)
 
     async def _restore_evolve_strategies(self) -> None:
@@ -1830,7 +1831,7 @@ class EvolveEngine:
         }, source="evolve_engine"))
 
         # 9. 自动部署：OOS 安检已过（gate_ok），把组合权重部署为按标的的组合因子策略。
-        # 部署失败只记 deploy_error，不阻断训练流程（训练主体已完成并落库）。
+        # 部署失败只记 combo_deploy_error，不阻断训练流程（训练主体已完成并落库）。
         try:
             _weights = result.get("weights") or {}
             if _weights:
@@ -1841,10 +1842,10 @@ class EvolveEngine:
                 }
                 _dep = await self._deploy_factor_strategy(
                     symbol, _weights, result.get("report"), _meta)
-                self._factor_miner_status["deployed_strategy"] = _dep["name"]
-                self._factor_miner_status["deployed_version"] = _dep["version"]
-                self._factor_miner_status["last_deploy_ts"] = time.time()
-                self._factor_miner_status["deploy_error"] = ""
+                self._factor_miner_status["combo_strategy"] = _dep["name"]
+                self._factor_miner_status["combo_version"] = _dep["version"]
+                self._factor_miner_status["combo_deployed_at"] = time.time()
+                self._factor_miner_status["combo_deploy_error"] = ""
                 # 后台回测摘要（fire-and-forget，不阻塞训练循环；持有任务引用防 GC）
                 _task = asyncio.create_task(
                     self._refresh_factor_strategy_backtest(_dep["name"], symbol, df))
@@ -1852,7 +1853,7 @@ class EvolveEngine:
                 _task.add_done_callback(
                     lambda t, n=_dep["name"]: self._backtest_tasks.pop(n, None))
         except Exception as e:  # noqa: BLE001
-            self._factor_miner_status["deploy_error"] = f"自动部署失败: {e}"
+            self._factor_miner_status["combo_deploy_error"] = f"自动部署失败: {e}"
             log.warning("[evolve] 组合因子策略自动部署失败(%s): %s", symbol, e)
 
     # ---- 策略 DRL 持续训练循环 ----

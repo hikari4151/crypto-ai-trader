@@ -4,7 +4,7 @@
 
 **Goal:** 持续进化引擎 factor_miner 训练通过 OOS 安检后，把组合因子权重自动部署为按标的的 factor_signal 组合因子策略（可回测、可实盘手动启用），并在进化面板展示部署状态与回测摘要。
 
-**Architecture:** 在 `EvolveEngine` 新增部署方法（构造 factor_signal spec → `register_dynamic` + `_upsert_ai_strategy` 落库），`_train_factor_miner_once` 安检通过分支末尾触发自动部署并 fire-and-forget 跑后台回测摘要；`web/api/evolve.py` 暴露列表与手动重新部署端点；前端进化面板 factor_miner 卡片加部署状态区与按钮。部署不阻塞训练循环，失败只记 `deploy_error`。
+**Architecture:** 在 `EvolveEngine` 新增部署方法（构造 factor_signal spec → `register_dynamic` + `_upsert_ai_strategy` 落库），`_train_factor_miner_once` 安检通过分支末尾触发自动部署并 fire-and-forget 跑后台回测摘要；`web/api/evolve.py` 暴露列表与手动重新部署端点；前端进化面板 factor_miner 卡片加部署状态区与按钮。部署不阻塞训练循环，失败只记 `combo_deploy_error`。
 
 **Tech Stack:** Python 3.11+（asyncio / pandas / numpy）、FastAPI、SQLite（AiStrategy 表）、Vue3 单页（web/static/index.html，无构建步骤）、pytest（asyncio_mode=auto）。
 
@@ -14,7 +14,7 @@
 - `combo_spec` 用 `json.dumps(weights, ensure_ascii=False)`，`executor="factor_signal"`，`created_by="evolve_engine"`。
 - 自动部署**不得**获取 `self._train_lock`（`_train_factor_miner_once` 调用时锁已被持有，asyncio.Lock 不可重入，会死锁）；手动部署 API 端点可持锁。
 - 回测摘要只写 `_factor_miner_status`（内存），不落 `backtest_results` 表、不重写 AiStrategy 行。
-- 部署失败（权重缺失/异常）只记 `deploy_error`，不阻断训练流程、不抛异常。
+- 部署失败（权重缺失/异常）只记 `combo_deploy_error`，不阻断训练流程、不抛异常。
 - 与手动 RL 挖掘路径（`applyRlCombo` → 策略名 `factor_signal`）并存，命名空间互不冲突。
 - 测试沿用 `tests/test_drl_optimizations.py::_MetaDB` 与 `generate_demo` 构造离线引擎；`pytest.ini` 已开 `asyncio_mode=auto`，async 测试直接写 `async def`。
 
@@ -221,7 +221,7 @@ git commit -m "feat: 进化组合因子策略部署方法（按标的注册 fact
 - Modify: `tests/test_evolve_factor_deploy.py`（追加测试）
 
 **Interfaces:**
-- Produces: `EvolveEngine._refresh_factor_strategy_backtest(self, name: str, symbol: str, df) -> None`（async，异常自吞，写 `self._factor_miner_status["backtest_summary"]`）
+- Produces: `EvolveEngine._refresh_factor_strategy_backtest(self, name: str, symbol: str, df) -> None`（async，异常自吞，写 `self._factor_miner_status["combo_backtest"]`）
 - Consumes: `backtest.engine.run_backtest` / `backtest.engine.BacktestConfig`（方法内局部 import）、`strategies.get_dynamic`、`self._effective_timeframe()`、`self._factor_miner_status`
 
 - [ ] **Step 1: 写失败测试**
@@ -248,14 +248,14 @@ def test_backtest_summary_written_to_status(tmp_path, monkeypatch):
             "evolve_combo_BTC_USDT", "BTC/USDT", df)
 
     asyncio.run(_go())
-    summary = eng._factor_miner_status["backtest_summary"]
+    summary = eng._factor_miner_status["combo_backtest"]
     assert summary["total_ret"] == 0.12
     assert summary["max_drawdown"] == 0.05
     assert summary["sharpe"] == 1.1
     assert summary["trades"] == 7
     assert summary["benchmark_ret"] == 0.03
     assert captured["cfg"].strategy_name == "evolve_combo_BTC_USDT"
-    assert eng._factor_miner_status["deploy_error"] == ""
+    assert eng._factor_miner_status["combo_deploy_error"] == ""
 ```
 
 文件顶部补充 import：`import asyncio`。
@@ -275,7 +275,7 @@ Expected: FAIL（`AttributeError: 'EvolveEngine' object has no attribute '_refre
         """后台跑一次部署策略的回测，把摘要写回 factor_miner 状态（仅展示用）。
 
         用训练轮同一份 df（rolling_window 根K线）+ 部署策略参数回测；
-        异常自吞只记 deploy_error，不影响部署状态与训练流程。
+        异常自吞只记 combo_deploy_error，不影响部署状态与训练流程。
         """
         try:
             from backtest.engine import BacktestConfig, run_backtest
@@ -297,11 +297,11 @@ Expected: FAIL（`AttributeError: 'EvolveEngine' object has no attribute '_refre
                 "benchmark_ret": float((res.get("benchmark") or {}).get("buy_hold_ret", 0.0)),
                 "at": time.time(),
             }
-            self._factor_miner_status["backtest_summary"] = summary
-            self._factor_miner_status["deploy_error"] = ""
+            self._factor_miner_status["combo_backtest"] = summary
+            self._factor_miner_status["combo_deploy_error"] = ""
             log.info("[evolve] %s 回测摘要已刷新: %s", name, summary)
         except Exception as e:  # noqa: BLE001
-            self._factor_miner_status["deploy_error"] = f"回测摘要失败: {e}"
+            self._factor_miner_status["combo_deploy_error"] = f"回测摘要失败: {e}"
             log.warning("[evolve] %s 回测摘要失败: %s", name, e)
 ```
 
@@ -329,7 +329,7 @@ git commit -m "feat: 进化组合因子策略后台回测摘要（写回 factor_
 
 **Interfaces:**
 - Consumes: `_deploy_factor_strategy`（Task 1）、`_refresh_factor_strategy_backtest`（Task 2）、`result`（`weights`/`report`/`selected_factors`）、`symbol`、`df`、`new_fitness`、`self._factor_miner_status`
-- Produces: 状态键 `deployed_strategy` / `deployed_version` / `last_deploy_ts` / `deploy_error` / `backtest_summary`（经 `_pipeline_view` 自动透传到 `status()["factor_miner"]`）
+- Produces: 状态键 `combo_strategy` / `combo_version` / `combo_deployed_at` / `combo_deploy_error` / `combo_backtest`（经 `_pipeline_view` 自动透传到 `status()["factor_miner"]`；用 `combo_` 前缀避免与 `_deploy_status` 的 `deployed_version` 等既有键被 `_pipeline_view` 覆盖——审查修订，Task 3 修复轮落地）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -377,15 +377,15 @@ async def test_passing_factor_miner_auto_deploys(tmp_path, monkeypatch):
         await eng._train_factor_miner_once(force=True)
 
         assert saved == ["factor_miner"]
-        assert eng._factor_miner_status["deployed_strategy"] == "evolve_combo_BTC_USDT"
-        assert eng._factor_miner_status["deployed_version"] == "v1"
-        assert eng._factor_miner_status["deploy_error"] == ""
+        assert eng._factor_miner_status["combo_strategy"] == "evolve_combo_BTC_USDT"
+        assert eng._factor_miner_status["combo_version"] == "v1"
+        assert eng._factor_miner_status["combo_deploy_error"] == ""
         spec = get_dynamic("evolve_combo_BTC_USDT")
         assert spec is not None and spec["executor"] == "factor_signal"
         assert calls == [("evolve_combo_BTC_USDT", "BTC/USDT")]
         # 状态键经 _pipeline_view 透传（前端消费入口）
         view = eng.status()["factor_miner"]
-        assert view["deployed_strategy"] == "evolve_combo_BTC_USDT"
+        assert view["combo_strategy"] == "evolve_combo_BTC_USDT"
     finally:
         from strategies import remove_dynamic
         remove_dynamic("evolve_combo_BTC_USDT")
@@ -407,7 +407,7 @@ async def test_rejected_factor_miner_does_not_deploy(tmp_path, monkeypatch):
 
     await eng._train_factor_miner_once(force=True)
 
-    assert eng._factor_miner_status["deployed_strategy"] == ""
+    assert eng._factor_miner_status["combo_strategy"] == ""
     assert get_dynamic("evolve_combo_BTC_USDT") is None
 ```
 
@@ -416,7 +416,7 @@ async def test_rejected_factor_miner_does_not_deploy(tmp_path, monkeypatch):
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `python -m pytest tests/test_evolve_factor_deploy.py::test_passing_factor_miner_auto_deploys tests/test_evolve_factor_deploy.py::test_rejected_factor_miner_does_not_deploy -v`
-Expected: 前者 FAIL（`deployed_strategy` 为空）、后者 PASS（未实现自动部署时被拦轮本就不部署）
+Expected: 前者 FAIL（`combo_strategy` 为空）、后者 PASS（未实现自动部署时被拦轮本就不部署）
 
 - [ ] **Step 3: 实现**
 
@@ -435,16 +435,16 @@ Expected: 前者 FAIL（`deployed_strategy` 为空）、后者 PASS（未实现�
                                      "oos_rejected": "", "_demo_streak": 0,
                                      "loop_beat": 0.0, "restarts": 0,
                                      # 进化组合因子部署状态（Task：进化因子使用场景）
-                                     "deployed_strategy": "", "deployed_version": "",
-                                     "last_deploy_ts": 0, "deploy_error": "",
-                                     "backtest_summary": None}
+                                     "combo_strategy": "", "combo_version": "",
+                                     "combo_deployed_at": 0, "combo_deploy_error": "",
+                                     "combo_backtest": None}
 ```
 
 ③ `_train_factor_miner_once` 末尾（第 8 步 publish 的 `}, source="evolve_engine"))` 之后，方法结束前）插入：
 
 ```python
         # 9. 自动部署：OOS 安检已过（gate_ok），把组合权重部署为按标的的组合因子策略。
-        # 部署失败只记 deploy_error，不阻断训练流程（训练主体已完成并落库）。
+        # 部署失败只记 combo_deploy_error，不阻断训练流程（训练主体已完成并落库）。
         try:
             _weights = result.get("weights") or {}
             if _weights:
@@ -455,10 +455,10 @@ Expected: 前者 FAIL（`deployed_strategy` 为空）、后者 PASS（未实现�
                 }
                 _dep = await self._deploy_factor_strategy(
                     symbol, _weights, result.get("report"), _meta)
-                self._factor_miner_status["deployed_strategy"] = _dep["name"]
-                self._factor_miner_status["deployed_version"] = _dep["version"]
-                self._factor_miner_status["last_deploy_ts"] = time.time()
-                self._factor_miner_status["deploy_error"] = ""
+                self._factor_miner_status["combo_strategy"] = _dep["name"]
+                self._factor_miner_status["combo_version"] = _dep["version"]
+                self._factor_miner_status["combo_deployed_at"] = time.time()
+                self._factor_miner_status["combo_deploy_error"] = ""
                 # 后台回测摘要（fire-and-forget，不阻塞训练循环；持有任务引用防 GC）
                 _task = asyncio.create_task(
                     self._refresh_factor_strategy_backtest(_dep["name"], symbol, df))
@@ -466,7 +466,7 @@ Expected: 前者 FAIL（`deployed_strategy` 为空）、后者 PASS（未实现�
                 _task.add_done_callback(
                     lambda t, n=_dep["name"]: self._backtest_tasks.pop(n, None))
         except Exception as e:  # noqa: BLE001
-            self._factor_miner_status["deploy_error"] = f"自动部署失败: {e}"
+            self._factor_miner_status["combo_deploy_error"] = f"自动部署失败: {e}"
             log.warning("[evolve] 组合因子策略自动部署失败(%s): %s", symbol, e)
 ```
 
@@ -605,8 +605,8 @@ async def factor_strategies(request: Request):
     from strategies import dynamic_names, get_dynamic
     evolve = _get_evolve(request)
     fm = evolve._factor_miner_status
-    latest_name = fm.get("deployed_strategy") or ""
-    latest_bt = fm.get("backtest_summary")
+    latest_name = fm.get("combo_strategy") or ""
+    latest_bt = fm.get("combo_backtest")
     out = []
     for name in sorted(dynamic_names()):
         if not name.startswith("evolve_combo_"):
@@ -690,7 +690,7 @@ git commit -m "feat: 进化因子部署 API（策略列表 + 手动重新部署�
 - Modify: `web/static/index.html`
 
 **Interfaces:**
-- Consumes: `status()["factor_miner"]` 新键（`deployed_strategy`/`deployed_version`/`last_deploy_ts`/`deploy_error`/`backtest_summary`）、`GET /api/evolve/factor-strategies`、`POST /api/evolve/factor/deploy?symbol=...`、既有 `api()` 助手、`switchView('backtest')` + `nextTick(()=>{ runBacktest(); })` 跳转模式（参考既有 `runFactorBacktest`）、`fmtTs()`、`toast()`、`bt` reactive（`bt.strategy_name`）
+- Consumes: `status()["factor_miner"]` 新键（`combo_strategy`/`combo_version`/`combo_deployed_at`/`combo_deploy_error`/`combo_backtest`）、`GET /api/evolve/factor-strategies`、`POST /api/evolve/factor/deploy?symbol=...`、既有 `api()` 助手、`switchView('backtest')` + `nextTick(()=>{ runBacktest(); })` 跳转模式（参考既有 `runFactorBacktest`）、`fmtTs()`、`toast()`、`bt` reactive（`bt.strategy_name`）
 
 - [ ] **Step 1: 加 JS 函数与数据**
 
@@ -727,28 +727,28 @@ git commit -m "feat: 进化因子部署 API（策略列表 + 手动重新部署�
 ```html
             <!-- 因子挖掘独有：进化组合因子部署状态（Task 5） -->
             <div v-if="m.key==='factor_miner'" class="mt-1 grid gap-1 text-[12px] text-slate-400">
-              <div v-if="evolveModel(m.key).deployed_strategy" class="flex items-center gap-2 flex-wrap">
+              <div v-if="evolveModel(m.key).combo_strategy" class="flex items-center gap-2 flex-wrap">
                 <span class="pill" style="background:rgba(48,209,88,.15);color:#30d158">已部署</span>
-                <span class="font-mono">{{evolveModel(m.key).deployed_strategy}} {{evolveModel(m.key).deployed_version}}</span>
-                <span v-if="evolveModel(m.key).last_deploy_ts">{{fmtTs(evolveModel(m.key).last_deploy_ts*1000)}}</span>
+                <span class="font-mono">{{evolveModel(m.key).combo_strategy}} {{evolveModel(m.key).combo_version}}</span>
+                <span v-if="evolveModel(m.key).combo_deployed_at">{{fmtTs(evolveModel(m.key).combo_deployed_at*1000)}}</span>
               </div>
-              <div v-else-if="evolveModel(m.key).deploy_error" class="evolve-model-warning">
+              <div v-else-if="evolveModel(m.key).combo_deploy_error" class="evolve-model-warning">
                 <svg width="12" height="12" style="flex:none;margin-top:2px"><use href="#i-warn"/></svg>
-                <span>{{evolveModel(m.key).deploy_error}}</span>
+                <span>{{evolveModel(m.key).combo_deploy_error}}</span>
               </div>
               <div v-else class="text-slate-500">尚未部署 · OOS 安检通过后自动部署</div>
-              <div v-if="evolveModel(m.key).backtest_summary" class="flex items-center gap-x-3 gap-y-0.5 flex-wrap">
-                <span>回测收益 <span class="font-mono" :class="(evolveModel(m.key).backtest_summary.total_ret||0)>=0?'pos':'neg'">{{((evolveModel(m.key).backtest_summary.total_ret||0)*100).toFixed(2)}}%</span></span>
-                <span>回撤 <span class="font-mono">{{((evolveModel(m.key).backtest_summary.max_drawdown||0)*100).toFixed(2)}}%</span></span>
-                <span>夏普 <span class="font-mono">{{(evolveModel(m.key).backtest_summary.sharpe||0).toFixed(2)}}</span></span>
-                <span>交易 {{evolveModel(m.key).backtest_summary.trades||0}} 笔</span>
+              <div v-if="evolveModel(m.key).combo_backtest" class="flex items-center gap-x-3 gap-y-0.5 flex-wrap">
+                <span>回测收益 <span class="font-mono" :class="(evolveModel(m.key).combo_backtest.total_ret||0)>=0?'pos':'neg'">{{((evolveModel(m.key).combo_backtest.total_ret||0)*100).toFixed(2)}}%</span></span>
+                <span>回撤 <span class="font-mono">{{((evolveModel(m.key).combo_backtest.max_drawdown||0)*100).toFixed(2)}}%</span></span>
+                <span>夏普 <span class="font-mono">{{(evolveModel(m.key).combo_backtest.sharpe||0).toFixed(2)}}</span></span>
+                <span>交易 {{evolveModel(m.key).combo_backtest.trades||0}} 笔</span>
               </div>
               <div class="flex items-center gap-2 mt-1">
                 <button class="mac-btn text-[12px]" style="padding:3px 10px"
                         @click="deployEvolveFactor(evolveModel(m.key).symbol)"
                         :disabled="!evolveModel(m.key).symbol">部署为因子策略</button>
-                <button v-if="evolveModel(m.key).deployed_strategy" class="mac-btn text-[12px]" style="padding:3px 10px"
-                        @click="goEvolveComboBacktest(evolveModel(m.key).deployed_strategy)">去回测</button>
+                <button v-if="evolveModel(m.key).combo_strategy" class="mac-btn text-[12px]" style="padding:3px 10px"
+                        @click="goEvolveComboBacktest(evolveModel(m.key).combo_strategy)">去回测</button>
               </div>
             </div>
 ```
@@ -777,5 +777,5 @@ git commit -m "feat: 进化面板因子部署状态区（部署状态/回测摘�
 
 - **Spec 覆盖**：部署方法（§4.1→Task1）、自动钩子（§4.2→Task3）、回测摘要（§4.3→Task2）、API（§4.4→Task4）、UI（§4.5→Task5）、错误处理（§5→各任务异常自吞+deploy_error）、测试（§6→各任务含失败-通过测试）全部有对应任务。
 - **占位符**：无 TBD/TODO；所有代码块为可直接落地的完整实现。
-- **类型一致性**：`_deploy_factor_strategy` 返回 `{name, version, spec}`（Task1 定义，Task3/4 消费）；状态键 `deployed_strategy/deployed_version/last_deploy_ts/deploy_error/backtest_summary` 在 Task3 定义并在 Task5 消费；回测摘要字段 `total_ret/max_drawdown/sharpe/trades/benchmark_ret` 在 Task2 写入、Task5 展示；API 路径与前端调用一致（`/evolve/factor-strategies`、`/evolve/factor/deploy?symbol=`）。
+- **类型一致性**：`_deploy_factor_strategy` 返回 `{name, version, spec}`（Task1 定义，Task3/4 消费）；状态键 `combo_strategy/combo_version/combo_deployed_at/combo_deploy_error/combo_backtest` 在 Task3 定义并在 Task5 消费；回测摘要字段 `total_ret/max_drawdown/sharpe/trades/benchmark_ret` 在 Task2 写入、Task5 展示；API 路径与前端调用一致（`/evolve/factor-strategies`、`/evolve/factor/deploy?symbol=`）。
 - **已知环境差异**：Task3 集成测试的 symbol 依赖 `_next_symbol()`（默认首轮 BTC/USDT）；若测试环境 settings 改了默认 symbols，断言改从 `eng._factor_miner_status["symbol"]` 动态取。

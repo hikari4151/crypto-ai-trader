@@ -92,15 +92,15 @@ spec = {
 ```python
 if report valid:
     deploy_result = await self._deploy_factor_strategy(symbol, weights, report, meta)
-    self._factor_miner_status["deployed_strategy"] = deploy_result["name"]
-    self._factor_miner_status["deployed_version"] = deploy_result["version"]
-    self._factor_miner_status["last_deploy_ts"] = time.time()
-    self._factor_miner_status["deploy_error"] = ""
+    self._factor_miner_status["combo_strategy"] = deploy_result["name"]
+    self._factor_miner_status["combo_version"] = deploy_result["version"]
+    self._factor_miner_status["combo_deployed_at"] = time.time()
+    self._factor_miner_status["combo_deploy_error"] = ""
     # 触发后台回测摘要（fire-and-forget，不阻塞训练循环）
     asyncio.create_task(self._refresh_factor_strategy_backtest(deploy_result["name"], symbol, df))
 ```
 
-部署失败（权重缺失等异常）只记 `deploy_error`，**不阻断训练流程**（部署是训练后
+部署失败（权重缺失等异常）只记 `combo_deploy_error`，**不阻断训练流程**（部署是训练后
 的附加动作，训练主体照常完成）。
 
 ### 4.3 后台回测摘要 `_refresh_factor_strategy_backtest(name, symbol, df)`
@@ -119,11 +119,11 @@ cfg = BacktestConfig(
 
 - `await asyncio.to_thread(run_backtest, df, cfg)`（CPU 密集，放线程池）。
 - 摘要字段：总收益、最大回撤、夏普、交易次数、基准收益。
-- 回填 `_factor_miner_status["backtest_summary"]`；spec 的
+- 回填 `_factor_miner_status["combo_backtest"]`；spec 的
   `evolve_meta["backtest"]` 仅内存更新、不重新落库（重启后回测摘要为空，
   由用户手动「去回测」或下一次自动部署重新生成——避免每次部署都多一次
   AiStrategy 表写放大）。
-- 失败只记 `deploy_error`，不影响部署状态。
+- 失败只记 `combo_deploy_error`，不影响部署状态。
 
 ### 4.4 API（`web/api/evolve.py` 新增）
 
@@ -141,16 +141,16 @@ cfg = BacktestConfig(
 
 factor_miner 模型卡片增加部署状态区：
 
-- 已部署策略名（`evolveModel('factor_miner').deployed_strategy`，带版本与部署时间）；
-- 回测摘要（总收益/最大回撤/夏普，`backtest_summary`）；
+- 已部署策略名（`evolveModel('factor_miner').combo_strategy`，带版本与部署时间）；
+- 回测摘要（总收益/最大回撤/夏普，`combo_backtest`）；
 - 「部署为因子策略」按钮（手动重新部署，调
   `POST /api/evolve/factor/{symbol}/deploy`，symbol 用 status 里的当前标的）；
 - 「去回测」按钮（跳转回测页并预填该策略名）。
-- `deploy_error` 非空时以错误样式展示。
+- `combo_deploy_error` 非空时以错误样式展示。
 
 ## 5. 错误处理与兼容性
 
-- 权重文件缺失 / 组合因子全部下线 → `deploy_error` 记录，不阻断训练；
+- 权重文件缺失 / 组合因子全部下线 → `combo_deploy_error` 记录，不阻断训练；
 - 已下线因子由 `factor_signal` 端跳过（既有机制），部署时保留权重原文；
 - 与既有 `applyRlCombo`（手动 RL 挖掘路径）并存，命名空间不同（`evolve_combo_*`
   与 `factor_signal` 内置策略名），互不覆盖；

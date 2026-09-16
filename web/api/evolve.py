@@ -333,11 +333,36 @@ async def deploy_factor(symbol: str = Query(..., description="交易对，如 BT
         raise HTTPException(status_code=500, detail=f"权重文件解析失败: {e}")
     if not isinstance(weights, dict) or not weights:
         raise HTTPException(status_code=400, detail="权重文件为空")
+    # 伴随报告元数据（_cascade_report_<symbol>.json，训练落盘）——权重对应的真实
+    # OOS 报告/fitness/选中因子；缺失或损坏时回退：携带上一版已部署 spec 的
+    # evolve_meta（避免手动重部署把 OOS 报告覆盖成 null、fitness 用错成最新轮次值）。
     meta = {
         "fitness": float(evolve._factor_miner_status.get("fitness") or 0.0),
         "selected_factors": list(weights.keys()),
         "round_no": int(evolve._factor_miner_status.get("episode", 0)),
     }
+    _report = None
+    _companion_ok = False
+    rpath = evolve.zoo.models_dir / f"_cascade_report_{symbol.replace('/', '_')}.json"
+    if rpath.exists():
+        try:
+            _rep = json.loads(rpath.read_text(encoding="utf-8"))
+            if isinstance(_rep, dict) and _rep.get("oos_report"):
+                meta["fitness"] = float(_rep.get("fitness") or meta["fitness"])
+                meta["selected_factors"] = _rep.get("selected_factors") or meta["selected_factors"]
+                meta["round_no"] = int(_rep.get("round_no") or meta["round_no"])
+                _report = _rep["oos_report"]
+                _companion_ok = True
+        except Exception:  # noqa: BLE001 伴随文件损坏时静默走回退
+            pass
+    if not _companion_ok:
+        # 回退：沿用上一版 spec 的 OOS 报告与 fitness（同标同名策略）
+        from strategies import get_dynamic
+        _prev = get_dynamic(evolve._combo_strategy_name(symbol)) or {}
+        _prev_em = (_prev.get("evolve_meta") or {})
+        _report = _prev_em.get("oos_report")
+        if _prev_em.get("fitness") is not None:
+            meta["fitness"] = float(_prev_em["fitness"])
     async with evolve._train_lock:
-        result = await evolve._deploy_factor_strategy(symbol, weights, None, meta)
+        result = await evolve._deploy_factor_strategy(symbol, weights, _report, meta)
     return {"ok": True, **result}

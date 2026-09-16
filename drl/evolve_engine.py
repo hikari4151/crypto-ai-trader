@@ -376,6 +376,12 @@ class EvolveEngine:
             await self._restore_evolve_strategies()
         except Exception as e:  # noqa: BLE001
             log.warning("[evolve] 启动恢复策略注册失败: %s", e)
+        # 重启后恢复进化组合因子的部署状态键（combo_strategy 等），否则面板
+        # 会把已部署策略误显示为「尚未部署」（bug-fix 自实验发现）
+        try:
+            await self._restore_combo_deploy_status()
+        except Exception as e:  # noqa: BLE001
+            log.warning("[evolve] 启动恢复组合因子部署状态失败: %s", e)
         # 重启后恢复各管线已完成的训练轮次（episode），避免「重新进入软件后
         # 训练轮次显示归零」——轮次是累计事实，应以数据库落库为准接续显示
         try:
@@ -590,6 +596,39 @@ class EvolveEngine:
         from strategies import get_dynamic
         if self.zoo._flat_path("strategy_drl").exists() and get_dynamic("rl_evolve") is None:
             await self._register_rl_evolve()
+
+    async def _restore_combo_deploy_status(self) -> None:
+        """启动时恢复进化组合因子的部署状态键（combo_strategy 等）。
+
+        已部署策略持久化在 AiStrategy 表（启动时由 dynamic_store.restore_from_db
+        先恢复进注册表），但 combo_* 状态键是进程内存态——重启后为空，进化面板会
+        误显示「尚未部署」、无「去回测」按钮，直到下一轮安检通过的训练才纠正。
+        这里从注册表的最新部署（evolve_meta.deployed_at 最大者）恢复，幂等只填空。
+        """
+        from strategies import dynamic_names, get_dynamic
+        try:
+            candidates = []
+            for name in dynamic_names():
+                if not name.startswith("evolve_combo_"):
+                    continue
+                spec = get_dynamic(name) or {}
+                if spec.get("created_by") != "evolve_engine":
+                    continue
+                em = spec.get("evolve_meta") or {}
+                candidates.append((name, str(spec.get("version", "")),
+                                   em.get("deployed_at"), name))
+            if not candidates:
+                return
+            candidates.sort(key=lambda c: (c[2] or 0.0), reverse=True)
+            name, version, deployed_at, _ = candidates[0]
+            if not self._factor_miner_status.get("combo_strategy"):
+                self._factor_miner_status["combo_strategy"] = name
+                self._factor_miner_status["combo_version"] = version
+                if deployed_at:
+                    self._factor_miner_status["combo_deployed_at"] = float(deployed_at)
+                log.info("[evolve] 已恢复组合因子部署状态：%s v%s", name, version)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[evolve] 恢复组合因子部署状态失败（不影响启动）: %s", e)
 
     async def _restore_episode_counts(self) -> None:
         """重启后从 evolve_rounds 恢复各管线已完成轮次（episode 计数）。
@@ -1799,6 +1838,21 @@ class EvolveEngine:
             with open(str(cascade_weights_path), "w", encoding="utf-8") as f:
                 _json.dump(weights, f, ensure_ascii=False)
             log.info("[evolve] 组合因子权重已保存到 %s", cascade_weights_path)
+            # 伴随报告元数据：手动重新部署时还原权重对应的 OOS 报告/fitness/选中因子
+            # （bug-fix 自实验发现：手动部署此前只能写入 status 最新轮次值，且 report
+            # 传 None 会覆盖掉上一版已部署策略的 OOS 报告）。
+            try:
+                _rep_path = self.zoo.models_dir / f"_cascade_report_{symbol.replace('/', '_')}.json"
+                _rep_path.write_text(_json.dumps({
+                    "fitness": float(new_fitness),
+                    "oos_report": result.get("report") or {},
+                    "selected_factors": result.get("selected_factors", []),
+                    "round_no": int(self._factor_miner_status.get("episode", 0)),
+                    "ts": time.time(),
+                }, ensure_ascii=False), encoding="utf-8")
+                log.info("[evolve] 组合因子报告元数据已保存到 %s", _rep_path)
+            except Exception as e:  # noqa: BLE001
+                log.warning("[evolve] 组合因子报告元数据写入失败（不影响权重落盘）: %s", e)
         # 清理旧格式单文件（兼容升级前的遗留），防止被误加载
         legacy = self.zoo.models_dir / "_cascade_factor_values.npy"
         if legacy.exists():

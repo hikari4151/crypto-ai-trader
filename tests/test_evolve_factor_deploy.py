@@ -294,3 +294,65 @@ async def test_deploy_exception_does_not_break_training(tmp_path, monkeypatch):
     # 核心安全约束：部署异常不阻断训练——训练主体已完成，fitness 已更新
     assert eng._factor_miner_status["combo_strategy"] == ""
     assert eng._factor_miner_status["fitness"] == 0.02
+
+
+async def test_restore_combo_deploy_status_after_restart(tmp_path):
+    """自实验 bug-fix：重启后 combo_* 状态键应从已注册的最新部署恢复，
+    进化面板不误显示「尚未部署」（此前仅训练轮写这些键，重启即丢）。"""
+    eng1 = _engine(tmp_path)
+    await eng1._deploy_factor_strategy(
+        "BTC/USDT", {"vol_ratio": 0.5},
+        {"enabled": True, "valid": True, "rank_ic": 0.04},
+        {"fitness": 0.02, "selected_factors": ["vol_ratio"], "round_no": 3})
+    try:
+        # 模拟重启：新引擎实例（combo_* 内存状态全空），注册表（持久化恢复）仍在
+        eng2 = _engine(tmp_path)
+        await eng2._restore_combo_deploy_status()
+        assert eng2._factor_miner_status["combo_strategy"] == "evolve_combo_BTC_USDT"
+        assert eng2._factor_miner_status["combo_version"] == "v1"
+        assert eng2._factor_miner_status["combo_deployed_at"] > 0
+        # 幂等：已填充时不覆盖
+        await eng2._restore_combo_deploy_status()
+        assert eng2._factor_miner_status["combo_strategy"] == "evolve_combo_BTC_USDT"
+        # 无部署时不报错、保持空
+        eng3 = _engine(tmp_path)
+        remove_dynamic("evolve_combo_BTC_USDT")
+        await eng3._restore_combo_deploy_status()
+        assert eng3._factor_miner_status["combo_strategy"] == ""
+    finally:
+        _cleanup("evolve_combo_BTC_USDT")
+
+
+async def test_cascade_report_companion_written_on_accepted_round(tmp_path, monkeypatch):
+    """自实验 bug-fix：安检通过轮在落权重文件的同时写 _cascade_report_<symbol>.json
+    （手动重部署读它还原 OOS 报告/fitness/选中因子的真实 provenance）。"""
+    import json as _json
+    import drl.evolve_engine as ev
+    from backtest.data_loader import generate_demo
+    eng = _engine(tmp_path)
+    eng._rolling_window = 200
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    async def _stub_fetch(symbol=""):
+        return df
+    monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
+    holder = {"result": _factor_result()}
+    monkeypatch.setattr(ev, "train_factor_miner",
+                        lambda df_, mat=None, cfg=None, on_progress=None: holder["result"])
+    monkeypatch.setattr(eng.zoo, "save_agent",
+                        lambda agent, name, *, meta=None, is_best=True: None)
+    async def _stub_refresh(name, symbol, df_, version):
+        return None
+    monkeypatch.setattr(eng, "_refresh_factor_strategy_backtest", _stub_refresh)
+
+    await eng._train_factor_miner_once(force=True)
+    await asyncio.sleep(0)
+
+    _symbol = eng._factor_miner_status["symbol"]
+    rep_path = eng.zoo.models_dir / f"_cascade_report_{_symbol.replace('/', '_')}.json"
+    assert rep_path.exists(), "安检通过轮应写出伴随报告元数据文件"
+    rep = _json.loads(rep_path.read_text(encoding="utf-8"))
+    assert rep["fitness"] == 0.02
+    assert rep["oos_report"]["valid"] is True
+    assert rep["selected_factors"] == ["vol_ratio"]
+    assert rep["round_no"] == 1
+    _cleanup(f"evolve_combo_{_symbol.replace('/', '_')}")

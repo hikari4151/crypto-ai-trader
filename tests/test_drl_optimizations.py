@@ -462,3 +462,53 @@ async def test_evolve_meta_registration_keeps_user_mode(tmp_path, monkeypatch):
         assert eng._meta_controller_status["episode"] == 1
     finally:
         remove_dynamic("meta_controller")
+
+
+# ============ 第2项完善：训练成本闸 ============
+
+def test_reject_downshift_retry_pure():
+    """连续 OOS 被拒降频纯函数：floor<=0 关闭、未达阈值不变、达到放大 5 倍/下限 300s。"""
+    from drl.evolve_engine import _reject_downshift_retry
+    # 关闭
+    assert _reject_downshift_retry(60, 50, 0) == 60
+    # 未达阈值
+    assert _reject_downshift_retry(60, 5, 6) == 60
+    # 达到阈值：60*5=300（正好命中下限）
+    assert _reject_downshift_retry(60, 6, 6) == 300
+    # 大间隔放大
+    assert _reject_downshift_retry(120, 7, 6) == 600
+    # 小间隔也受下限保护
+    assert _reject_downshift_retry(30, 8, 2) == 300
+
+
+async def test_config_whitelist_accepts_reject_downshift_after(tmp_path, monkeypatch):
+    """新配置键 reject_downshift_after 应通过热更新校验并进入 applied。
+
+    注意：apply_config 会把变更持久化回真实 config/config.yaml——测试前后必须
+    备份/恢复该文件（曾污染：测试跑完 config.yaml 里残留 evolve_reject_downshift_after:4）。
+    """
+    from drl.evolve_engine import EvolveEngine
+    from core.bus import EventBus
+    from config.settings import ROOT as _SETTINGS_ROOT
+
+    yaml_cfg = _SETTINGS_ROOT / "config" / "config.yaml"
+    bak_bytes = yaml_cfg.read_bytes() if yaml_cfg.exists() else None
+    bak_file = _SETTINGS_ROOT / "config" / "config.yaml.bak"
+    eng = EvolveEngine(_MetaDB(), EventBus(), tmp_path / "models")
+    try:
+        result = await eng.apply_config({"reject_downshift_after": 4})
+        assert result["ok"] is True
+        assert result["applied"].get("evolve_reject_downshift_after") == 4
+    finally:
+        if bak_bytes is not None:
+            yaml_cfg.write_bytes(bak_bytes)
+        elif yaml_cfg.exists():
+            yaml_cfg.unlink()
+        if bak_file.exists():
+            bak_file.unlink()
+
+
+async def test_train_time_budget_default_positive():
+    """第2项完善：train_time_budget 默认应为正值（120s），后台无预算上限不再常驻吃 CPU。"""
+    from config.settings import settings
+    assert float(settings.evolve_train_time_budget) > 0

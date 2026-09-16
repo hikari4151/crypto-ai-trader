@@ -17,6 +17,8 @@ _CONFIG_KEYS = {
     "train_time_budget", "min_train_gap_sec", "train_on_demo", "anchor_max_fitness",
     # P0-族群：策略 DRL 冠军/挑战者 K=2 族群开关
     "strategy_drl_population",
+    # 第2项完善：连续 OOS 被拒自动降频阈值
+    "reject_downshift_after",
 }
 _SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]*/[A-Z0-9][A-Z0-9._-]*(?::[A-Z0-9][A-Z0-9._-]*)?$")
 

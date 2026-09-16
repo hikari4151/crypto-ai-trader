@@ -167,11 +167,18 @@ class Settings(BaseSettings):
     # P0：单轮训练时间预算（秒）。>0 时训练到预算即提前结束（续训场景"学一点就停"
     # 优于"从头重训"，超时后 OOS 门照常把关防过拟合）；0 = 不限时跑满 episodes。
     # 配合续训（base_agent）让 60s 周期内的每轮训练都变得轻量，成本大幅下降。
-    evolve_train_time_budget: float = 0.0
+    # 第2项完善：默认 120s 单轮预算——实测大窗口（5000 根）单轮 PPO 在低配环境
+    # 可超分钟级，60s 周期下无预算上限会让后台训练常驻吃 CPU。面板可热调。
+    evolve_train_time_budget: float = 120.0
     # P1：增量门按训练周期自动换算最小新增K线根数——训练间隔至少覆盖
     # evolve_min_train_gap_sec 秒（5m 周期 2 根=10 分钟一轮仍偏密，换算后更贴合
     # 训练成本与行情节奏）。0 = 关闭自适应，仅用 evolve_min_new_bars。
     evolve_min_train_gap_sec: int = 0
+    # 第2项完善：连续 OOS 被拒（训练正常但安检门连续拦截）自动降频阈值。
+    # 被拒说明当前数据窗口暂时供不出有效因子，60s 一轮全量重训纯烧 CPU——
+    # 连续达到该次数后该管线训练间隔放大 5 倍（如 60s→300s）；成功一轮即重置。
+    # 0 = 关闭（保持固定间隔）。
+    evolve_reject_downshift_after: int = 6
     # P1：交易所故障期是否用合成数据训练（True=保留兜底训练；False=直接跳过，
     # 彻底省掉故障期 60s 一轮的全量重训 CPU 成本）。demo 模型本就不会被部署，
     # 故障期训练只烧电不产出，默认关。

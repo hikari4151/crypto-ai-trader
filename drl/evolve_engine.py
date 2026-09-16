@@ -201,6 +201,16 @@ def resolve_meta_sub_strategies(spec_params: dict | None) -> str:
     return ",".join(dict.fromkeys(defaults)) or "dual_ma,factor_signal"
 
 
+def _reject_downshift_retry(base_interval: int, reject_streak: int, floor: int) -> int:
+    """连续 OOS 被拒降频（第2项完善）：被拒轮数达到阈值后训练间隔放大 5 倍。
+
+    floor<=0 表示关闭（保持固定间隔）；未触发则原样返回。纯函数，便于单测。
+    """
+    if floor <= 0 or reject_streak < floor:
+        return base_interval
+    return max(base_interval * 5, 300)
+
+
 def _training_identity(model: str, symbol: str, timeframe: str, *,
                        state_window: int = 1, factor_signature: str = "",
                        config: Optional[dict] = None,
@@ -1126,6 +1136,8 @@ class EvolveEngine:
             "min_new_bars": int(getattr(settings, "evolve_min_new_bars", 2)),
             "train_time_budget": float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0),
             "min_train_gap_sec": int(getattr(settings, "evolve_min_train_gap_sec", 0) or 0),
+            # 第2项完善：连续 OOS 被拒降频阈值（可热调，0=关闭）
+            "reject_downshift_after": int(getattr(settings, "evolve_reject_downshift_after", 6) or 0),
             "train_on_demo": bool(getattr(settings, "evolve_train_on_demo", False)),
             "anchor_max_fitness": float(getattr(settings, "evolve_anchor_max_fitness", 50.0) or 0.0),
             "strategy_drl_population": bool(getattr(settings, "evolve_strategy_drl_population", True)),
@@ -1230,6 +1242,9 @@ class EvolveEngine:
             _check("min_new_bars", "evolve_min_new_bars", conv=int, min_v=0, max_v=100000)
             _check("train_time_budget", "evolve_train_time_budget", conv=float, min_v=0.0, max_v=86400.0)
             _check("min_train_gap_sec", "evolve_min_train_gap_sec", conv=int, min_v=0, max_v=604800)
+            # 第2项完善：连续 OOS 被拒降频阈值（0=关闭）
+            _check("reject_downshift_after", "evolve_reject_downshift_after",
+                   conv=int, min_v=0, max_v=100000)
             _check("anchor_max_fitness", "evolve_anchor_max_fitness", conv=float, min_v=0.0, max_v=1e9)
             if "train_on_demo" in changes and changes["train_on_demo"] is not None:
                 if not isinstance(changes["train_on_demo"], bool):
@@ -1398,6 +1413,17 @@ class EvolveEngine:
                     retry_interval = max(interval * 10, 600)
                     log.info("[evolve] %s：交易所不可达连续 %d 次，训练降频至 %ds",
                              name, _demo_streak, retry_interval)
+                # 第2项完善：连续 OOS 被拒（训练正常但安检门连续拦截）自动降频——
+                # 被拒说明当前数据窗口暂时供不出有效因子，60s 一轮全量重训纯烧 CPU。
+                # 复用引擎级 reject_streak 计数（_log_round：ok 清零/被拒递增），
+                # 阈值 evolve_reject_downshift_after 可配（0=关）。
+                _reject_streak = int(self._reject_streak.get(pipeline, 0) or 0) if pipeline else 0
+                _reject_floor = int(getattr(settings, "evolve_reject_downshift_after", 6) or 0)
+                _downshifted = _reject_downshift_retry(retry_interval, _reject_streak, _reject_floor)
+                if _downshifted != retry_interval:
+                    log.info("[evolve] %s 连续 %d 轮未通过安检，训练降频至 %ds",
+                             name, _reject_streak, _downshifted)
+                retry_interval = _downshifted
                 # P4-C4：连续失败指数退避（防"长期故障下每 5 分钟空转一次"）——
                 # 失败重试随连续失败次数增长：5min → 10min → 20min → 封顶 30min；
                 # 成功或跳过即清零。

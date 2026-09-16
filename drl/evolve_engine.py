@@ -1710,10 +1710,15 @@ class EvolveEngine:
         # 合成数据的量级，继续比较等于让这条管线永久只回退不前进。
         # Task 4：同符号/周期/配置才可比；旧锚点缺身份字段按 unknown 不压新模型。
         anchor = self.zoo.best_info("factor_miner")
+        # 自实验观察项解决：factor_signature 不再取"选中因子列表"。RL 因子选择是
+        # 训练**输出**（每轮探索必变），把它纳入身份指纹会让新旧锚点每轮都
+        # factor_signature 不一致 → _identity_mismatch 永不通过 → 回退保护被永久
+        # 旁路（日志对每轮 "锚点身份不可比，跳过回退比较"，实际退化模型一直上线）。
+        # 身份口径回到 symbol/timeframe/config（config 指纹已含 episodes/ic_window/
+        # corr/action_masking，训练口径改了照样判不可比重建基线）。
         _factor_identity = _training_identity(
             "factor_miner", symbol, self._effective_timeframe(),
             state_window=1,
-            factor_signature=str(result.get("selected_factors", [])),
             config={
                 "episodes": int(getattr(settings, "evolve_factor_miner_episodes", 8)),
                 "ic_window": 120, "corr_threshold": 0.85,

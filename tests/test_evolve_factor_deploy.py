@@ -388,3 +388,43 @@ async def test_cascade_report_companion_written_on_accepted_round(tmp_path, monk
     assert rep["selected_factors"] == ["vol_ratio"]
     assert rep["round_no"] == 1
     _cleanup(f"evolve_combo_{_symbol.replace('/', '_')}")
+
+
+async def test_factor_miner_identity_excludes_selected_factors(tmp_path, monkeypatch):
+    """观察项解决：factor_miner 身份指纹不应包含"选中因子列表"（RL 探索输出，
+    每轮必变——此前导致新旧锚点恒 factor_signature 不一致、回退保护被永久旁路）。
+    断言 _train_factor_miner_once 里 _training_identity 的 factor_signature 为空。"""
+    import drl.evolve_engine as ev
+    from backtest.data_loader import generate_demo
+    eng = _engine(tmp_path)
+    eng._rolling_window = 200
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    async def _stub_fetch(symbol=""):
+        return df
+    monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
+    holder = {"result": _factor_result()}
+    monkeypatch.setattr(ev, "train_factor_miner",
+                        lambda df_, mat=None, cfg=None, on_progress=None: holder["result"])
+    monkeypatch.setattr(eng.zoo, "save_agent",
+                        lambda agent, name, *, meta=None, is_best=True: None)
+    async def _stub_refresh(name, symbol, df_, version):
+        return None
+    monkeypatch.setattr(eng, "_refresh_factor_strategy_backtest", _stub_refresh)
+    captured = {}
+
+    def _capture_identity(model, symbol, timeframe, *, state_window=1,
+                          factor_signature="", config=None, window_tail_ts=None):
+        captured["factor_signature"] = factor_signature
+        captured["config"] = dict(config or {})
+        return {"model": model, "symbol": symbol, "timeframe": timeframe,
+                "state_window": state_window, "factor_signature": factor_signature,
+                "config_fingerprint": "stub"}
+    monkeypatch.setattr(ev, "_training_identity", _capture_identity)
+
+    await eng._train_factor_miner_once(force=True)
+    await asyncio.sleep(0)
+
+    assert captured.get("factor_signature") == "", \
+        "factor_miner 身份指纹不应包含选中因子列表（训练输出）——否则回退保护被永久旁路"
+    assert captured.get("config", {}).get("action_masking") is True, \
+        "训练口径（action_masking 等）仍应纳入 config 指纹"

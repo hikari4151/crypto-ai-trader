@@ -35,6 +35,14 @@ class ParamOptimizer:
             return None
 
         new_params = result.get("params") or {}
+        # 自实验观察项解决：组合因子策略（factor=combo）的因子选择/权重/模式/阈值
+        # 由持续进化引擎自动维护（每轮安检通过后自动部署覆盖）。AI 优化只允许调
+        # 风控旋钮（止损/止盈/仓位等），不得改写 combo_spec/factor/mode/阈值——
+        # 否则会静默丢弃进化引擎的权重产出，且与下一轮自动部署相互打架。
+        if str(strategy.params.get("factor", "")) == "combo":
+            for _k in ("factor", "mode", "combo_spec", "buy_threshold", "sell_threshold",
+                       "expression"):
+                new_params.pop(_k, None)
         # apply=True：直接热更新策略参数（旧行为）；apply=False：只返回 AI 建议参数，
         # 由调用方持策略锁应用（曾错误返回 dict(strategy.params) 旧参数快照，
         # 导致 AI 优化建议从不生效——仅写 OptimizationLog）

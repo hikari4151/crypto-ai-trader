@@ -84,6 +84,8 @@ def test_backtest_summary_written_to_status(tmp_path, monkeypatch):
 
     def _fake_run(df_, cfg, **kw):
         captured["cfg"] = cfg
+        captured["df_len"] = len(df_)
+        captured["bootstrap"] = kw.get("bootstrap", True)
         return {"metrics": {"total_return": 0.12, "max_drawdown": 0.05,
                             "sharpe": 1.1, "total_trades": 7},
                 "benchmark": {"buy_hold_ret": 0.03}}
@@ -102,6 +104,36 @@ def test_backtest_summary_written_to_status(tmp_path, monkeypatch):
     assert summary["benchmark_ret"] == 0.03
     assert captured["cfg"].strategy_name == "evolve_combo_BTC_USDT"
     assert eng._factor_miner_status["combo_backtest_error"] == ""
+    # 优化（自测实验）：摘要展示用途关闭 bootstrap、默认不截断窗口
+    assert captured["bootstrap"] is False
+    assert captured["df_len"] == 400
+
+
+def test_summary_window_capped_by_setting(tmp_path, monkeypatch):
+    """优化（自测实验）：evolve_factor_summary_bars>0 时摘要只回测最近 N 根
+    （实测摘要耗时随窗口线性增长：1000 根 1.9s / 5000 根 10s）。"""
+    import backtest.engine as be
+    from backtest.data_loader import generate_demo
+    from config.settings import settings
+    eng = _engine(tmp_path)
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    eng._factor_miner_status["combo_strategy"] = "evolve_combo_BTC_USDT"
+    eng._factor_miner_status["combo_version"] = "v1"
+    captured = {}
+    monkeypatch.setattr(settings, "evolve_factor_summary_bars", 100)
+
+    def _fake_run(df_, cfg, **kw):
+        captured["df_len"] = len(df_)
+        return {"metrics": {"total_return": 0.1, "max_drawdown": 0.02,
+                            "sharpe": 0.9, "total_trades": 3},
+                "benchmark": {"buy_hold_ret": 0.01}}
+    monkeypatch.setattr(be, "run_backtest", _fake_run)
+
+    asyncio.run(eng._refresh_factor_strategy_backtest(
+        "evolve_combo_BTC_USDT", "BTC/USDT", df, "v1"))
+
+    assert captured["df_len"] == 100, "窗口应被截断为配置的最近 N 根"
+    assert eng._factor_miner_status["combo_backtest"]["total_ret"] == 0.1
 
 
 def test_backtest_failure_sets_backtest_error(tmp_path, monkeypatch):

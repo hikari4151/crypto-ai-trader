@@ -186,6 +186,11 @@ class Settings(BaseSettings):
     # 挑战者谱系独立槽位（strategy_drl_alt）提供多样性，须显著优于冠军才晋升，
     # 防"运气好"的模型靠噪音上位（选择只看 OOS，不看训练段）。
     evolve_strategy_drl_population: bool = True
+    # 优化（自测实验，实测数据）：进化组合因子"回测摘要"的窗口上限（根K线）。
+    # 摘要属纯展示用途，耗时随窗口线性增长（5m：1000 根 1.9s / 3000 根 5.9s /
+    # 5000 根 10s，热点在 combo 因子每根全量重算），训练间隔 60s 时全窗口
+    # 回测会显著占 CPU。>0 = 只回测最近 N 根；0（默认）= 全窗口（语义不变）。
+    evolve_factor_summary_bars: int = 0
 
     @property
     def data_dir(self) -> Path:

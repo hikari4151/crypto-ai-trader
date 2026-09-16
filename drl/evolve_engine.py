@@ -542,6 +542,10 @@ class EvolveEngine:
         """后台跑一次部署策略的回测，把摘要写回 factor_miner 状态（仅展示用）。
 
         用训练轮同一份 df（rolling_window 根K线）+ 部署策略参数回测。
+        - 优化（自测实验，实测数据）：摘要回测耗时随窗口线性增长（5m 上 1000 根
+          1.9s / 3000 根 5.9s / 5000 根 10s），纯展示用途可截断窗口——settings
+          evolve_factor_summary_bars>0 时只回测最近 N 根（默认 0=全窗口，语义不变）。
+        - bootstrap 关掉（实测仅 77ms/2% 开销，摘要无需置信区间，省一轮重采样）。
         跨轮竞态守卫：写回时校验 combo_strategy/combo_version 仍是本轮部署
         （防旧轮慢任务清掉新一轮部署错误、用旧摘要覆盖新摘要）；不归属则丢弃。
         异常自吞，只记独立键 combo_backtest_error（与部署语义 combo_deploy_error 分离）。
@@ -555,6 +559,9 @@ class EvolveEngine:
 
         try:
             from backtest.engine import BacktestConfig, run_backtest
+            _summary_bars = int(getattr(settings, "evolve_factor_summary_bars", 0) or 0)
+            if _summary_bars > 0 and df is not None and len(df) > _summary_bars:
+                df = df.iloc[-_summary_bars:]
             spec = get_dynamic(name) or {}
             cfg = BacktestConfig(
                 symbol=symbol,
@@ -563,7 +570,7 @@ class EvolveEngine:
                 strategy_params=dict(spec.get("params", {})),
                 start_cash=10000.0, fee_rate=0.001, slippage=0.0005,
             )
-            res = await asyncio.to_thread(run_backtest, df, cfg)
+            res = await asyncio.to_thread(run_backtest, df, cfg, bootstrap=False)
             m = res.get("metrics") or {}
             summary = {
                 "total_ret": float(m.get("total_return", 0.0)),

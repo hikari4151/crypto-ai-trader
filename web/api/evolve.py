@@ -311,6 +311,8 @@ async def factor_strategies(request: Request):
             "fitness": em.get("fitness"),
             "deployed_at": em.get("deployed_at"),
             "backtest": latest_bt if name == latest_name else None,
+            # 第3项完善：组合因子近期 IC 健康度（仅最新部署策略；每训练轮刷新）
+            "health": fm.get("combo_health") if name == latest_name else None,
         })
     return {"strategies": out, "count": len(out)}
 

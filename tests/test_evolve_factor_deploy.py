@@ -428,3 +428,67 @@ async def test_factor_miner_identity_excludes_selected_factors(tmp_path, monkeyp
         "factor_miner 身份指纹不应包含选中因子列表（训练输出）——否则回退保护被永久旁路"
     assert captured.get("config", {}).get("action_masking") is True, \
         "训练口径（action_masking 等）仍应纳入 config 指纹"
+
+
+# ============ 第3项完善：组合因子 IC 衰变监控 ============
+
+async def test_combo_health_computed_on_pass_round(tmp_path, monkeypatch):
+    """安检通过轮：status.combo_health 应包含每个权重因子的近期 rank IC 与组合 IC。"""
+    import drl.evolve_engine as ev
+    from backtest.data_loader import generate_demo
+    eng = _engine(tmp_path)
+    eng._rolling_window = 200
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    async def _stub_fetch(symbol=""):
+        return df
+    monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
+    holder = {"result": _factor_result()}  # weights={"vol_ratio": 0.5}
+    monkeypatch.setattr(ev, "train_factor_miner",
+                        lambda df_, mat=None, cfg=None, on_progress=None: holder["result"])
+    monkeypatch.setattr(eng.zoo, "save_agent",
+                        lambda agent, name, *, meta=None, is_best=True: None)
+    async def _stub_refresh(name, symbol, df_, version):
+        return None
+    monkeypatch.setattr(eng, "_refresh_factor_strategy_backtest", _stub_refresh)
+
+    await eng._train_factor_miner_once(force=True)
+    await asyncio.sleep(0)
+
+    health = eng._factor_miner_status.get("combo_health")
+    assert health is not None, "安检通过轮应产出组合因子健康度"
+    assert health["n_used"] >= 1
+    assert any(f["factor"] == "vol_ratio" for f in health["factors"])
+    assert isinstance(health["decayed"], bool)
+    assert health["combo_ic"] is None or isinstance(health["combo_ic"], float)
+
+
+async def test_health_refreshed_on_reject_round_for_deployed(tmp_path, monkeypatch):
+    """被拒轮也应刷新已部署策略的健康度（IC 衰变趋势需持续跟踪，即使部署未变）。"""
+    import drl.evolve_engine as ev
+    from backtest.data_loader import generate_demo
+    eng = _engine(tmp_path)
+    eng._rolling_window = 200
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    # 先部署一个策略（模拟此前已上线，并置 combo_strategy 使其成为"当前部署"）
+    await eng._deploy_factor_strategy(
+        "BTC/USDT", {"vol_ratio": 0.5},
+        {"enabled": True, "valid": True}, {"fitness": 0.02, "round_no": 1})
+    eng._factor_miner_status["combo_strategy"] = "evolve_combo_BTC_USDT"
+    try:
+        async def _stub_fetch(symbol=""):
+            return df
+        monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
+        holder = {"result": _factor_result(valid=False)}  # 本轮被 OOS 拒
+        monkeypatch.setattr(ev, "train_factor_miner",
+                            lambda df_, mat=None, cfg=None, on_progress=None: holder["result"])
+        monkeypatch.setattr(eng.zoo, "save_agent",
+                            lambda agent, name, *, meta=None, is_best=True: None)
+
+        await eng._train_factor_miner_once(force=True)
+        await asyncio.sleep(0)
+
+        health = eng._factor_miner_status.get("combo_health")
+        assert health is not None, "被拒轮也应刷新已部署策略的健康度（数据在变）"
+        assert any(f["factor"] == "vol_ratio" for f in health["factors"])
+    finally:
+        _cleanup("evolve_combo_BTC_USDT")

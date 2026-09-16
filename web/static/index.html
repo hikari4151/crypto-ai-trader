@@ -3044,6 +3044,11 @@
                 <span>夏普 <span class="font-mono">{{(evolveModel(m.key).combo_backtest.sharpe||0).toFixed(2)}}</span></span>
                 <span>交易 {{evolveModel(m.key).combo_backtest.trades||0}} 笔</span>
               </div>
+              <!-- 第3项完善：组合因子近期 IC 健康度（每训练轮刷新；decayed=信号弱化） -->
+              <div v-if="evolveModel(m.key).combo_health" class="flex items-center gap-x-3 gap-y-0.5 flex-wrap">
+                <span>组合IC <span class="font-mono" :class="(evolveModel(m.key).combo_health.combo_ic||0)>=0?'pos':'neg'">{{evolveModel(m.key).combo_health.combo_ic!=null?evolveModel(m.key).combo_health.combo_ic.toFixed(4):'-'}}</span></span>
+                <span v-if="evolveModel(m.key).combo_health.decayed" class="pill" style="background:rgba(255,159,10,.15);color:#ff9f0a">信号弱化</span>
+              </div>
               <div class="flex items-center gap-2 mt-1">
                 <button class="mac-btn text-[12px]" style="padding:3px 10px"
                         @click="deployEvolveFactor(evolveModel(m.key).symbol)"

@@ -603,6 +603,67 @@ class EvolveEngine:
             else:
                 log.debug("[evolve] %s %s 回测失败但部署已换代，丢弃错误", name, version)
 
+    def _compute_combo_factor_health(self, df, weights: dict) -> dict:
+        """已部署组合因子的近期 IC 健康度（第3项完善：IC 衰变监控/上线质检）。
+
+        对每个权重因子在最近非重叠 60 根窗口上算滚动 rank IC 并取最新值；
+        组合 IC = 按权重方向加权的因子 IC 均值（仅评估/展示用，非回测指标）。
+        decayed：|组合 IC| < 0.02（与 OOS 安检 |rank_ic|>=0.03 同量级）时标记，
+        提示该组合在当前数据窗口信号已弱化、应关注或重新训练。
+        """
+        from factors.analysis import _rolling_ic
+        from factors.library import get_factor
+        close = df["close"]
+        rows = []
+        total = 0.0
+        n_used = 0
+        for key, w in (weights or {}).items():
+            f = get_factor(str(key))
+            if f is None:
+                continue
+            try:
+                s = f.series(df).astype(float)
+            except Exception:  # noqa: BLE001
+                continue
+            ic_series = _rolling_ic(s, close, h=1, method="rank", window=60)
+            ic_val = None
+            for v in reversed(ic_series.tolist()):
+                if v == v:  # 取最近一个非 NaN 窗口的 IC
+                    ic_val = float(v)
+                    break
+            rows.append({"factor": str(key), "weight": round(float(w), 4), "ic": ic_val})
+            if ic_val is not None:
+                total += float(w) * ic_val
+                n_used += 1
+        combo_ic = (total / max(1, n_used)) if n_used else None
+        return {
+            "factors": rows,
+            "combo_ic": combo_ic,
+            "n_used": n_used,
+            "decayed": bool(combo_ic is not None and abs(combo_ic) < 0.02),
+            "at": time.time(),
+        }
+
+    def _refresh_deployed_combo_health(self, df) -> None:
+        """用最新数据刷新当前已部署组合因子的健康度（第3项完善）。
+
+        训练轮各出口（通过/被拒/回退）都应调用——IC 衰变监控要覆盖
+        "连续被拒期间健康度持续下降"这一核心场景，而非只在部署成功时更新。
+        异常自吞，不影响训练流程。
+        """
+        _deployed = self._factor_miner_status.get("combo_strategy") or ""
+        if not _deployed:
+            return
+        try:
+            from strategies import get_dynamic as _gd
+            _cs = ((_gd(_deployed) or {}).get("params") or {}).get("combo_spec") or ""
+            if _cs:
+                import json as _json
+                self._factor_miner_status["combo_health"] = self._compute_combo_factor_health(
+                    df, _json.loads(_cs))
+        except Exception as e:  # noqa: BLE001
+            log.debug("[evolve] 组合因子健康度刷新跳过: %s", e)
+
     async def _restore_evolve_strategies(self) -> None:
         """启动时按已训练模型补齐动态策略注册（幂等）。
 
@@ -1840,6 +1901,8 @@ class EvolveEngine:
                 "fitness": float(new_fitness),
                 "oos_rejected": gate_reason,
             }, source="evolve_engine"))
+            # 第3项完善：被拒轮也刷新已部署策略健康度（衰变监控核心场景）
+            self._refresh_deployed_combo_health(df)
             return "oos_rejected"
 
         # 7. 保存最佳模型（OOS 安检通过的 exchange 模型才写 best）
@@ -1968,6 +2031,11 @@ class EvolveEngine:
         except Exception as e:  # noqa: BLE001
             self._factor_miner_status["combo_deploy_error"] = f"自动部署失败: {e}"
             log.warning("[evolve] 组合因子策略自动部署失败(%s): %s", symbol, e)
+
+        # 10. 组合因子健康度（第3项完善：IC 衰变监控/上线质检）——每轮用最新
+        # 数据对当前已部署策略的权重因子算近期滚动 rank IC（通过轮刚更新
+        # combo_strategy → 算的就是新部署；被拒轮已在安检分支刷新）。
+        self._refresh_deployed_combo_health(df)
 
     # ---- 策略 DRL 持续训练循环 ----
 

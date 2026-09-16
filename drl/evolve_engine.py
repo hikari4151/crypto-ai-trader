@@ -533,7 +533,7 @@ class EvolveEngine:
         }
         register_dynamic(name, spec)
         await self._upsert_ai_strategy(name, spec)
-        log.info("[evolve] 进化组合因子策略 %s v%s 已部署（%d 个因子）",
+        log.info("[evolve] 进化组合因子策略 %s %s 已部署（%d 个因子）",
                  name, version, len(weights))
         return {"name": name, "version": version, "spec": spec}
 
@@ -585,13 +585,13 @@ class EvolveEngine:
                 self._factor_miner_status["combo_backtest_error"] = ""
                 log.info("[evolve] %s 回测摘要已刷新: %s", name, summary)
             else:
-                log.debug("[evolve] %s v%s 回测摘要过期（当前部署非本轮），丢弃", name, version)
+                log.debug("[evolve] %s %s 回测摘要过期（当前部署非本轮），丢弃", name, version)
         except Exception as e:  # noqa: BLE001
             if _owned_now():
                 self._factor_miner_status["combo_backtest_error"] = f"回测摘要失败: {e}"
                 log.warning("[evolve] %s 回测摘要失败: %s", name, e)
             else:
-                log.debug("[evolve] %s v%s 回测失败但部署已换代，丢弃错误", name, version)
+                log.debug("[evolve] %s %s 回测失败但部署已换代，丢弃错误", name, version)
 
     async def _restore_evolve_strategies(self) -> None:
         """启动时按已训练模型补齐动态策略注册（幂等）。
@@ -633,7 +633,7 @@ class EvolveEngine:
                 self._factor_miner_status["combo_version"] = version
                 if deployed_at:
                     self._factor_miner_status["combo_deployed_at"] = float(deployed_at)
-                log.info("[evolve] 已恢复组合因子部署状态：%s v%s", name, version)
+                log.info("[evolve] 已恢复组合因子部署状态：%s %s", name, version)
         except Exception as e:  # noqa: BLE001
             log.warning("[evolve] 恢复组合因子部署状态失败（不影响启动）: %s", e)
 

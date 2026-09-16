@@ -232,21 +232,29 @@ class MarketDataHub:
                         await asyncio.sleep(1)
 
         async def watch_ohlcv_for(symbol: str, tf: str) -> None:
-            """为单个 symbol+timeframe 订阅K线，带指数退避重连。"""
+            """为单个 symbol+timeframe 订阅K线，带指数退避重连。
+
+            bug-fix（自实验发现）：ccxt.pro 的 watch_ohlcv 是 **coroutine**（await
+            后返回K线数组、阻塞至有新数据），不是 async-generator——原 `async for
+            candles in ex.watch_ohlcv(...)` 每次循环都抛 "'async for' requires an
+            object with __aiter__ method, got coroutine" 且泄漏未 await 的协程，
+            导致实时K线**从未流入交易引擎**（5m 信号链路静默断裂）。改为标准
+            while + await 用法。
+            """
             backoff = 1
             while self._running:
                 try:
-                    async for candles in ex.watch_ohlcv(symbol, tf):
-                        backoff = 1  # 成功重置延迟
-                        changed = self.apply_ohlcv(symbol, tf, candles)
-                        if changed:
-                            # 新K线到达：取快照并发布事件（快照已在 apply_ohlcv 内持锁更新）
-                            snap = self.snapshot(symbol, tf)
-                            await self.bus.publish(Event(
-                                EventType.MARKET_CANDLE,
-                                {"symbol": symbol, "timeframe": tf, "candle": candles[-1], "snapshot": snap},
-                                source="ws",
-                            ))
+                    candles = await ex.watch_ohlcv(symbol, tf)
+                    backoff = 1  # 成功重置延迟
+                    changed = self.apply_ohlcv(symbol, tf, candles)
+                    if changed:
+                        # 新K线到达：取快照并发布事件（快照已在 apply_ohlcv 内持锁更新）
+                        snap = self.snapshot(symbol, tf)
+                        await self.bus.publish(Event(
+                            EventType.MARKET_CANDLE,
+                            {"symbol": symbol, "timeframe": tf, "candle": candles[-1], "snapshot": snap},
+                            source="ws",
+                        ))
                 except Exception as e:  # noqa: BLE001
                     log.warning("[ws] ohlcv %s/%s 异常: %s，%ds 后重连", symbol, tf, e, backoff)
                     await asyncio.sleep(backoff)

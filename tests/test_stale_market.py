@@ -286,3 +286,55 @@ async def test_check_market_stale_recovered():
         assert eng._stale_alerted is False, "恢复后 _stale_alerted 应重置"
     finally:
         settings.max_stale_seconds = original
+
+
+# ----- 第1项完善：engine.status() 暴露行情新鲜度（前端状态条可见） -----
+
+def test_status_exposes_market_stale_when_age_exceeds_threshold():
+    """断流（age=inf/超阈值）时 status() 应带 market_stale=True + 耗时/阈值。"""
+    from engine.trading_engine import TradingEngine
+    from tests.test_reconcile import FakeDB
+
+    db = FakeDB()
+    bus = CollectingBus()
+    eng = TradingEngine(db, bus)
+    eng.symbol = "BTC/USDT"
+    eng.timeframe = "1h"
+    eng.hub = MarketDataHub("binance", ["BTC/USDT"], ["1h"], bus)  # last_klines_ts 空 → age=inf
+    original = settings.max_stale_seconds
+    settings.max_stale_seconds = 60
+    try:
+        st = eng.status()
+        assert st["market_stale"] is True, "无任何K线数据（age=inf）应判为断流"
+        assert st["market_stale_sec"] == -1
+        assert st["market_stale_threshold"] == 60
+    finally:
+        settings.max_stale_seconds = original
+
+
+def test_status_market_stale_absent_without_hub_or_threshold():
+    """无 hub 或阈值显式关闭（0）时 status() 不应带断流判定字段（不误报）。"""
+    from engine.trading_engine import TradingEngine
+    from tests.test_reconcile import FakeDB
+
+    original = settings.max_stale_seconds
+    settings.max_stale_seconds = 60
+    try:
+        eng = TradingEngine(FakeDB(), CollectingBus())
+        eng.symbol = "BTC/USDT"
+        eng.timeframe = "1h"
+        eng.hub = None
+        st = eng.status()
+        assert "market_stale" not in st, "无 hub 时不应有断流判定字段"
+    finally:
+        settings.max_stale_seconds = original
+    settings.max_stale_seconds = 0
+    try:
+        eng2 = TradingEngine(FakeDB(), CollectingBus())
+        eng2.symbol = "BTC/USDT"
+        eng2.timeframe = "1h"
+        eng2.hub = MarketDataHub("binance", ["BTC/USDT"], ["1h"], CollectingBus())
+        st2 = eng2.status()
+        assert "market_stale" not in st2, "阈值显式关闭（0）时不应有断流判定字段"
+    finally:
+        settings.max_stale_seconds = original

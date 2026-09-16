@@ -347,6 +347,20 @@ class TradingEngine:
                "degraded": b["degraded"], "bus": b["handlers"]}
         prot = getattr(self.order_manager, "protective", None)
         out["protective_stop"] = prot.status() if prot is not None else None
+        # 行情新鲜度（第1项完善）：断链检测/通知/强平已由 _check_market_stale 负责，
+        # 这里把判定结果暴露给 status/前端——否则"行情断流"只有日志与一次性通知，
+        # 前端状态条看不到，用户重启页面后无法感知正在断流。
+        # hub 未启动 / 阈值显式关闭（<=0）时返回 None（不可用），不误报。
+        try:
+            t = self._stale_threshold()
+            if self.hub is not None and t > 0:
+                age = self.hub.last_kline_age(self.symbol, self.timeframe)
+                stale = bool(age == float("inf") or age > t)
+                out["market_stale"] = stale
+                out["market_stale_sec"] = -1 if age == float("inf") else int(age)
+                out["market_stale_threshold"] = int(t)
+        except Exception:  # noqa: BLE001 观测字段失败不影响主状态
+            pass
         return out
 
     async def _load_dynamic_strategies(self) -> None:

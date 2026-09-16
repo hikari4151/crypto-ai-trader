@@ -1394,6 +1394,9 @@
         <span class="status-dot" :class="engineStatus==='running'?'dot-on':'dot-off'"></span>
         引擎{{engineStatus==='running'?'运行中':'已停止'}}
       </span>
+      <span v-if="marketStale && engineStatus==='running'" class="pill" style="background:rgba(255,69,58,.16);color:#ff453a">
+        <span class="status-dot dot-off"></span>行情断流{{marketStaleSec!=null&&marketStaleSec>=0?(' '+marketStaleSec+'s'):''}}
+      </span>
       <span class="pill hide-narrow" :class="liveStatus?.mode==='live'?'red':liveStatus?.mode==='simulated'?'purple':'blue'">{{liveStatus?.mode==='live'?'实盘':liveStatus?.mode==='simulated'?'模拟实盘':'纸面模拟'}}</span>
     </div>
   </div>
@@ -3713,6 +3716,8 @@ const app = createApp({
       nextTick(() => { if (formDrop.value) formDropStyle.value = popPos(formDropMenu.value, r); });
     }
     const engineStatus = ref('stopped');
+    const marketStale = ref(false);
+    const marketStaleSec = ref(null);
     const portfolio = ref(null);
     const perfSummary = ref(null);
     const trades = ref([]);
@@ -5306,6 +5311,8 @@ const app = createApp({
           api('/performance/trades?limit=30')
         ]);
         engineStatus.value = st.running?'running':'stopped'; currentStrategy.value = st.strategy;
+        marketStale.value = !!st.market_stale;
+        marketStaleSec.value = (st.market_stale_sec!=null)?st.market_stale_sec:null;
         portfolio.value = p;
         perfSummary.value = ps;
         trades.value = tr;

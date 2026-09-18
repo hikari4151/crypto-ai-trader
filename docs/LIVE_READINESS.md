@@ -112,7 +112,7 @@
 - P4 库因子筛选（`.optim/p4_factor_report.md`）：26 个库因子 × BTC/ETH/SOL 1h × h=1/6/24，OOS 后 30% 分窗 + 跨品种同号门。**19 个因子-周期组合通过门，全部为稳定负 IC（反转信号）**：如 trend_regime h24 mean IC=-0.072/ICIR=-0.65、obv_slope h1 IC=-0.054/ICIR=-0.89、rsi_14 h1 IC=-0.036/ICIR=-1.68。
 - P5 反转执行器验证（`.optim/p5_reversal_report.md`）：用正确量纲（bb_pos 0-1、rsi_osc ±40 等）把负 IC 因子转成 factor_signal reversal 策略，走 P2 协议 → **搜索窗 0 候选**：负 IC 未能通过当前执行器转成交易级正收益（止损/止盈/阈值实现损耗）。
 - P6 DRL 因子挖掘（进行中，`.optim/p6_drl_miner_report.json`）：本地 PPO 自动选因子组合，绕过 LLM。
-- ⚠️ AI 通道阻塞：OpenAI `api.openai.com` 实测连接超时（代理未开）——LLM 因子设计/策略设计通道当前不可用；本地 DRL/因子挖掘不受影响。
+- ⚠️ AI 通道阻塞（2026-09-18 复测）：代理已通（OpenAI 走代理可达），但软件内配置的 AI key 在 **OpenAI / DeepSeek / SiliconFlow 三处均返回 401「API Key 无效」**——需要更换有效 AI key；本地 DRL/因子挖掘不受影响。
 
 **✅ P6/P7 DRL 因子挖掘实测（2026-09-18）**：
 
@@ -134,7 +134,10 @@
   - P12（`.optim/p12_report.md`）：**DRL 权重在更长历史上过拟合暴露**（留出 -5.1%、27 邻域 0 正）；**等权多因子反而全正**（留出 +3.0%、5x +2.2%、ETH/SOL 正，但仅 18 笔）。
   - P13（`.optim/p13_report.md`）：等权 + entry1.2/exit-1.0 扫描出 **7 个幸存者**（搜索/留出均正、≥30 笔、5x 正；最优留出 +15.4%、5x +6.7%），邻域稳健 11/27、跨品种 SOL 负。
   - P14（`.optim/p14_report.md`）：最优配置进引擎 partial 撮合 → **留出转负（-2.7%）、5x -2.9%**——向量化“限价必成交”假设再次被保守口径证伪。
-- **策略搜索最终结论（P0-P14）**：现有策略执行器参数空间（P0-P3）、反转执行器（P5）、朴素阈值（P7）、DRL/等权因子 + 限价 maker（P9-P14）**均未通过 GAP-01 全部门槛**；跨品种一致性、样本量、保守撮合下的正收益三者从未同时满足。**继续在单标的执行器里调参的边际收益已很低，应转向跨品种多空组合（用同向因子做多空）或先补基础设施/实盘链路。**
+- **P16 长历史重挖 + 多持有周期（`.optim/p16_report.md`，2026-09-18）**：在 30k 根（2023-04 起）上按 h=1/4/12 重新 DRL 挖掘，DRL 权重与等权各跑 144 组（entry/exit/min_hold/size）：
+  - h=1 OOS rank_IC=+0.017（valid=False）、h=4 IC=-0.018（valid=False）、**h=12 IC=-0.031/ICIR=1.15（valid=True）**；
+  - 但**幸存者 0**：h=1 的候选搜索窗虽 +25%~+76%，留出窗仅 **2~4 笔**（成交样本远不足）；h=4/12 因子在测试阈值下**0 成交**（z 分布随周期变化，阈值未迁移）。
+- **策略搜索最终结论（P0-P16）**：现有策略执行器参数空间（P0-P3）、反转执行器（P5）、朴素阈值（P7）、DRL/等权因子 + 限价 maker（P9-P14）、长历史多周期重挖（P16）、跨品种多空（P15）**均未通过 GAP-01 全部门槛**；**跨品种一致性、样本量（≥30 笔）、保守撮合下 5x 成本仍正，三者从未同时满足**。继续在现有执行器/因子库里调参的边际收益已接近零，建议：或换数据/资产类别（资金费率、基差、链上、更高频），或先接受“暂无 edge”把精力放在实盘工程化。
 
 ### GAP-02：从未在真实交易所 API 上验证订单
 
@@ -157,11 +160,11 @@
 
 **🚧 执行状态（2026-09-18）**：`exchange/manager.py` 已支持 `testnet=True`（ccxt `set_sandbox_mode`，不支持即显式报错）；已提供冒烟脚本 `.optim/p1_testnet_smoke.py` 与运行器 `.optim/p1b_okx_testnet_run.py`（从 DB 读密钥、不打印明文）。
 - ✅ **代理已通**：用户开启 VPN 后本机 7890 端口可用，应用自动探测生效（`resolved_proxy=http://127.0.0.1:7890`）；OKX 公共行情实测 120 根 K 线拉取成功、sandbox 客户端与市场规格读取成功。
-- ❌ **下单鉴权失败（实盘与模拟盘均失败）**：`okx {"msg":"API key doesn't exist","code":"50119"}`。
-  - 脱敏诊断（2026-09-18）：api_key len=36、secret len=32、passphrase len=13，**均无首尾空白**，格式与 OKX 规范一致 → 不是粘贴/截断问题；
-  - `testnet=True`（模拟盘）与 `testnet=False`（实盘只读 `fetch_balance`）**两种模式都返回 50119** → 该 key 在 OKX 侧不被识别（疑似已删除/属其他账号/未绑定当前出口 IP）。
-  - 处理：在 OKX 重新创建 API Key（**模拟盘验证请用「模拟交易」环境创建的 key**），确认 IP 白名单包含当前出口 IP，然后在「实盘启动」页重新保存凭据。
-- 待办：密钥可用后运行 `.venv/Scripts/python .optim/p1b_okx_testnet_run.py --place-order` 完成 GAP-02 验收 2/3（下单→撤单→复核 + 记录网络时延）。
+- ~~❌ 下单鉴权失败（实盘与模拟盘均失败）：`okx 50119 API key doesn't exist`~~ → **已由用户更换新 key 解决**（旧 key 过期）。
+- ✅ **实盘鉴权已通（2026-09-18 复测）**：新 key `42c4****6eab`（len=36）实盘只读 `fetch_balance` 成功，账户非零余额 `{'USDT': 1.0}`；BTC/USDT 实时价 78097、规格 min_amount=1e-05 BTC（最小名义 ≈ **0.78 USDT**）。
+- ⚠️ **沙箱环境不匹配**：同一把实盘 key 走 `testnet=True` 返回 `50101 APIKey does not match current environment`（预期：实盘 key 不能用于模拟盘）。**沙箱验证需要单独在 OKX「模拟交易」环境创建 demo key。**
+- ⚠️ **实盘下单余额过小**：账户仅 1.0 USDT，接近最小名义 0.78 USDT（加手续费缓冲后基本不可用）——真实下单演练需要先入金或改用模拟盘。
+- 待办：①（推荐）创建 OKX 模拟盘 demo key → 运行 `.venv/Scripts/python .optim/p1b_okx_testnet_run.py --place-order` 完成下单→撤单→复核；②或用实盘 key 在最小额下单演练（需用户明确同意 + 入金）。
 
 ### GAP-03：下单无幂等、创建失败不重试
 
@@ -298,6 +301,7 @@
 | `.optim/p13_report.md` | P13 等权提频：7 个幸存者（≥30笔、5x正；最优留出+15.4%）；邻域 11/27、SOL 负 |
 | `.optim/p14_report.md` | P14 引擎 partial：等权最优配置留出转负(-2.7%)，保守口径证伪 |
 | `.optim/p15_cross_section_report.md` | P15 跨品种多空：10 币 1h 截面多空 OOS 净收益全负（无组合级 edge） |
+| `.optim/p16_report.md` | P16 长历史(h=1/4/12)重挖：h12 因子过 IC 门但 0 成交，144 组全无幸存者 |
 | `core/logging_config.py` | GAP-07④：交易事件独立 `trading.log`（engine.*/core.bus），与 HTTP 访问日志分离 |
 | `tests/test_logging_split.py` | 2 例：交易事件隔离 + trader.log 不丢信息 + 重复 setup 不叠加 handler |
 | `tests/test_auto_start_restart_drill.py` | GAP-07②：真实 lifespan + trading_auto_start 断电恢复演练（自启/FIFO/风控冷却） |

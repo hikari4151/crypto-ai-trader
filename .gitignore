@@ -100,3 +100,6 @@ _trash_archive/
 # SDD 工作区（临时产物，不进版本库）
 .superpowers/
 
+
+# 一次性提交信息/临时产物
+.improve/

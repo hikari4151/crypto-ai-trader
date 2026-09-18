@@ -97,6 +97,14 @@ def run_backtest_fast(df: pd.DataFrame, cfg, on_progress: ProgressCB = None,
     """
     if df.empty:
         raise ValueError("回测数据为空")
+    # GAP-04：与事件引擎同口径的乐观执行提示（限价全成交/无限流动性/无资金费率）
+    if (getattr(cfg, "limit_order_model", "none") == "none"
+            and not getattr(cfg, "participation_rate", 0.0)
+            and not getattr(cfg, "funding_rate", 0.0)):
+        log.warning(
+            "[backtest] 当前为乐观执行口径（limit_order_model=none / participation_rate=0 / "
+            "funding_rate=0）——回测收益可能高于实盘；实盘就绪请参考 "
+            "docs/LIVE_READINESS.md GAP-04（限价 partial + 成本扫描 + testnet 滑点统计）")
     if _prepared is not None:
         data = _prepared["data"]
         series = _prepared["series"]

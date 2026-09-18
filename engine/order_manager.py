@@ -3,6 +3,7 @@ import asyncio
 import ccxt
 import logging
 import time
+import uuid
 from typing import Optional
 
 from config.settings import settings
@@ -20,6 +21,11 @@ log = logging.getLogger(__name__)
 
 # ccxt 订单终止态（各交易所/版本拼写不一，全部收进来）
 _TERMINAL_ORDER_STATUS = {"closed", "canceled", "cancelled", "expired", "rejected"}
+
+# 普通订单 create 网络异常时的额外重试次数（复用同一 clientOrderId 保证幂等）
+_CREATE_RETRIES = 2
+# create 意图注册表的键前缀：真实 order id 未知时用它暂存，对账按 clientOrderId 认领
+_INTENT_PREFIX = "intent:"
 
 
 class OrderManager:
@@ -201,15 +207,37 @@ class OrderManager:
         if self._reconcile_task is None or self._reconcile_task.done():
             self._reconcile_task = asyncio.create_task(self._reconcile_loop(), name="order_reconcile")
 
+    @staticmethod
+    def _new_client_oid() -> str:
+        """普通订单幂等标识：每次下单尝试生成一次，重试/对账认领都复用同一 id。"""
+        return f"tr_{uuid.uuid4().hex[:24]}"
+
     def _register_open_order(self, oid: str, signal: Signal, qty: float, limit_price: float,
-                             protective: bool = False) -> None:
+                             protective: bool = False, client_oid: Optional[str] = None) -> None:
         """把撤单未成交的限价单登记进注册表（对账回灌迟到成交用）。"""
         self._open_orders[oid] = {
             "symbol": signal.symbol, "side": signal.side, "qty": qty,
             "strategy_name": signal.strategy or "", "placed_ts": time.time(),
             "limit_price": limit_price, "recorded_filled": 0.0,
             "reason": signal.reason, "protective": protective,
+            "client_oid": client_oid,
         }
+        self._ensure_reconcile()
+
+    def _register_create_intent(self, client_oid: str, signal: Signal, qty: float, price: float) -> None:
+        """create_order 网络异常（可能已生效但响应丢失）时登记“意图”：
+        以 intent:<clientOrderId> 为键，对账循环用 clientOrderId 在交易所 open 订单中认领，
+        防止“交易所侧已挂单、本地无记录”的隐性敞口（GAP-03）。
+        """
+        self._open_orders[f"{_INTENT_PREFIX}{client_oid}"] = {
+            "symbol": signal.symbol, "side": signal.side, "qty": qty,
+            "strategy_name": signal.strategy or "", "placed_ts": time.time(),
+            "limit_price": price, "recorded_filled": 0.0,
+            "reason": signal.reason, "protective": False,
+            "client_oid": client_oid, "pending_create": True,
+        }
+        log.warning("[order] create 网络异常，登记意图待对账认领 clientOrderId=%s %s %s qty=%s",
+                    client_oid, signal.side, signal.symbol, qty)
         self._ensure_reconcile()
 
     async def _reconcile_loop(self) -> None:
@@ -227,16 +255,40 @@ class OrderManager:
     async def _reconcile_once(self) -> None:
         """单轮对账：注册表里有、交易所 open 列表已无的订单复核——
         迟到成交（filled>0）→ 回灌 Trade 行 + ORDER_FILL(late) 事件。
+        pending_create 意图按 clientOrderId 在 open 列表中认领（GAP-03）。
         """
         if self.paper or not self.exchange or not self._open_orders:
             return
         open_ids: set[str] = set()
+        open_by_cid: dict[str, dict] = {}
         try:
             open_orders = await self.exchange.fetch_open_orders()
             open_ids = {str(o.get("id")) for o in open_orders if o.get("id")}
+            for o in open_orders:
+                cid = (o.get("clientOrderId")
+                       or (o.get("info") or {}).get("clientOrderId")
+                       or (o.get("info") or {}).get("clOrdId"))
+                if cid:
+                    open_by_cid[str(cid)] = o
         except Exception as e:  # noqa: BLE001
             log.warning("[order] 对账拉取 open 订单失败: %s", e)
         for oid, rec in list(self._open_orders.items()):
+            if rec.get("pending_create"):
+                # create 意图：交易所 open 列表里按 clientOrderId 认领真实订单
+                cid = rec.get("client_oid") or oid[len(_INTENT_PREFIX):]
+                found = open_by_cid.get(str(cid))
+                if found is None or not found.get("id"):
+                    continue  # 交易所侧尚未出现（create 可能确实未生效），下轮再查
+                real_oid = str(found.get("id"))
+                rec.pop("pending_create", None)
+                rec["client_oid"] = cid
+                # 换成交易所真实 order id 为键，继续走常规对账逻辑
+                self._open_orders.pop(oid, None)
+                self._open_orders[real_oid] = rec
+                oid = real_oid
+                log.info("[order] 对账认领 create 意图: clientOrderId=%s -> oid=%s", cid, real_oid)
+                if oid in open_ids:
+                    continue
             if oid in open_ids:
                 continue  # 交易所仍挂单，保留注册表
             # 注册表有、交易所列表已无：撤单竞态/已成交/被取消——复核
@@ -471,10 +523,28 @@ class OrderManager:
                 log.warning("[order] 实盘下单跳过（数量为 0：余额不足/低于最小名义额/换算失败）：%s %s",
                             signal.side, signal.symbol)
                 return None
-            order = await self.exchange.create_order(
-                signal.symbol, signal.order_type, signal.side,
-                qty, limit_price,
-            )
+            client_oid = self._new_client_oid()
+            order = None
+            last_err: Optional[Exception] = None
+            for attempt in range(_CREATE_RETRIES + 1):
+                try:
+                    order = await self.exchange.create_order(
+                        signal.symbol, signal.order_type, signal.side,
+                        qty, limit_price,
+                        params={"clientOrderId": client_oid},
+                    )
+                    break
+                except (ccxt.NetworkError, ccxt.RequestTimeout, asyncio.TimeoutError) as e:
+                    last_err = e
+                    log.warning("[order] create 网络异常（第 %d/%d 次），复用 clientOrderId=%s: %s",
+                                attempt + 1, _CREATE_RETRIES + 1, client_oid, e)
+                    if attempt < _CREATE_RETRIES:
+                        await asyncio.sleep(0.5 * (attempt + 1))
+            if order is None:
+                # create 失败（可能已生效但响应丢失）：登记意图，交对账按 clientOrderId 认领，
+                # 不再静默丢单（GAP-03）；交易所侧若已挂出同 clientOrderId 订单会被对账发现。
+                self._register_create_intent(client_oid, signal, qty, price)
+                return None
             # 简化：市价单直接视为成交；限价单轮询状态（重试 3 次，间隔 1s——
             # 曾单次 fetch_order，网络抖动时订单已成交却返回 None，
             # 系统无 Trade 记录/on_fill 不触发，下次同向信号重复下单）
@@ -492,7 +562,7 @@ class OrderManager:
                             # （曾异常冒泡到外层宽泛 except 被吞，仅留一行日志）。
                             log.warning("[order] 轮询订单状态失败，登记对账兜底 oid=%s: %s",
                                         oid, e)
-                            self._register_open_order(oid, signal, qty, price)
+                            self._register_open_order(oid, signal, qty, price, client_oid=client_oid)
                             return None
                         if order.get("status") == "closed" or float(order.get("filled") or 0.0) > 0:
                             break
@@ -512,7 +582,7 @@ class OrderManager:
                             log.warning("[order] 撤单后复核失败: %s", e)
                         if order.get("status") != "closed" and float(order.get("filled") or 0.0) <= 0:
                             # 确认未成交（仍 open）：登记注册表，交给对账循环回灌迟到成交
-                            self._register_open_order(oid, signal, qty, price)
+                            self._register_open_order(oid, signal, qty, price, client_oid=client_oid)
                             log.warning("[order] 限价单超时未成交已撤单，登记对账: %s %s oid=%s",
                                         signal.side, signal.symbol, oid)
             # filled 口径：仅 status=="closed" 允许用 amount 兜底成交数量；
@@ -543,7 +613,7 @@ class OrderManager:
             if partial_open:
                 oid = order.get("id", "")
                 if oid:
-                    self._register_open_order(oid, signal, qty, price)
+                    self._register_open_order(oid, signal, qty, price, client_oid=client_oid)
                     self._open_orders[oid]["recorded_filled"] = filled
                     log.warning("[order] 订单部分成交且仍挂单（已登记对账，后续成交回灌）: %s %s oid=%s filled=%s/%s",
                                 signal.side, signal.symbol, oid, filled, qty)

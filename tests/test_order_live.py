@@ -23,7 +23,11 @@ class FakeExchange:
         self.open_ids = []
         self.cancelled_ids = []
 
-    async def create_order(self, symbol, otype, side, amount, price=None):
+    async def create_order(self, symbol, otype, side, amount, price=None, params=None):
+        if params and params.get("triggerPrice"):
+            # 服务端兜底止损：返回独立的触发单 id，避免与普通订单 id 冲突
+            return {"id": "ps_stop", "status": "open", "filled": 0.0, "amount": amount,
+                    "price": price or 0.0, "average": None, "fee": {"cost": 0.0}}
         return self.create_resp
 
     async def fetch_order(self, order_id, symbol):

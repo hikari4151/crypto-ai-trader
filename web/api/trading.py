@@ -15,6 +15,10 @@ class ParamsIn(BaseModel):
     params: dict
 
 
+class CloseAllIn(BaseModel):
+    reason: str = "manual_close_all"
+
+
 @router.post("/start")
 async def start(engine=Depends(get_engine)):
     await engine.start()
@@ -25,6 +29,17 @@ async def start(engine=Depends(get_engine)):
 async def stop(engine=Depends(get_engine)):
     await engine.stop()
     return {"ok": True, "status": engine.status()}
+
+
+@router.post("/close-all")
+async def close_all(body: CloseAllIn, engine=Depends(get_engine)):
+    """一键清仓（GAP-05）：引擎运行时按当前持仓市价卖出，绕开风控新开仓限制。
+
+    注意：停引擎≠清仓；本接口必须在引擎运行时调用，用于人工紧急离场。
+    """
+    if not engine.running:
+        raise HTTPException(status_code=400, detail="引擎未运行，无法平仓（停引擎≠清仓）")
+    return await engine.close_all_positions(body.reason)
 
 
 @router.get("/status")

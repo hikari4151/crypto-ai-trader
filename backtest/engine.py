@@ -74,6 +74,15 @@ def run_backtest(df: pd.DataFrame, cfg: BacktestConfig,
     """
     if df.empty:
         raise ValueError("回测数据为空")
+    # GAP-04：默认执行口径偏乐观（限价单全成交/无限流动性/无资金费率），
+    # 结果可能系统性好于实盘；上线前应改用更保守口径并跑成本扫描。
+    if (getattr(cfg, "limit_order_model", "none") == "none"
+            and not getattr(cfg, "participation_rate", 0.0)
+            and not getattr(cfg, "funding_rate", 0.0)):
+        log.warning(
+            "[backtest] 当前为乐观执行口径（limit_order_model=none / participation_rate=0 / "
+            "funding_rate=0）——回测收益可能高于实盘；实盘就绪请参考 "
+            "docs/LIVE_READINESS.md GAP-04（限价 partial + 成本扫描 + testnet 滑点统计）")
     data = df.copy()
     # 数据清洗：异常值检测 + 缺失值填充，避免脏数据污染回测/参数优化。
     # cleaning_mode="mark"（默认）：只做结构完整性修复，不清洗真实行情（P1-9）

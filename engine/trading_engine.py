@@ -882,6 +882,52 @@ class TradingEngine:
         }, source="engine"))
         return position, ""
 
+    async def close_all_positions(self, reason: str = "manual_close_all") -> dict:
+        """人工一键清仓（GAP-05）：按当前持仓数量市价卖出。
+
+        - 绕过风控的新开仓限制（closing 语义与断链平仓一致），但照常记账；
+        - paper/simulated/live 三种模式统一走 _execute_signal；
+        - 停引擎≠清仓：本接口必须在引擎运行时调用。
+        """
+        if not self.running:
+            return {"ok": False, "closed_qty": 0.0, "detail": "引擎未运行"}
+        if self.exchange and self.exchange.has_private:
+            try:
+                if getattr(self.exchange, "is_local_matching", False):
+                    # simulated 本地撮合：跳过 30s 缓存，取实时余额并回写属性
+                    # （_live_balance_cached 直接返回新余额但不更新 self._live_balance）
+                    self._live_balance = await self._live_balance_cached()
+                else:
+                    # live：手动操作前强制刷新交易所余额，避免按 30s 旧缓存平仓
+                    self._live_balance = await self.exchange.fetch_balance()
+                    self._live_balance_ts = time.time()
+            except Exception as e:  # noqa: BLE001
+                log.warning("[engine] 清仓前刷新余额失败（按缓存/本地持仓继续）: %s", e)
+        position = self._current_position_qty()
+        if position <= 0:
+            return {"ok": True, "closed_qty": 0.0, "detail": "无持仓"}
+        price = float((self.hub.last_price(self.symbol) if self.hub else None) or 0.0)
+        if price <= 0:
+            return {"ok": False, "closed_qty": 0.0, "detail": "无有效最新价，已取消平仓"}
+        signal = Signal(self.symbol, "sell", qty=position, order_type="market",
+                        reason=reason, strategy=self.strategy.name)
+        try:
+            async with self._strategy_lock:
+                await self._execute_signal(signal, price, 1.0, bypass_risk=True)
+        except Exception as e:  # noqa: BLE001
+            log.exception("[engine] 一键清仓失败: %s", e)
+            await self.bus.publish(Event(EventType.SYSTEM, {
+                "kind": "manual_close_all_failed", "symbol": self.symbol,
+                "qty": position, "detail": str(e),
+                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }, source="engine"))
+            return {"ok": False, "closed_qty": 0.0, "detail": str(e)}
+        await self.bus.publish(Event(EventType.SYSTEM, {
+            "kind": "manual_close_all", "symbol": self.symbol, "qty": position,
+            "reason": reason, "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }, source="engine"))
+        return {"ok": True, "closed_qty": position, "detail": "已发送市价平仓"}
+
     def _current_position_qty(self) -> float:
         """返回当前持仓数量（供断链平仓使用）。"""
         if self.paper and self.paper_account:

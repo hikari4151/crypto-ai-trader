@@ -179,8 +179,13 @@ async def mine_factor_by_rl(body: FactorMineTrainIn, db: Database = Depends(get_
 
     report = result["report"]
     # 通过 OOS 安检后注册到自定义因子库（source=rl_mined）
+    # E-EXP（2026-09，与 evolve_engine._oos_gate_passed 同型修复）：factor_quality_gate
+    # 用 |rank_ic| 判门会放行 OOS 方向反转的因子（权重按决策时点 IC 定向，负 rank_ic =
+    # 实时反着做）；手动挖掘的 auto_register 同样必须要求正向 rank_ic 才入库。
     registered = False
-    if body.auto_register and report.get("enabled") and report.get("valid"):
+    _rk = report.get("rank_ic")
+    _rk_ok = _rk is not None and float(_rk) > 0.0
+    if body.auto_register and report.get("enabled") and report.get("valid") and _rk_ok:
         name = f"rl_factor_combo_h{body.horizon}"
         custom = await db.kv_json_get("factor_custom", {})
         custom[name] = {

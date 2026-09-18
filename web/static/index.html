@@ -62,6 +62,24 @@
     --shadow:0 12px 32px rgba(0,0,0,.28);
     /* 圆角阶梯（收敛：6/8/10/12/14/20，全部组件从 token 取值） */
     --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:12px; --r-xl:14px; --r-full:20px;
+    /* ===== 表单控件统一盒高（2026-09-16）=====
+       此前五类控件各算各的高度，同排并置必然高矮不齐（实测）：
+         .mac-input 文本 37.6px（padding 8/8 + 行盒 19.6 + border 2）
+         .mac-btn        35.6px（padding 7/7）
+         select/.macsel  34px  （CSS 里硬写 height:34px）
+         .mac-seg-btn    33.6px（padding 6/6 + border 2）
+         .mac-seg button 31.6px（padding 6/6、无 border）
+       症状：4 处 grid 行（数据管理 / 量化 AI / 实盘启动参数）里 select 与 input 同排，
+       上沿对齐、下沿错 3.6px；分段控件与输入框同列错 6px。
+       ✅ 定稿：所有"单行表单控件"一律 height:var(--ctrl-h)。取 34px = 与既有 select 一致，
+          改动最小（输入框收 3.6px、按钮收 1.6px，肉眼几乎无感，只消除"不齐"）。
+       ⚠️ 高度用 height 而非改 padding：.mac-input 的 padding 同时供多行 textarea 使用，
+          直接压 padding 会让 textarea 变挤。
+       ⚠️ 新增任何单行控件（日期/时间/自定义下拉/分段）都必须 height:var(--ctrl-h)，
+          否则又会出现新的"第六档高度"。 */
+    --ctrl-h:34px;
+    /* 表单节奏（分组之间 / 分组内字段 / 标签到控件）：三级固定，不再散写 mt-1~mt-6 */
+    --form-gap:12px; --form-gap-inner:8px; --label-gap:6px;
     /* 字阶（Apple HIG：caption/footnote/body/headline/title/large-title，各配字距） */
     /* P2-14 整体上调一档：原正文 13px/辅助 11px 在常见屏距偏小，提升后可读性更好 */
     --fs-caption:12px; --fs-caption-ls:-0.01em;
@@ -323,9 +341,20 @@
   .traffic:hover .tl.g::after{content:'+';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;font-weight:700;color:rgba(0,0,0,.55);line-height:1}
 
   /* ---------- macOS 控件 ---------- */
-  .mac-btn{background:var(--btn-bg);border:1px solid var(--border2);border-radius:var(--r-sm);padding:7px 16px;will-change:transform;
-    font-size:var(--fs-body);color:var(--text);cursor:pointer;transition:background .15s,border-color .15s,box-shadow .15s;display:inline-flex;align-items:center;gap:6px;font-weight:500;line-height:1.4;
+  /* 按钮同样服从 --ctrl-h：与输入框/下拉同排时下沿齐平（此前 35.6 vs 34 差 1.6px）。
+     竖直 padding 归零、改由 height + align-items:center 居中；横向 padding 保留。 */
+  .mac-btn{background:var(--btn-bg);border:1px solid var(--border2);border-radius:var(--r-sm);padding:0 16px;will-change:transform;
+    font-size:var(--fs-body);color:var(--text);cursor:pointer;transition:background .15s,border-color .15s,box-shadow .15s;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-weight:500;line-height:1.4;
+    height:var(--ctrl-h);box-sizing:border-box;
     box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
+  /* 小按钮例外：标题栏/表格行/内联操作里特意做小的按钮（51 处 inline padding 竖直 1~4px），
+     它们靠 padding 定高、以字高为准，【不该】被拉到 34px——强行统一会撑高 24px 的标题栏。
+     判据：模板里这类按钮 inline padding 的竖直值 ≤4px。
+     .btn-sm 只做一件事：把 height 交还给内容（height:auto），让 inline 的
+     padding 竖直值继续生效 —— 高度与改动前逐像素一致，不受 --ctrl-h 影响。
+     ⚠️ 新增小按钮时必须加 .btn-sm，否则会被 --ctrl-h 拉到 34px；
+        反过来，需要与输入框对齐的常规按钮【不要】加 .btn-sm。 */
+  .mac-btn.btn-sm{height:auto}
   .mac-btn:hover{background:var(--btn-bg-hover)}
   .mac-btn:active{transform:scale(.97);transition-duration:var(--press-ms);box-shadow:inset 0 1px 3px rgba(0,0,0,.2)}
   .mac-btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
@@ -341,14 +370,22 @@
   .mac-btn.purple{background:linear-gradient(180deg,var(--purple-light),var(--purple-deep));border:none;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.14)}
   .mac-btn.cyan{background:linear-gradient(180deg,var(--cyan-light),var(--cyan-deep));border:none;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.14)}
   .mac-btn.green:hover,.mac-btn.orange:hover,.mac-btn.purple:hover,.mac-btn.cyan:hover{filter:brightness(1.1)}
-  .mac-input{background:var(--input-bg);border:1px solid var(--border2);border-radius:var(--r-sm);padding:8px 12px;font-size:var(--fs-body);
-    color:var(--text);outline:none;width:100%;transition:box-shadow .18s ease,border-color .18s ease;line-height:1.4}
+  /* 高度统一走 --ctrl-h（见 :root 注释）：单行控件一律 34px。
+     竖直 padding 归零、改由 height + line-height 居中——这样文本、数字、日期三类的
+     内容盒高度都等于控件高度减 border，不再随 padding 与行盒叠加出各自的数值。
+     ⚠️ 多行 textarea 不在统一范围内：给 textarea 单独的 height:auto + padding 覆写（见下）。 */
+  .mac-input{background:var(--input-bg);border:1px solid var(--border2);border-radius:var(--r-sm);padding:0 12px;font-size:var(--fs-body);
+    color:var(--text);outline:none;width:100%;transition:box-shadow .18s ease,border-color .18s ease;line-height:1.4;
+    height:var(--ctrl-h);box-sizing:border-box}
   .mac-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,132,255,.22)}
   .mac-input::placeholder{color:var(--muted)}
+  /* 多行输入例外：textarea 必须能长高，故还原内距与高度。
+     当前模板没有 textarea，此处是给将来加备注/JSON 编辑框留的正确默认值。 */
+  textarea.mac-input{height:auto;min-height:var(--ctrl-h);padding:8px 12px;line-height:1.5;resize:vertical}
   select.mac-input{cursor:pointer;appearance:none;-webkit-appearance:none;
     /* 全局统一原生下拉的视觉：各页 inline padding 不一致曾导致高矮不齐、箭头压字（毛胚观感）。
        !important 用于压过模板里的 inline padding 覆写，保证所有页面同一高度同一留白 */
-    height:34px;padding:0 30px 0 12px !important;box-sizing:border-box;
+    height:var(--ctrl-h);padding:0 30px 0 12px !important;box-sizing:border-box;
     /* macOS 下拉箭头（SF 风格，随主题明暗） */
     background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238e8e93' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     background-repeat:no-repeat;background-position:right 12px center}
@@ -358,11 +395,16 @@
      flex item 生效，span 停在 display:inline 时这两条声明被浏览器直接忽略 → 长标签溢出按钮。
      padding-right 收进 9px：30px 原是替原生 select 的 background-image 箭头留的位子，
      MacSelect 的箭头是自己画的 SVG，flex 后按普通右对齐项排布，不需要那段留白。 */
-  button.macsel-btn{display:flex;align-items:center;gap:6px;min-width:0;height:34px;padding:0 9px 0 12px;text-align:left;font-weight:400}
+  button.macsel-btn{display:flex;align-items:center;gap:6px;min-width:0;height:var(--ctrl-h);padding:0 9px 0 12px;text-align:left;font-weight:400}
   button.macsel-btn:hover:not(:disabled){border-color:color-mix(in srgb,var(--border2) 45%,var(--muted))}
   select.mac-input option{background:var(--bg-2);color:var(--text)}
   :root[data-theme="light"] select.mac-input{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236e6e73' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
-  .mac-label{display:block;font-size:var(--fs-footnote);color:var(--muted);margin-bottom:6px;font-weight:600;letter-spacing:.2px}
+  /* 标签→控件间距走 --label-gap（6px）：模板里 13 处 mac-label mb-0 是为了在
+     同行排布时抵消这个下边距；现在改用 .mac-label.inline 表达"与控件同行"的语义，
+     比抹掉 margin 更明确（见 .mac-label.inline 定义）。 */
+  .mac-label{display:block;font-size:var(--fs-footnote);color:var(--muted);margin-bottom:var(--label-gap);font-weight:600;letter-spacing:.2px}
+  /* 与控件同行（开关行/前置标签行）：去掉下边距，靠父级 flex align-items:center 对齐 */
+  .mac-label.inline{margin-bottom:0;white-space:nowrap;display:inline-block}
   /* macOS 复选框（策略布尔参数）：曾 class 未定义，渲染为系统原生方块 */
   .mac-toggle-input{appearance:none;-webkit-appearance:none;width:16px;height:16px;border-radius:var(--r-xs);
     border:1px solid var(--border2);background:var(--input-bg);cursor:pointer;position:relative;flex:none;
@@ -378,14 +420,23 @@
   .mac-toggle::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;
     transition:.25s cubic-bezier(.3,1.5,.5,1);box-shadow:0 1px 3px rgba(0,0,0,.4)}
   .mac-toggle.on::after{left:18px}
-  .mac-seg{display:flex;background:rgba(0,0,0,.26);border-radius:var(--r-md);padding:2px;gap:2px;box-shadow:inset 0 1px 2px rgba(0,0,0,.15)}
+  /* 分段控件外框高度也归到 --ctrl-h：外框 34px = 内片 + 上下 2px 内距 ⇒ 内片 30px。
+     此前外框 35.6px（内片 31.6），与同列输入框差 6px，是"分段条看着比输入框矮一截"的根因。
+     用 height 定外框、内片 flex 拉伸填满（align-items:stretch 是 flex 默认，无需声明），
+     内片不再自己算 padding 高度 —— 改字号/行高时不会又跑偏。 */
+  .mac-seg{display:flex;background:rgba(0,0,0,.26);border-radius:var(--r-md);padding:2px;gap:2px;box-shadow:inset 0 1px 2px rgba(0,0,0,.15);
+    height:var(--ctrl-h);box-sizing:border-box}
   :root[data-theme="light"] .mac-seg{background:rgba(0,0,0,.06)}
-  .mac-seg button{flex:1;padding:6px 14px;border-radius:var(--r-sm);font-size:var(--fs-footnote);color:var(--muted);cursor:pointer;transition:.15s;border:none;background:transparent;font-weight:500;white-space:nowrap}
+  .mac-seg button{flex:1;padding:0 14px;border-radius:var(--r-sm);font-size:var(--fs-footnote);color:var(--muted);cursor:pointer;transition:.15s;border:none;background:transparent;font-weight:500;white-space:nowrap;
+    display:inline-flex;align-items:center;justify-content:center}
+  /* 纯图标分段（菜单栏密度切换）：靠图标定高，不吃 --ctrl-h */
+  .mac-seg.seg-icon{height:auto;padding:2px}
   .mac-seg button.active{background:rgba(255,255,255,.2);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.28)}
   :root[data-theme="light"] .mac-seg button.active{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.15)}
-  /* 仓库分类标签按钮 */
-  .mac-seg-btn{padding:6px 14px;border-radius:var(--r-sm);font-size:var(--fs-footnote);color:var(--muted);cursor:pointer;transition:.15s;
-    border:1px solid var(--border2);background:var(--bar-bg);font-weight:500;white-space:nowrap}
+  /* 仓库分类标签按钮：同为单行控件，高度归到 --ctrl-h */
+  .mac-seg-btn{padding:0 14px;border-radius:var(--r-sm);font-size:var(--fs-footnote);color:var(--muted);cursor:pointer;transition:.15s;
+    border:1px solid var(--border2);background:var(--bar-bg);font-weight:500;white-space:nowrap;
+    display:inline-flex;align-items:center;justify-content:center;height:var(--ctrl-h);box-sizing:border-box}
   .mac-seg-btn:hover{background:var(--hover);color:var(--text)}
   .mac-seg-btn.active{background:var(--accent);color:#fff;border-color:transparent;box-shadow:0 1px 3px rgba(10,132,255,.3)}
   .mac-card{background:color-mix(in srgb,var(--bg-3) 30%,transparent);border:1px solid var(--border);border-radius:var(--r-md);padding:14px;backdrop-filter:blur(12px) saturate(140%)}
@@ -432,7 +483,9 @@
   .dash-risk-progress{height:7px;background:rgba(255,255,255,.08);border-radius:999px;overflow:hidden}
   .dash-risk-progress span{display:block;height:100%;border-radius:999px;background:var(--accent);transition:width .35s ease}
   .dash-table-card .mac-titlebar{min-height:48px}
-  .dash-table-card .mac-titlebar > .mac-seg button{padding:6px 14px}
+  /* 标题栏内的分段控件：外框由 --ctrl-h 定高（34px），内片横向内距照常；
+     这里【不要再写竖直 padding】——写了会把内片撑出外框、与外框高度打架。 */
+  .dash-table-card .mac-titlebar > .mac-seg button{padding:0 14px}
   @media (max-width:1100px){.dash-main-grid{grid-template-columns:1fr}.dash-side-stack{display:grid;grid-template-columns:1fr 1fr}.dash-side-stack .mac-window{height:100%}}
   @media (max-width:700px){.dash-side-stack{grid-template-columns:1fr}.dash-table-card .mac-titlebar{flex-wrap:wrap;height:auto;padding-top:8px;padding-bottom:8px}.dash-table-card .mac-titlebar input{width:150px!important}}
   /* ---------- 历史回测模版布局 ---------- */
@@ -728,10 +781,14 @@
   /* --- 表单族：系统设置式分组卡片 --- */
   .mac-form-section{background:color-mix(in srgb,var(--bg-2) 55%,transparent);border:1px solid var(--border);
     border-radius:var(--r-md);overflow:hidden}
-  .mac-form-section + .mac-form-section{margin-top:14px}
+  .mac-form-section + .mac-form-section{margin-top:var(--form-gap)}
   .mac-form-section-title{display:flex;align-items:center;gap:7px;padding:9px 16px;font-size:var(--fs-footnote);
     font-weight:600;color:var(--muted);letter-spacing:.2px;border-bottom:1px solid var(--border);background:var(--bar-bg)}
   .mac-form-section-title svg{width:14px;height:14px;flex:none}
+  /* 分组内容区（不采用 mac-form-row 行式排版时，用这个包一层）。
+     此前回测左栏 4 个分组各写一遍 inline `padding:12px 16px`，与设置页
+     mac-form-row 的 13px 16px 差 1px 且重复 4 次——收敛到一处，横向与行式排版对齐。 */
+  .mac-form-body{padding:13px 16px}
   .mac-form-row{display:flex;align-items:center;gap:18px;padding:13px 16px;border-bottom:1px solid var(--border)}
   .mac-form-row:last-child{border-bottom:none}
   .mac-form-row .fr-label{flex:0 0 210px;font-size:var(--fs-body);font-weight:500;color:var(--text)}
@@ -1247,7 +1304,7 @@
         <svg width="14" height="14" style="color:rgb(191,90,242)"><use href="#i-brain"/></svg>
         <span class="mac-title">AI 行情解读 · 完整内容</span>
         <span v-if="analysisFull.bias" class="pill ml-auto" :class="analysisFull.bias==='long'?'green':analysisFull.bias==='short'?'red':'orange'">{{analysisFull.bias==='long'?'看多':analysisFull.bias==='short'?'看空':'中性'}}</span>
-        <button class="mac-btn" style="padding:3px 10px;font-size:12px" @click="analysisFull=null">关闭</button>
+        <button class="mac-btn btn-sm" style="padding:3px 10px;font-size:12px" @click="analysisFull=null">关闭</button>
       </div>
       <div class="ai-full-body">
         <div v-if="analysisFull.symbol" class="ai-full-note">{{analysisFull.symbol}} · {{analysisFull.timeframe||''}}<template v-if="analysisFull.ts"> · {{analysisFull.ts}}</template></div>
@@ -1363,12 +1420,12 @@
     </div>
     <div class="flex items-center gap-3 text-[12px] text-slate-400">
       <!-- 引擎状态 / 运行模式 / 当前策略 已移入下方全局上下文条，菜单栏只留全局开关 -->
-      <div class="mac-seg seg-density hide-narrow" role="group" aria-label="表格密度">
+      <div class="mac-seg seg-icon seg-density hide-narrow" role="group" aria-label="表格密度">
         <button :class="tblDensity==='compact'?'active':''" @click="setDensity('compact')" title="紧凑：一屏看更多数据" aria-label="紧凑密度"><svg><use href="#i-density-compact"/></svg></button>
         <button :class="tblDensity==='cozy'?'active':''" @click="setDensity('cozy')" title="舒适（默认）" aria-label="舒适密度"><svg><use href="#i-density-cozy"/></svg></button>
         <button :class="tblDensity==='roomy'?'active':''" @click="setDensity('roomy')" title="宽松：易读" aria-label="宽松密度"><svg><use href="#i-density-roomy"/></svg></button>
       </div>
-      <button class="mac-btn" style="padding:4px 9px" @click="toggleTheme()" :aria-label="theme==='dark'?'切换到浅色模式':'切换到深色模式'">
+      <button class="mac-btn btn-sm" style="padding:4px 9px" @click="toggleTheme()" :aria-label="theme==='dark'?'切换到浅色模式':'切换到深色模式'">
         <!-- 主题图标：SVG（曾用  emoji，Windows 渲染与 macOS 质感割裂） -->
         <svg v-if="theme==='dark'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
         <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
@@ -1440,11 +1497,11 @@
       <div class="page-head">
         <div>
           <h1 class="page-title" style="margin:0"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-chart"/></svg>仪表盘</h1>
-          <p class="text-[13px] text-slate-500" style="margin-top:3px">资产总览、持仓与 AI 行情解读</p>
         </div>
         <div class="flex items-center gap-2 flex-wrap">
           <button class="mac-btn" @click="exportReport()" title="导出当前仪表盘数据为 CSV"><svg width="13" height="13"><use href="#i-download"/></svg>导出报表</button>
           <button class="mac-btn primary" @click="startEngine()" v-if="engineStatus!=='running'"><svg width="13" height="13"><use href="#i-play"/></svg>启动引擎</button>
+          <button class="mac-btn danger" @click="closeAll()" v-else title="立即市价卖出全部持仓（紧急离场，绕开风控新开仓限制）"><svg width="13" height="13"><use href="#i-stop"/></svg>一键清仓</button>
           <button class="mac-btn danger" @click="stopEngine()" v-else><svg width="13" height="13"><use href="#i-stop"/></svg>停止引擎</button>
         </div>
       </div>
@@ -1474,7 +1531,7 @@
         <div class="dash-side-stack">
           <div class="mac-window dash-ai-card">
             <div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><span class="mac-title"><svg width="14" height="14" style="color:rgb(191,90,242)"><use href="#i-brain"/></svg>AI 行情解读</span><span v-if="analysis" class="pill ml-auto" :class="analysis.bias==='long'?'green':analysis.bias==='short'?'red':'orange'">{{analysis.bias==='long'?'看多':analysis.bias==='short'?'看空':'中性'}}</span></div>
-            <div class="mac-body"><div class="flex items-center gap-2 mb-3"><mac-select v-model="analysisSymbol" :options="designSymbolOptions" style="flex:1;min-width:0"></mac-select><mac-select v-model="analysisTimeframe" :options="tfOptions" style="width:78px"></mac-select><button class="mac-btn" style="padding:4px 10px" @click="runAnalysis()" :disabled="analysisLoading">{{analysisLoading?'分析中…':'解读'}}</button></div><div v-if="analysis" class="space-y-2 text-[13px]"><div class="ai-summary-clamp"><p style="line-height:1.65;margin:0">{{analysis.summary}}</p></div><div class="flex items-center gap-2"><button class="mac-btn" style="padding:3px 10px;font-size:12px" @click="openAnalysisFull()"><svg width="11" height="11" style="color:rgb(191,90,242)"><use href="#i-note"/></svg>查看完整解读</button></div><div class="flex gap-1.5 flex-wrap"><span class="pill purple">{{analysis.regime||'市场状态未知'}}</span><span class="pill blue">置信度 {{analysis.confidence||'-'}}</span><span v-if="analysis.risk_level" class="pill" :class="analysis.risk_level==='high'?'red':analysis.risk_level==='medium'?'orange':'green'">{{analysis.risk_level==='high'?'高风险':analysis.risk_level==='medium'?'中风险':'低风险'}}</span></div><div v-if="analysis._math?.entry!=null" class="text-[12px] text-slate-400">程序化参考：{{analysis._math.direction==='long'?'建议做多':'建议做空'}} · 入场 {{fmt(analysis._math.entry)}} · 止损 <span class="neg">{{fmt(analysis._math.stop_loss)}}</span> · 止盈 <span class="pos">{{fmt(analysis._math.take_profit)}}</span></div></div><div v-else class="text-slate-500 text-[13px] leading-relaxed">点击「解读」获取实时指标、关键位与价格行为分析。<br/><span class="text-slate-600">请先在「AI 与 API」页配置并测试 AI 连接。</span></div></div>
+            <div class="mac-body"><div class="flex items-center gap-2 mb-3"><mac-select v-model="analysisSymbol" :options="designSymbolOptions" style="flex:1;min-width:0"></mac-select><mac-select v-model="analysisTimeframe" :options="tfOptions" style="width:78px"></mac-select><button class="mac-btn btn-sm" style="padding:4px 10px" @click="runAnalysis()" :disabled="analysisLoading">{{analysisLoading?'分析中…':'解读'}}</button></div><div v-if="analysis" class="space-y-2 text-[13px]"><div class="ai-summary-clamp"><p style="line-height:1.65;margin:0">{{analysis.summary}}</p></div><div class="flex items-center gap-2"><button class="mac-btn btn-sm" style="padding:3px 10px;font-size:12px" @click="openAnalysisFull()"><svg width="11" height="11" style="color:rgb(191,90,242)"><use href="#i-note"/></svg>查看完整解读</button></div><div class="flex gap-1.5 flex-wrap"><span class="pill purple">{{analysis.regime||'市场状态未知'}}</span><span class="pill blue">置信度 {{analysis.confidence||'-'}}</span><span v-if="analysis.risk_level" class="pill" :class="analysis.risk_level==='high'?'red':analysis.risk_level==='medium'?'orange':'green'">{{analysis.risk_level==='high'?'高风险':analysis.risk_level==='medium'?'中风险':'低风险'}}</span></div><div v-if="analysis._math?.entry!=null" class="text-[12px] text-slate-400">程序化参考：{{analysis._math.direction==='long'?'建议做多':'建议做空'}} · 入场 {{fmt(analysis._math.entry)}} · 止损 <span class="neg">{{fmt(analysis._math.stop_loss)}}</span> · 止盈 <span class="pos">{{fmt(analysis._math.take_profit)}}</span></div></div><div v-else class="text-slate-500 text-[13px] leading-relaxed">点击「解读」获取实时指标、关键位与价格行为分析。<br/><span class="text-slate-600">请先在「AI 与 API」页配置并测试 AI 连接。</span></div></div>
           </div>
 
           <div class="mac-window dash-risk-card">
@@ -1485,11 +1542,11 @@
       </div>
 
       <div class="mac-window dash-table-card">
-        <div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><div class="mac-seg" style="padding:2px"><button :class="dashboardTab==='positions'?'active':''" @click="dashboardTab='positions'">当前持仓</button><button :class="dashboardTab==='trades'?'active':''" @click="dashboardTab='trades'">最近成交</button></div><div class="ml-auto flex items-center gap-2"><input v-model="dashboardSearch" class="mac-input" style="width:190px;padding:4px 10px" placeholder="搜索交易对"/><button class="mac-btn" style="padding:4px 10px" @click="dashboardSearch=''" v-if="dashboardSearch">清除</button></div></div>
+        <div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><div class="mac-seg" style="padding:2px"><button :class="dashboardTab==='positions'?'active':''" @click="dashboardTab='positions'">当前持仓</button><button :class="dashboardTab==='trades'?'active':''" @click="dashboardTab='trades'">最近成交</button></div><div class="ml-auto flex items-center gap-2"><input v-model="dashboardSearch" class="mac-input" style="width:190px;padding:4px 10px" placeholder="搜索交易对"/><button class="mac-btn btn-sm" style="padding:4px 10px" @click="dashboardSearch=''" v-if="dashboardSearch">清除</button></div></div>
         <div class="mac-body">
-          <div v-if="dashboardTab==='positions'" class="tab-on overflow-auto"><table><thead><tr><th>交易对</th><th class="num">数量</th><th class="num">均价</th><th class="num">最新价</th><th class="num">浮动盈亏</th></tr></thead><tbody><tr v-for="p in dashboardRows" :key="p.symbol"><td class="font-medium">{{p.symbol}}</td><td class="num">{{p.qty}}</td><td class="num">{{fmt(p.avg_price)}}</td><td class="num">{{fmt(p.last_price)}}</td><td class="num" :class="p.unrealized_pnl>=0?'pos':'neg'">{{p.unrealized_pnl>=0?'+':''}}{{fmt(p.unrealized_pnl)}}</td></tr><tr v-if="!dashboardRows.length"><td colspan="5"><div class="empty-state"><span class="e-ico"><svg><use href="#i-basket"/></svg></span><span class="e-txt">暂无匹配持仓 · 启动引擎开始模拟交易</span></div></td></tr></tbody></table></div>
+          <div v-if="dashboardTab==='positions'" class="tab-on overflow-auto"><table><thead><tr><th>交易对</th><th class="num">数量</th><th class="num">均价</th><th class="num">最新价</th><th class="num">浮动盈亏</th></tr></thead><tbody><tr v-for="p in dashboardRows" :key="p.symbol"><td class="font-medium">{{p.symbol}}</td><td class="num">{{p.qty}}</td><td class="num">{{fmt(p.avg_price)}}</td><td class="num">{{fmt(p.last_price)}}</td><td class="num" :class="p.unrealized_pnl>=0?'pos':'neg'">{{p.unrealized_pnl>=0?'+':''}}{{fmt(p.unrealized_pnl)}}</td></tr><tr v-if="!dashboardRows.length"><td colspan="5"><div class="empty-state"><span class="e-ico"><svg><use href="#i-basket"/></svg></span><span class="e-txt">暂无匹配持仓</span></div></td></tr></tbody></table></div>
           <div v-else class="tab-on overflow-auto"><table><thead><tr><th>时间</th><th>交易对</th><th>方向</th><th class="num">价格</th><th class="num">数量</th><th class="num">盈亏</th><th>原因</th></tr></thead><tbody><tr v-for="t in dashboardRows" :key="t.id"><td class="text-slate-500">{{t.ts}}</td><td>{{t.symbol}}</td><td :class="t.side==='buy'?'pos':'neg'">{{t.side==='buy'?'买入':'卖出'}}</td><td class="num">{{fmt(t.price)}}</td><td class="num">{{t.qty}}</td><td class="num" :class="t.pnl>=0?'pos':'neg'">{{t.pnl>=0?'+':''}}{{fmt(t.pnl)}}</td><td class="text-slate-500">{{t.reason||'-'}}</td></tr><tr v-if="!dashboardRows.length"><td colspan="7"><div class="empty-state"><span class="e-ico"><svg><use href="#i-inbox"/></svg></span><span class="e-txt">暂无匹配成交记录</span></div></td></tr></tbody></table></div>
-          <div class="flex items-center justify-between text-[12px] text-slate-500 mt-3"><span>{{dashboardTab==='positions'?'共 '+dashboardRows.length+' 个持仓方向':'显示最近 '+Math.min(8,dashboardRows.length)+' 笔 · 共 '+dashboardRows.length+' 笔成交'}}</span><button class="mac-btn" style="padding:2px 10px;font-size:12px" @click="switchView(dashboardTab==='positions'?'live':'performance')">查看全部{{dashboardTab==='positions'?'持仓':'成交'}}</button></div>
+          <div class="flex items-center justify-between text-[12px] text-slate-500 mt-3"><span>{{dashboardTab==='positions'?'共 '+dashboardRows.length+' 个持仓方向':'显示最近 '+Math.min(8,dashboardRows.length)+' 笔 · 共 '+dashboardRows.length+' 笔成交'}}</span><button class="mac-btn btn-sm" style="padding:2px 10px;font-size:12px" @click="switchView(dashboardTab==='positions'?'live':'performance')">查看全部{{dashboardTab==='positions'?'持仓':'成交'}}</button></div>
         </div>
       </div>
     </section>
@@ -1499,7 +1556,7 @@
 <transition name="page" mode="out-in">  <!-- view: settings -->
     <section v-if="view==='settings'" class="space-y-5">
       <div class="page-head">
-        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>AI 与 API</h1><p>配置 AI 服务、交易所密钥、风控规则与本地数据</p></div>
+        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>AI 与 API</h1></div>
       </div>
       <div class="mac-window">
         <div class="mac-titlebar">
@@ -1527,8 +1584,8 @@
               <span class="text-[12px] font-semibold" v-if="riskDirtySet.size">{{riskDirtySet.size}} 项未保存</span>
               <span class="text-[12px]" v-else>全部已保存，与运行中的引擎一致</span>
               <div class="ml-auto flex items-center gap-2" v-if="riskDirtySet.size">
-                <button class="mac-btn" style="padding:3px 10px" @click="revertRisk()">放弃</button>
-                <button class="mac-btn primary" style="padding:3px 12px" @click="saveRisk()">保存风控规则</button>
+                <button class="mac-btn btn-sm" style="padding:3px 10px" @click="revertRisk()">放弃</button>
+                <button class="mac-btn primary btn-sm" style="padding:3px 12px" @click="saveRisk()">保存风控规则</button>
               </div>
             </div>
             <div class="mac-form-section" v-for="g in riskGroups" :key="g.key">
@@ -1550,7 +1607,7 @@
                   <svg v-if="!riskCooldown.active" width="11" height="11" style="display:inline;vertical-align:-1px"><use href="#i-check"/></svg>{{riskCooldown.active?(riskCooldown.awaiting_clear?'冷却已到期 — 等待人工确认':(riskCooldown.manual_recovery?'冷却中（人工确认模式）':'冷却中 — 暂停新开仓')):'冷却状态正常'}}
                 </span>
                 <span v-if="riskCooldown.active && !riskCooldown.awaiting_clear" class="text-slate-500">剩余 {{Math.ceil(riskCooldown.remaining_sec/60)}} 分钟</span>
-                <button v-if="riskCooldown.awaiting_clear" class="mac-btn green" style="padding:2px 10px;font-size:12px" @click="clearCooldown()">解除冷却</button>
+                <button v-if="riskCooldown.awaiting_clear" class="mac-btn green btn-sm" style="padding:2px 10px;font-size:12px" @click="clearCooldown()">解除冷却</button>
               </div>
               <div class="text-[12px] text-slate-500 mt-1">当前连续亏损 {{riskCooldown.consecutive_losses}} 笔 · 触发 {{riskRules.max_consecutive_losses||3}} 笔后冷却 {{riskRules.cooldown_minutes||15}} 分钟（状态每 10 秒刷新）</div>
             </div>
@@ -1635,8 +1692,8 @@
                     </span>
                   </div>
                   <div class="flex gap-2">
-                    <button class="mac-btn" style="padding:4px 10px" @click="testEx(ex)">测试连接</button>
-                    <button class="mac-btn primary" style="padding:4px 10px" @click="saveExKeys(ex)">保存</button>
+                    <button class="mac-btn btn-sm" style="padding:4px 10px" @click="testEx(ex)">测试连接</button>
+                    <button class="mac-btn primary btn-sm" style="padding:4px 10px" @click="saveExKeys(ex)">保存</button>
                   </div>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -1703,7 +1760,7 @@
                       <td>{{s.timeframe}}</td>
                       <td class="num">{{fmt(s.count)}}</td>
                       <td class="text-slate-400">{{fmtDataRange(s)}}</td>
-                      <td><button class="mac-btn" style="padding:1px 8px" @click="deleteDataSeries(s)">删除</button></td>
+                      <td><button class="mac-btn btn-sm" style="padding:1px 8px" @click="deleteDataSeries(s)">删除</button></td>
                     </tr>
                   </tbody>
                 </table>
@@ -1798,7 +1855,7 @@
               <div v-for="a in analyses" :key="a.id" class="mac-card text-[12px]">
                 <div class="flex items-center gap-2">
                   <div class="text-slate-500 flex-1 min-w-0 truncate">{{a.ts}} · {{a.symbol}}</div>
-                  <button class="mac-btn flex-none" style="padding:2px 10px;font-size:11px" @click="openAnalysisHistory(a.content, a.symbol)"><svg width="10" height="10" style="color:rgb(191,90,242)"><use href="#i-note"/></svg>查看完整</button>
+                  <button class="mac-btn flex-none btn-sm" style="padding:2px 10px;font-size:11px" @click="openAnalysisHistory(a.content, a.symbol)"><svg width="10" height="10" style="color:rgb(191,90,242)"><use href="#i-note"/></svg>查看完整</button>
                 </div>
                 <div class="text-slate-300 mt-1" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">{{analysisPreview(a.content)}}</div>
               </div>
@@ -1834,7 +1891,7 @@
 <transition name="page" mode="out-in">  <!-- view: allstrategies -->
     <section v-if="view==='allstrategies'" class="space-y-5">
       <div class="page-head">
-        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-folder"/></svg>全部策略</h1><p>统一查看策略来源、代次、过拟合状态与可用操作</p></div>
+        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-folder"/></svg>全部策略</h1></div>
       </div>
       <!-- 概览 KPI：规模 + 质量分布一眼可见，免去扫表数数。数据来自 strategyStats 纯前端聚合 -->
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1909,15 +1966,15 @@
                   </td>
                   <td class="num">
                     <div class="flex gap-1.5 justify-end">
-                      <button class="mac-btn" style="padding:3px 10px" @click="showRepoPine(s)">Pine</button>
-                      <button class="mac-btn" style="padding:3px 10px" @click="applyAnyStrategy(s.name)">应用</button>
-                      <button class="mac-btn" style="padding:3px 10px" @click="renameStrategy(s)" :disabled="!s.can_edit">改名</button>
-                      <button class="mac-btn danger" style="padding:3px 10px" @click="deleteStrategy(s)" :disabled="!s.can_edit">删除</button>
+                      <button class="mac-btn btn-sm" style="padding:3px 10px" @click="showRepoPine(s)">Pine</button>
+                      <button class="mac-btn btn-sm" style="padding:3px 10px" @click="applyAnyStrategy(s.name)">应用</button>
+                      <button class="mac-btn btn-sm" style="padding:3px 10px" @click="renameStrategy(s)" :disabled="!s.can_edit">改名</button>
+                      <button class="mac-btn danger btn-sm" style="padding:3px 10px" @click="deleteStrategy(s)" :disabled="!s.can_edit">删除</button>
                     </div>
                   </td>
                 </tr>
                 <tr v-if="!(filteredAllStrategies||[]).length">
-                  <td colspan="6"><div class="empty-state"><span class="e-ico"><svg><use href="#i-folder"/></svg></span><span class="e-txt">{{hideBuiltin && allStrategies.length ? '当前视图内置策略已被隐藏，可关闭上方「隐藏内置策略」开关或点「内置」筛选查看' : '暂无策略'}}</span></div></td>
+                  <td colspan="6"><div class="empty-state"><span class="e-ico"><svg><use href="#i-folder"/></svg></span><span class="e-txt">{{hideBuiltin && allStrategies.length ? '内置策略已隐藏' : '暂无策略'}}</span></div></td>
                 </tr>
               </tbody>
             </table>
@@ -1943,7 +2000,7 @@
 <transition name="page" mode="out-in">  <!-- view: strategy -->
     <section v-if="view==='strategy'" class="space-y-5">
       <div class="page-head">
-        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>AI 策略工坊</h1><p>设计、验证并管理可复用的交易策略 —— 左侧代码 · 右侧图表同屏闭环</p></div>
+        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>AI 策略工坊</h1></div>
         <!-- 统一策略选择入口：点击弹出二级面板展示全部可用策略 -->
         <div class="page-actions">
           <button class="mac-btn primary" @click="openUnifiedPicker()">
@@ -1968,7 +2025,7 @@
         <div class="ml-auto flex items-center gap-1.5 flex-wrap">
           <span v-if="wsCtx.density" class="pill" :class="wsCtx.density.passed?'green':'red'">信号密度 {{wsCtx.density.text}}</span>
           <span v-if="wsCtx.overfit" class="pill" :class="wsCtx.overfit.ok?'green':'orange'">过拟合 {{wsCtx.overfit.text}}</span>
-          <button class="mac-btn" style="padding:3px 9px" @click="scrollToIterCard()">对比 v2 → v3</button>
+          <button class="mac-btn btn-sm" style="padding:3px 9px" @click="scrollToIterCard()">对比 v2 → v3</button>
         </div>
       </div>
 
@@ -1979,7 +2036,7 @@
             <div class="mac-titlebar">
               <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
               <span class="mac-title"><svg><use href="#i-brain"/></svg>{{unifiedMode==='pine'?'选择要查看的策略':'统一策略选择'}}</span>
-              <button class="mac-btn" style="padding:2px 8px" @click="unifiedPickerOpen=false">✕</button>
+              <button class="mac-btn btn-sm" style="padding:2px 8px" @click="unifiedPickerOpen=false">✕</button>
             </div>
             <div class="mac-body space-y-3" style="overflow-y:auto">
               <div class="flex gap-2 flex-wrap">
@@ -2014,16 +2071,16 @@
                       </td>
                       <td class="num">
                         <div class="flex gap-1.5 justify-end">
-                          <button v-if="unifiedMode==='pine'" class="mac-btn primary" style="padding:3px 9px" @click="pickFromPicker(s)">选择</button>
+                          <button v-if="unifiedMode==='pine'" class="mac-btn primary btn-sm" style="padding:3px 9px" @click="pickFromPicker(s)">选择</button>
                           <template v-else>
-                            <button class="mac-btn" style="padding:3px 9px" @click="applyFromUnified(s)">应用</button>
-                            <button class="mac-btn" style="padding:3px 9px" @click="showRepoPine(s)">Pine</button>
+                            <button class="mac-btn btn-sm" style="padding:3px 9px" @click="applyFromUnified(s)">应用</button>
+                            <button class="mac-btn btn-sm" style="padding:3px 9px" @click="showRepoPine(s)">Pine</button>
                           </template>
                         </div>
                       </td>
                     </tr>
                     <tr v-if="!filteredUnifiedStrategies.length">
-                      <td colspan="5"><div class="empty-state"><span class="e-ico"><svg><use href="#i-folder"/></svg></span><span class="e-txt">{{hideBuiltin ? '没有匹配的策略（内置策略已被隐藏，可关闭上方开关查看）' : '没有匹配的策略'}}</span></div></td>
+                      <td colspan="5"><div class="empty-state"><span class="e-ico"><svg><use href="#i-folder"/></svg></span><span class="e-txt">{{hideBuiltin ? '没有匹配的策略（内置策略已隐藏）' : '没有匹配的策略'}}</span></div></td>
                     </tr>
                   </tbody>
                 </table>
@@ -2072,8 +2129,8 @@
                     <button class="mac-seg-btn" :class="codeTab==='design'?'active':''" style="padding:2px 7px;font-size:12px" @click="selectCodeTab('design')">最新设计</button>
                     <button class="mac-seg-btn" :class="codeTab==='iterate'?'active':''" style="padding:2px 7px;font-size:12px" @click="selectCodeTab('iterate')">最近迭代</button>
                     <button class="mac-seg-btn" :class="codeTab==='pick'?'active':''" style="padding:2px 7px;font-size:12px" :title="pickedSpec?pickedSpec.name:'选择要查看的策略'" @click="openPinePicker()">指定策略</button>
-                    <button v-if="pineCode" class="mac-btn" style="padding:2px 8px;font-size:12px" @click="copyPine()">复制</button>
-                    <button class="mac-btn green" style="padding:2px 8px;font-size:12px" @click="pineImportOpen=!pineImportOpen">导入</button>
+                    <button v-if="pineCode" class="mac-btn btn-sm" style="padding:2px 8px;font-size:12px" @click="copyPine()">复制</button>
+                    <button class="mac-btn green btn-sm" style="padding:2px 8px;font-size:12px" @click="pineImportOpen=!pineImportOpen">导入</button>
                   </div>
                 </div>
                 <!-- Pine 导入卡片（TradingView 调优后把参数带回软件，与导出闭环） -->
@@ -2085,7 +2142,7 @@
                     <label class="flex items-center gap-1.5 text-[12px] text-slate-400" for="pineAiCheck">
                       <input id="pineAiCheck" type="checkbox" v-model="pineImportAiCheck" class="mac-toggle-input"/> AI 校验参数
                     </label>
-                    <button class="mac-btn primary" style="padding:3px 12px" @click="importPine()" :disabled="pineImportLoading">{{pineImportLoading?'导入中…':'导入参数'}}</button>
+                    <button class="mac-btn primary btn-sm" style="padding:3px 12px" @click="importPine()" :disabled="pineImportLoading">{{pineImportLoading?'导入中…':'导入参数'}}</button>
                   </div>
                   <div v-if="pineImportWarnings.length" class="text-[12px] flex items-start gap-1.5" style="color:var(--orange)">
                     <svg width="11" height="11" style="flex:none;margin-top:2px"><use href="#i-alert"/></svg>
@@ -2115,7 +2172,7 @@
                   <span class="text-[12px] font-semibold">实时行情</span>
                   <mac-select v-model="designSymbol" :options="designSymbolOptions" style="width:176px" @change="loadWorkshopChart(true)"></mac-select>
                   <mac-select v-model="designTimeframe" :options="wsTfOptions" style="width:96px" @change="loadWorkshopChart()"></mac-select>
-                  <button class="mac-btn" style="padding:3px 9px" @click="loadWorkshopChart()" :disabled="wsLoading">{{wsLoading?'加载中…':'刷新'}}</button>
+                  <button class="mac-btn btn-sm" style="padding:3px 9px" @click="loadWorkshopChart()" :disabled="wsLoading">{{wsLoading?'加载中…':'刷新'}}</button>
                 </div>
                 <!-- 价格条：固定高度预留空间，价格变动闪烁（涨绿跌红） -->
                 <div class="flex items-center gap-2.5 px-3 flex-none" style="height:36px;border-bottom:1px solid var(--border)">
@@ -2365,7 +2422,6 @@
       <div class="page-head">
         <div>
           <h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-flask"/></svg>历史回测</h1>
-          <p>左侧配置参数，右侧即时查看绩效归因与逐笔明细</p>
         </div>
         <div class="page-actions">
           <div class="menu-drop" :class="{open: formDrop==='btPlan'}">
@@ -2400,7 +2456,7 @@
           <div class="mac-body" style="padding:14px">
             <div class="mac-form-section">
               <div class="mac-form-section-title"><svg><use href="#i-inbox"/></svg>数据来源</div>
-              <div style="padding:12px 16px">
+              <div class="mac-form-body">
                 <div class="mac-seg" style="width:100%">
                   <button :class="bt.data_source==='demo'?'active':''" @click="bt.data_source='demo'">演示数据</button>
                   <button :class="bt.data_source==='exchange'?'active':''" @click="bt.data_source='exchange'">交易所</button>
@@ -2419,7 +2475,7 @@
 
             <div class="mac-form-section">
               <div class="mac-form-section-title"><svg><use href="#i-coins"/></svg>标的与周期</div>
-              <div style="padding:12px 16px">
+              <div class="mac-form-body">
                 <div><label class="mac-label" for="btSymbol">交易对</label>
                   <div class="menu-drop" :class="{open: formDrop==='btSymbol'}" style="width:100%">
                     <button id="btSymbol" class="mac-input" style="width:100%;display:flex;align-items:center;gap:6px" :data-form-key="'btSymbol'" :aria-expanded="formDrop==='btSymbol'?'true':'false'" aria-haspopup="true" @click.stop="toggleFormDrop('btSymbol', $event)">
@@ -2432,7 +2488,7 @@
                         <span v-for="s in btSymbolOptions" :key="s" class="menu-item sub" :class="bt.symbol===s?'active':''" @click="setBtSymbol(s)" style="padding:5px 12px;justify-content:space-between">{{s}}<svg v-if="bt.symbol===s" width="11" height="11"><use href="#i-check"/></svg></span>
                         <div class="flex gap-1 mt-1" style="border-top:1px solid var(--border);padding:6px 8px 4px">
                           <input v-model="btSymbolManual" class="mac-input" style="flex:1;min-width:0;padding:4px 8px" placeholder="输入其他交易对（如 DOGE/USDT）" @keydown.enter.prevent="addBtSymbolManual()"/>
-                          <button class="mac-btn" style="padding:3px 10px" @click="addBtSymbolManual()">确定</button>
+                          <button class="mac-btn btn-sm" style="padding:3px 10px" @click="addBtSymbolManual()">确定</button>
                         </div>
                       </div>
                     </Teleport>
@@ -2466,19 +2522,19 @@
 
             <div class="mac-form-section">
               <div class="mac-form-section-title"><svg><use href="#i-clock"/></svg>时间范围</div>
-              <div style="padding:12px 16px">
+              <div class="mac-form-body">
                 <div class="grid grid-cols-2 gap-3">
                   <div><label class="mac-label" for="btSince">开始</label><input id="btSince" type="date" v-model="bt.since" class="mac-input" style="width:100%"/></div>
                   <div><label class="mac-label" for="btUntil">结束</label><input id="btUntil" type="date" v-model="bt.until" class="mac-input" style="width:100%"/></div>
                 </div>
                 <div class="text-[12px] text-slate-500" style="margin-top:8px" v-if="btLocalCoverage">{{btLocalCoverage}}</div>
-                <div class="text-[12px] text-slate-500" style="margin-top:8px" v-else>留空则使用最新 K 线；批量下载历史数据请前往 <button class="mac-btn" style="padding:1px 8px;font-size:12px" @click="switchView('settings'); settingsTab='data'">系统设置 · 数据管理</button></div>
+                <div class="text-[12px] text-slate-500" style="margin-top:8px" v-else>留空则使用最新 K 线；批量下载历史数据请前往 <button class="mac-btn btn-sm" style="padding:1px 8px;font-size:12px" @click="switchView('settings'); settingsTab='data'">系统设置 · 数据管理</button></div>
               </div>
             </div>
 
             <div class="mac-form-section">
               <div class="mac-form-section-title"><svg><use href="#i-sliders"/></svg>高级参数</div>
-              <div style="padding:12px 16px">
+              <div class="mac-form-body">
                 <div class="grid grid-cols-3 gap-3">
                   <div><label class="mac-label" for="btStartCash">初始资金</label><input id="btStartCash" v-model.number="bt.start_cash" class="mac-input" style="width:100%"/></div>
                   <div><label class="mac-label" for="btFeeRate">手续费率</label><input id="btFeeRate" v-model.number="bt.fee_rate" class="mac-input" style="width:100%" step="0.0001"/></div>
@@ -2514,11 +2570,11 @@
             </div>
 
             <div class="mac-window">
-              <div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><span class="mac-title"><svg width="14" height="14"><use href="#i-list"/></svg>逐笔成交</span><span class="text-[12px] text-slate-500 ml-2">共 {{btTradesAll.length}} 笔 · 已实现盈亏 <span :class="btMetrics.realized>=0?'pos':'neg'">¥{{fmt(btMetrics.realized)}}</span></span><div class="ml-auto flex items-center gap-2"><input v-model="btTradeSearch" class="mac-input" style="width:190px;padding:4px 10px" placeholder="搜索标的或平仓原因"/><button class="mac-btn" style="padding:4px 12px" @click="exportBtTradesCsv()"><svg width="12" height="12"><use href="#i-download"/></svg>导出 CSV</button></div></div>
-              <div class="mac-body"><div class="overflow-auto" style="max-height:320px"><table><thead><tr><th>时间</th><th>方向</th><th class="num">价格</th><th class="num">数量</th><th class="num">盈亏</th><th>平仓原因</th></tr></thead><tbody><tr v-for="(t,i) in btTradesShown" :key="i"><td class="text-slate-500">{{t.ts}}</td><td :class="t.side==='sell'?'neg':'pos'">{{t.side==='sell'?'卖出':'买入'}}</td><td class="num">{{fmt(t.price)}}</td><td class="num">{{t.qty}}</td><td class="num" :class="(t.pnl||0)>=0?'pos':'neg'">{{fmt(t.pnl)}}</td><td class="text-slate-500">{{t.reason||'-'}}</td></tr><tr v-if="!btTradesShown.length"><td colspan="6" class="text-center text-slate-500" style="padding:18px 0">无匹配成交</td></tr></tbody></table></div><div class="flex items-center justify-between text-[12px] text-slate-500" style="margin-top:10px"><span>{{btTradeShowAll?'显示全部 '+btTradesAll.length+' 笔':'显示最近 '+Math.min(30,btTradesAll.length)+' 笔 · 共 '+btTradesAll.length+' 笔'}}</span><button v-if="btTradesAll.length>30 || btTradeShowAll" class="mac-btn" style="padding:2px 10px;font-size:12px" @click="btTradeShowAll=!btTradeShowAll">{{btTradeShowAll?'只看最近 30 笔':'查看全部成交'}}</button></div></div>
+              <div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><span class="mac-title"><svg width="14" height="14"><use href="#i-list"/></svg>逐笔成交</span><span class="text-[12px] text-slate-500 ml-2">共 {{btTradesAll.length}} 笔 · 已实现盈亏 <span :class="btMetrics.realized>=0?'pos':'neg'">¥{{fmt(btMetrics.realized)}}</span></span><div class="ml-auto flex items-center gap-2"><input v-model="btTradeSearch" class="mac-input" style="width:190px;padding:4px 10px" placeholder="搜索标的或平仓原因"/><button class="mac-btn btn-sm" style="padding:4px 12px" @click="exportBtTradesCsv()"><svg width="12" height="12"><use href="#i-download"/></svg>导出 CSV</button></div></div>
+              <div class="mac-body"><div class="overflow-auto" style="max-height:320px"><table><thead><tr><th>时间</th><th>方向</th><th class="num">价格</th><th class="num">数量</th><th class="num">盈亏</th><th>平仓原因</th></tr></thead><tbody><tr v-for="(t,i) in btTradesShown" :key="i"><td class="text-slate-500">{{t.ts}}</td><td :class="t.side==='sell'?'neg':'pos'">{{t.side==='sell'?'卖出':'买入'}}</td><td class="num">{{fmt(t.price)}}</td><td class="num">{{t.qty}}</td><td class="num" :class="(t.pnl||0)>=0?'pos':'neg'">{{fmt(t.pnl)}}</td><td class="text-slate-500">{{t.reason||'-'}}</td></tr><tr v-if="!btTradesShown.length"><td colspan="6" class="text-center text-slate-500" style="padding:18px 0">无匹配成交</td></tr></tbody></table></div><div class="flex items-center justify-between text-[12px] text-slate-500" style="margin-top:10px"><span>{{btTradeShowAll?'显示全部 '+btTradesAll.length+' 笔':'显示最近 '+Math.min(30,btTradesAll.length)+' 笔 · 共 '+btTradesAll.length+' 笔'}}</span><button v-if="btTradesAll.length>30 || btTradeShowAll" class="mac-btn btn-sm" style="padding:2px 10px;font-size:12px" @click="btTradeShowAll=!btTradeShowAll">{{btTradeShowAll?'只看最近 30 笔':'查看全部成交'}}</button></div></div>
             </div>
           </template>
-          <div v-else class="mac-window"><div class="mac-body"><div class="empty-state"><span class="e-ico"><svg><use href="#i-flask"/></svg></span><span class="e-txt">在左侧配置参数，点击「开始回测」</span><span class="text-[12px] text-slate-500">绩效归因、净值曲线与逐笔明细将在此展示 · 也可从下方历史回测记录加载</span></div></div></div>
+          <div v-else class="mac-window"><div class="mac-body"><div class="empty-state"><span class="e-ico"><svg><use href="#i-flask"/></svg></span><span class="e-txt">在左侧配置参数，点击「开始回测」</span></div></div></div>
         </div>
       </div>
 
@@ -2535,14 +2591,14 @@
       </div>
 
       <!-- 参数网格扫描结果 -->
-      <div v-if="gridScanResult" class="mac-window bt-section" id="bt-gridscan" style="border-color:rgba(48,209,88,.4)"><div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><span class="mac-title"><svg><use href="#i-sliders"/></svg>参数网格扫描结果</span></div><div class="mac-body"><div v-if="gridScanResult.best" class="mac-card mb-3" style="border-color:rgba(48,209,88,.45)"><div class="flex items-center gap-2 flex-wrap"><span class="text-[13px] font-semibold pos">最优参数</span><span class="pill blue">{{gridScanResult.strategy}}</span><span class="text-[12px] text-slate-500 font-mono">{{JSON.stringify(gridScanResult.best.params)}}</span><span class="ml-auto flex gap-2"><button class="mac-btn primary" style="padding:3px 10px" @click="useGridBest()"><svg width="11" height="11"><use href="#i-play"/></svg>应用最优参数</button><button class="mac-btn" style="padding:3px 10px" @click="runOverfitForBest()">最优过拟合检测</button></span></div></div><div v-if="plateauInfo" class="mb-3"><div class="flex items-center justify-between mb-2 flex-wrap gap-2"><div class="mac-label">参数平原热力图（{{plateauInfo.keyX}} × {{plateauInfo.keyY}} · 颜色 = 综合评分）</div><span class="pill" :class="plateauInfo.verdictClass">{{plateauInfo.verdict}}</span></div><div id="plateauChart" style="height:280px;width:100%"></div><div class="text-[12px] text-slate-500 mt-1">{{plateauInfo.summary}}</div></div><div class="overflow-auto" style="max-height:360px"><table><thead><tr><th>参数</th><th class="num">综合评分</th><th class="num">总收益</th><th class="num">夏普</th><th class="num">回撤</th><th class="num">胜率</th><th class="num">交易数</th></tr></thead><tbody><tr v-for="(r,i) in gridScanResult.results" :key="i" :class="i===0?'pos font-semibold':''"><td class="font-mono" style="max-width:280px">{{JSON.stringify(r.params)}}</td><td class="num" :class="r.score>=0?'pos':'neg'">{{r.score!=null?r.score.toFixed(2):'-'}}</td><td class="num" :class="r.total_return>=0?'pos':'neg'">{{pct(r.total_return)}}</td><td class="num">{{r.sharpe}}</td><td class="num neg">{{pct(r.max_drawdown)}}</td><td class="num">{{pct(r.win_rate)}}</td><td class="num">{{r.total_trades}}</td></tr></tbody></table></div></div></div>
+      <div v-if="gridScanResult" class="mac-window bt-section" id="bt-gridscan" style="border-color:rgba(48,209,88,.4)"><div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><span class="mac-title"><svg><use href="#i-sliders"/></svg>参数网格扫描结果</span></div><div class="mac-body"><div v-if="gridScanResult.best" class="mac-card mb-3" style="border-color:rgba(48,209,88,.45)"><div class="flex items-center gap-2 flex-wrap"><span class="text-[13px] font-semibold pos">最优参数</span><span class="pill blue">{{gridScanResult.strategy}}</span><span class="text-[12px] text-slate-500 font-mono">{{JSON.stringify(gridScanResult.best.params)}}</span><span class="ml-auto flex gap-2"><button class="mac-btn primary btn-sm" style="padding:3px 10px" @click="useGridBest()"><svg width="11" height="11"><use href="#i-play"/></svg>应用最优参数</button><button class="mac-btn btn-sm" style="padding:3px 10px" @click="runOverfitForBest()">最优过拟合检测</button></span></div></div><div v-if="plateauInfo" class="mb-3"><div class="flex items-center justify-between mb-2 flex-wrap gap-2"><div class="mac-label">参数平原热力图（{{plateauInfo.keyX}} × {{plateauInfo.keyY}} · 颜色 = 综合评分）</div><span class="pill" :class="plateauInfo.verdictClass">{{plateauInfo.verdict}}</span></div><div id="plateauChart" style="height:280px;width:100%"></div><div class="text-[12px] text-slate-500 mt-1">{{plateauInfo.summary}}</div></div><div class="overflow-auto" style="max-height:360px"><table><thead><tr><th>参数</th><th class="num">综合评分</th><th class="num">总收益</th><th class="num">夏普</th><th class="num">回撤</th><th class="num">胜率</th><th class="num">交易数</th></tr></thead><tbody><tr v-for="(r,i) in gridScanResult.results" :key="i" :class="i===0?'pos font-semibold':''"><td class="font-mono" style="max-width:280px">{{JSON.stringify(r.params)}}</td><td class="num" :class="r.score>=0?'pos':'neg'">{{r.score!=null?r.score.toFixed(2):'-'}}</td><td class="num" :class="r.total_return>=0?'pos':'neg'">{{pct(r.total_return)}}</td><td class="num">{{r.sharpe}}</td><td class="num neg">{{pct(r.max_drawdown)}}</td><td class="num">{{pct(r.win_rate)}}</td><td class="num">{{r.total_trades}}</td></tr></tbody></table></div></div></div>
 
       <!-- 策略对比结果 -->
       <div v-if="compareResult" class="mac-window bt-section" id="bt-compare" style="border-color:rgba(90,200,250,.4)"><div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><span class="mac-title"><svg><use href="#i-trophy"/></svg>策略对比（{{compareResult.symbol}} · {{compareResult.timeframe}}）</span></div><div class="mac-body"><div class="overflow-auto"><table><thead><tr><th>策略</th><th class="num">综合评分</th><th class="num">总收益</th><th class="num">夏普</th><th class="num">回撤</th><th class="num">胜率</th><th class="num">盈亏比</th><th class="num">交易数</th></tr></thead><tbody><tr v-for="(r,i) in compareResult.results" :key="r.name" :class="i===0?'pos font-semibold':''"><td class="font-medium">{{r.name}}<div class="text-[12px] text-slate-500">{{r.description}}</div></td><td class="num">{{r.total_return!=null?((r.total_return*10)+(r.sharpe*2)-(r.max_drawdown*5)).toFixed(2):'-'}}</td><td class="num" :class="r.total_return>=0?'pos':'neg'">{{pct(r.total_return)}}</td><td class="num">{{r.sharpe}}</td><td class="num neg">{{pct(r.max_drawdown)}}</td><td class="num">{{pct(r.win_rate)}}</td><td class="num">{{r.profit_factor}}</td><td class="num">{{r.total_trades}}</td></tr></tbody></table></div></div></div>
 
       <div class="mac-window bt-section" id="bt-history">
-        <div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><span class="mac-title"><svg width="14" height="14"><use href="#i-clock"/></svg>历史回测记录</span><button class="mac-btn ml-auto" style="padding:3px 10px" @click="loadBtHistory()" title="刷新列表"><svg width="12" height="12"><use href="#i-refresh"/></svg></button><button class="mac-btn" style="padding:3px 10px" @click="btGoto('config')"><svg width="12" height="12"><use href="#i-play"/></svg>新建回测</button></div>
-        <div class="mac-body"><div v-if="btHistoryLoading" class="list-state"><span class="ls-ico"><svg><use href="#i-refresh"/></svg></span><span class="ls-txt">加载回测记录…</span></div><div v-else-if="btHistoryError" class="list-state"><span class="ls-ico"><svg><use href="#i-warn"/></svg></span><span class="ls-txt">{{btHistoryError}}</span><button class="mac-btn" style="margin-top:6px" @click="loadBtHistory()">重试</button></div><div v-else-if="btHistoryGroups.length" class="overflow-auto"><table class="bt-his-table"><thead><tr><th>状态</th><th>回测</th><th>时间</th><th class="num">总收益</th><th class="num">夏普</th><th class="num">回撤</th></tr></thead><template v-for="grp in btHistoryGroups" :key="grp.key"><tbody class="bt-group"><tr class="bt-group-head"><th colspan="3">{{grp.label}}</th><td class="num">{{grp.count}} 笔</td><td class="num" colspan="2" :class="grp.avgReturn>=0?'pos':'neg'">均值 {{pct(grp.avgReturn)}}</td></tr><tr v-for="r in grp.rows" :key="r.id" class="bt-his-row" tabindex="0" role="button" :aria-label="'查看回测 '+r.id" @click="loadBtResult(r.id)" @keydown.enter.prevent="loadBtResult(r.id)"><td><span class="pill" :class="r.status==='running'?'orange':'green'"><span class="status-dot" :class="r.status==='running'?'dot-on':'dot-off'"></span>{{r.status==='running'?'运行中':'完成'}}</span></td><td class="font-semibold">回测 #{{r.id}}</td><td class="text-slate-500">{{r.created_at ? fmtTs(Date.parse(r.created_at)) : '-'}}</td><td class="num" :class="(r.total_return??0)>=0?'pos':'neg'">{{pct(r.total_return)}}</td><td class="num">{{r.sharpe!=null?r.sharpe.toFixed(2):'-'}}</td><td class="num neg">{{pct(r.max_drawdown)}}</td></tr></tbody></template></table></div><div v-else><div class="empty-state"><span class="e-ico"><svg><use href="#i-clock"/></svg></span><span class="e-txt">暂无回测记录 · 点击「开始回测」开始第一次回测</span></div></div></div>
+        <div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div><span class="mac-title"><svg width="14" height="14"><use href="#i-clock"/></svg>历史回测记录</span><button class="mac-btn ml-auto btn-sm" style="padding:3px 10px" @click="loadBtHistory()" title="刷新列表"><svg width="12" height="12"><use href="#i-refresh"/></svg></button><button class="mac-btn btn-sm" style="padding:3px 10px" @click="btGoto('config')"><svg width="12" height="12"><use href="#i-play"/></svg>新建回测</button></div>
+        <div class="mac-body"><div v-if="btHistoryLoading" class="list-state"><span class="ls-ico"><svg><use href="#i-refresh"/></svg></span><span class="ls-txt">加载回测记录…</span></div><div v-else-if="btHistoryError" class="list-state"><span class="ls-ico"><svg><use href="#i-warn"/></svg></span><span class="ls-txt">{{btHistoryError}}</span><button class="mac-btn" style="margin-top:6px" @click="loadBtHistory()">重试</button></div><div v-else-if="btHistoryGroups.length" class="overflow-auto"><table class="bt-his-table"><thead><tr><th>状态</th><th>回测</th><th>时间</th><th class="num">总收益</th><th class="num">夏普</th><th class="num">回撤</th></tr></thead><template v-for="grp in btHistoryGroups" :key="grp.key"><tbody class="bt-group"><tr class="bt-group-head"><th colspan="3">{{grp.label}}</th><td class="num">{{grp.count}} 笔</td><td class="num" colspan="2" :class="grp.avgReturn>=0?'pos':'neg'">均值 {{pct(grp.avgReturn)}}</td></tr><tr v-for="r in grp.rows" :key="r.id" class="bt-his-row" tabindex="0" role="button" :aria-label="'查看回测 '+r.id" @click="loadBtResult(r.id)" @keydown.enter.prevent="loadBtResult(r.id)"><td><span class="pill" :class="r.status==='running'?'orange':'green'"><span class="status-dot" :class="r.status==='running'?'dot-on':'dot-off'"></span>{{r.status==='running'?'运行中':'完成'}}</span></td><td class="font-semibold">回测 #{{r.id}}</td><td class="text-slate-500">{{r.created_at ? fmtTs(Date.parse(r.created_at)) : '-'}}</td><td class="num" :class="(r.total_return??0)>=0?'pos':'neg'">{{pct(r.total_return)}}</td><td class="num">{{r.sharpe!=null?r.sharpe.toFixed(2):'-'}}</td><td class="num neg">{{pct(r.max_drawdown)}}</td></tr></tbody></template></table></div><div v-else><div class="empty-state"><span class="e-ico"><svg><use href="#i-clock"/></svg></span><span class="e-txt">暂无回测记录</span></div></div></div>
       </div>
     </section>
 </transition>
@@ -2551,7 +2607,7 @@
 <transition name="page" mode="out-in">  <!-- view: quant -->
     <section v-if="view==='quant'" class="space-y-5">
       <div class="page-head">
-        <div><h1 class="page-title" style="margin:0"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-dna"/></svg>量化研究</h1><p>因子 IC、横截面轮动与智能策略验证</p></div>
+        <div><h1 class="page-title" style="margin:0"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-dna"/></svg>量化研究</h1></div>
         <div class="page-actions" v-show="qTab==='ic'||qTab==='usage'">
           <div class="mac-seg" style="padding:2px">
             <button :class="qdata_source==='demo'?'active':''" @click="qdata_source='demo'">演示数据</button>
@@ -2642,7 +2698,7 @@
         <div class="mac-titlebar">
           <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
           <span class="mac-title"><svg><use href="#i-target"/></svg>因子使用场景（当前信号 + 可落地策略）</span>
-          <button class="mac-btn ml-auto" style="padding:3px 12px" @click="loadFactorUsage()" :disabled="usageLoading">
+          <button class="mac-btn ml-auto btn-sm" style="padding:3px 12px" @click="loadFactorUsage()" :disabled="usageLoading">
             {{usageLoading?'分析中…':'生成使用方案'}}
           </button>
         </div>
@@ -2786,10 +2842,8 @@
             <span class="mac-title"><svg><use href="#i-brain"/></svg>AI 智能因子挖掘</span>
           </div>
           <div class="mac-body space-y-3">
-            <p class="text-[12px] text-slate-500">AI 基于市场特征设计候选因子表达式（白名单沙箱校验），在历史数据上验证 IC，有效因子自动入库。</p>
             <div class="flex gap-2 items-center">
               <button class="mac-btn primary" @click="mineFactors()" :disabled="factorMining">{{factorMining?'AI 挖掘中…':'AI 挖掘因子'}}</button>
-              <span class="text-[12px] text-slate-500">每个候选都经过表达式沙箱 + IC 验证</span>
             </div>
             <div class="flex gap-2 items-center mt-2">
               <span class="text-[12px] text-slate-500">跨品种验证(逗号分隔，exchange源): </span>
@@ -2824,7 +2878,6 @@
             <span class="mac-title"><svg><use href="#i-flask"/></svg>因子合成</span>
           </div>
           <div class="mac-body space-y-3">
-            <p class="text-[12px] text-slate-500">按 RankIC 加权合成组合因子，或手工指定权重。</p>
             <div class="flex gap-2 items-center flex-wrap">
               <select v-model="synthMethod" class="mac-input" style="width:140px">
                 <option value="ic">IC 加权</option><option value="manual">手工权重</option>
@@ -2858,7 +2911,7 @@
       <!-- ========== 持续进化引擎 ========== -->
 <transition name="page" mode="out-in">  <!-- view: evolve -->
     <section v-if="view==='evolve'" class="space-y-5 evolve-page">
-      <div class="page-head evolve-page-head"><div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>持续进化</h1><p>持续训练、版本回退与策略稳健性监控</p></div><div class="page-actions"><button class="mac-btn" disabled title="进化日志导出尚未提供接口"><svg width="13" height="13"><use href="#i-download"/></svg>导出进化日志</button><button class="mac-btn primary" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button></div></div>
+      <div class="page-head evolve-page-head"><div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>持续进化</h1></div><div class="page-actions"><button class="mac-btn" disabled title="进化日志导出尚未提供接口"><svg width="13" height="13"><use href="#i-download"/></svg>导出进化日志</button><button class="mac-btn primary" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button></div></div>
       <!-- 运行状态：陈旧提示 + 状态栏 + 控制/触发 + 回退基线 -->
       <div class="mac-window evolve-status-window">
         <div class="mac-titlebar">
@@ -2896,8 +2949,7 @@
         <div class="mac-titlebar">
           <div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div>
           <span class="mac-title"><svg><use href="#i-settings"/></svg>训练配置</span>
-          <span class="text-[12px] text-slate-500">可热更新，保存后写入 config.yaml</span>
-          <button class="mac-btn text-[12px] ml-auto" @click="saveEvolveConfig()" style="padding:3px 10px">保存配置</button>
+          <button class="mac-btn text-[12px] ml-auto btn-sm" @click="saveEvolveConfig()" style="padding:3px 10px">保存配置</button>
         </div>
         <div class="mac-body">
           <div class="grid grid-cols-2 lg:grid-cols-3 gap-3">
@@ -2921,7 +2973,7 @@
                     <div class="flex gap-1 mt-1" style="border-top:1px solid var(--border);padding:6px 8px 4px">
                       <input v-model="evolveSymbolManual" class="mac-input" style="flex:1;min-width:0;padding:4px 8px" placeholder="输入其他交易对（如 DOGE/USDT）"
                         @keydown.enter.prevent="addEvolveSymbolManual()"/>
-                      <button class="mac-btn" style="padding:3px 10px" @click="addEvolveSymbolManual()">添加</button>
+                      <button class="mac-btn btn-sm" style="padding:3px 10px" @click="addEvolveSymbolManual()">添加</button>
                     </div>
                   </div>
                 </Teleport>
@@ -2932,17 +2984,16 @@
               <mac-select v-model="evolveConfig.timeframe" :options="evolveTfOptions" style="width:100%"></mac-select>
             </div>
           </div>
-          <div class="text-[12px] text-slate-500 mt-2">自动训练保持默认超参；需要调参请到下方「手动 DRL 实验台」</div>
         </div>
       </div>
 
       <div v-if="evolveAnchorIssues.length" class="mac-window evolve-side-anchor" :style="{borderColor: evolveAnchorLocked ? 'rgba(255,69,58,.45)' : 'rgba(255,159,10,.3)'}">
         <div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div><span class="mac-title"><svg :style="{color:evolveAnchorLocked ? 'var(--red)':'var(--orange)'}"><use href="#i-alert"/></svg>回退基线（锚点）</span></div>
-        <div class="mac-body"><p class="text-[12px] text-slate-500">新模型须与锚点同口径比较，连续未接受会触发告警。</p>
-          <div v-for="a in evolveAnchorIssues" :key="a.model" class="evolve-anchor-item"><div class="flex items-center gap-2"><span class="pill" :class="a.tone">{{a.tag}}</span><strong class="text-[12.5px]">{{a.label}}</strong></div><div class="text-[12px] text-slate-500">fitness={{a.fitness}} · 来源 {{a.source}} · 未接受 {{a.streak}}/{{a.stallRounds}} 轮</div><div class="text-[12px]" style="color:var(--muted)">{{a.reason}}</div><button v-if="a.resettable" class="mac-btn text-[12px]" style="padding:3px 10px" @click="resetEvolveAnchor(a.model)">重置锚点</button></div>
+        <div class="mac-body">
+          <div v-for="a in evolveAnchorIssues" :key="a.model" class="evolve-anchor-item"><div class="flex items-center gap-2"><span class="pill" :class="a.tone">{{a.tag}}</span><strong class="text-[12.5px]">{{a.label}}</strong></div><div class="text-[12px] text-slate-500">fitness={{a.fitness}} · 来源 {{a.source}} · 未接受 {{a.streak}}/{{a.stallRounds}} 轮</div><div class="text-[12px]" style="color:var(--muted)">{{a.reason}}</div><button v-if="a.resettable" class="mac-btn text-[12px] btn-sm" style="padding:3px 10px" @click="resetEvolveAnchor(a.model)">重置锚点</button></div>
         </div>
       </div>
-      <div class="mac-window evolve-side-trigger"><div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div><span class="mac-title"><svg><use href="#i-play"/></svg>手动触发训练</span></div><div class="mac-body evolve-trigger-stack"><button class="mac-btn cyan" @click="triggerFactorMiner()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.factor_miner?.active"><svg width="13" height="13"><use href="#i-dna"/></svg>{{evolveStatus.factor_miner?.active ? '因子挖掘中…' : '立即因子挖掘'}}</button><button class="mac-btn purple" @click="triggerStrategyDrl()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.strategy_drl?.active"><svg width="13" height="13"><use href="#i-brain"/></svg>{{evolveStatus.strategy_drl?.active ? '策略训练中…' : '立即策略训练'}}</button><button class="mac-btn purple" @click="triggerMetaController()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.meta_controller?.active"><svg width="13" height="13"><use href="#i-robot"/></svg>{{evolveStatus.meta_controller?.active ? '元策略训练中…' : '训练元策略'}}</button><span class="text-[12px] text-slate-500">手动训练不影响自动调度，结果将参与锚点对比。</span></div></div>
+      <div class="mac-window evolve-side-trigger"><div class="mac-titlebar"><div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div><span class="mac-title"><svg><use href="#i-play"/></svg>手动触发训练</span></div><div class="mac-body evolve-trigger-stack"><button class="mac-btn cyan" @click="triggerFactorMiner()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.factor_miner?.active"><svg width="13" height="13"><use href="#i-dna"/></svg>{{evolveStatus.factor_miner?.active ? '因子挖掘中…' : '立即因子挖掘'}}</button><button class="mac-btn purple" @click="triggerStrategyDrl()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.strategy_drl?.active"><svg width="13" height="13"><use href="#i-brain"/></svg>{{evolveStatus.strategy_drl?.active ? '策略训练中…' : '立即策略训练'}}</button><button class="mac-btn purple" @click="triggerMetaController()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.meta_controller?.active"><svg width="13" height="13"><use href="#i-robot"/></svg>{{evolveStatus.meta_controller?.active ? '元策略训练中…' : '训练元策略'}}</button></div></div>
 
       </div>
 
@@ -2968,7 +3019,6 @@
             <span><i class="evolve-legend-dot blue"></i>fitness（每轮训练目标）</span>
             <span><i class="evolve-legend-dot red"></i>拦截 / 回退轮次</span>
             <span><i class="evolve-legend-dot orange"></i>挑战者未晋升</span>
-            <span class="ml-auto">滚轮缩放 · 拖拽下方滑块回看更早轮次</span>
           </div>
         </div>
       </div>
@@ -2997,7 +3047,7 @@
               <span class="text-[15px] font-semibold" :class="(evolveModel(m.key).fitness||0)>=0?'pos':'neg'">
                 {{evolveModel(m.key).fitness?.toFixed(5) || '-'}}
               </span>
-              <button class="mac-btn text-[12px] ml-auto" @click="showEvolveVersions(m.key)" style="padding:3px 10px">查看版本</button>
+              <button class="mac-btn text-[12px] ml-auto btn-sm" @click="showEvolveVersions(m.key)" style="padding:3px 10px">查看版本</button>
             </div>
             <!-- 策略 DRL 独有：候选 / 部署 / 上轮结论 / 热加载 -->
             <div v-if="evolveModel(m.key).candidate_fitness!=null || evolveModel(m.key).deployed_fitness!=null || evolveModel(m.key).last_outcome" class="text-[12px] mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-slate-400">
@@ -3050,10 +3100,10 @@
                 <span v-if="evolveModel(m.key).combo_health.decayed" class="pill" style="background:rgba(255,159,10,.15);color:#ff9f0a">信号弱化</span>
               </div>
               <div class="flex items-center gap-2 mt-1">
-                <button class="mac-btn text-[12px]" style="padding:3px 10px"
+                <button class="mac-btn text-[12px] btn-sm" style="padding:3px 10px"
                         @click="deployEvolveFactor(evolveModel(m.key).symbol)"
                         :disabled="!evolveModel(m.key).symbol">部署为因子策略</button>
-                <button v-if="evolveModel(m.key).combo_strategy" class="mac-btn text-[12px]" style="padding:3px 10px"
+                <button v-if="evolveModel(m.key).combo_strategy" class="mac-btn text-[12px] btn-sm" style="padding:3px 10px"
                         @click="goEvolveComboBacktest(evolveModel(m.key).combo_strategy)">去回测</button>
               </div>
             </div>
@@ -3071,7 +3121,7 @@
             <div class="mac-titlebar">
               <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
               <span class="mac-title"><svg><use href="#i-list"/></svg>{{evolveVersionTitle}}</span>
-              <button class="mac-btn text-[12px] ml-auto" @click="closeEvolveVersions()" style="padding:3px 10px">关闭</button>
+              <button class="mac-btn text-[12px] ml-auto btn-sm" @click="closeEvolveVersions()" style="padding:3px 10px">关闭</button>
             </div>
             <div class="mac-body" style="overflow:auto">
               <template v-if="evolveVersions.length">
@@ -3083,7 +3133,7 @@
                       <td class="font-mono num">{{v.meta?.fitness?.toFixed(5)||'-'}}</td>
                       <td class="text-slate-500">{{v.timestamp ? fmtTs(v.timestamp * 1000) : '-'}}</td>
                       <td>
-                        <button class="mac-btn text-[12px]" @click="evolveRollback(evolveVersionName, v.version)" style="padding:1px 6px" :disabled="v.version===evolveBestVersion">回退</button>
+                        <button class="mac-btn text-[12px] btn-sm" @click="evolveRollback(evolveVersionName, v.version)" style="padding:1px 6px" :disabled="v.version===evolveBestVersion">回退</button>
                       </td>
                     </tr>
                   </tbody>
@@ -3101,8 +3151,7 @@
         <div class="mac-titlebar">
           <div class="traffic"><span class="tl r"></span><span class="tl g"></span><span class="tl b"></span></div>
           <span class="mac-title"><svg><use href="#i-dna"/></svg>手动 DRL 实验台</span>
-          <span class="text-[12px] text-slate-500">一次性手动训练 · 模型库 · 跨行情评估</span>
-          <button class="mac-btn text-[12px] ml-auto" @click="drlPanelOpen=!drlPanelOpen" style="padding:3px 10px">{{drlPanelOpen?'收起':'展开'}}</button>
+          <button class="mac-btn text-[12px] ml-auto btn-sm" @click="drlPanelOpen=!drlPanelOpen" style="padding:3px 10px">{{drlPanelOpen?'收起':'展开'}}</button>
         </div>
         <div v-show="drlPanelOpen">
         <div class="mac-body">
@@ -3115,7 +3164,6 @@
 
           <!-- 模式一：RL 因子组合挖掘 -->
           <div v-if="drlMode==='factor'">
-            <div class="text-[12px] text-slate-400 mb-2">RL 智能体在因子池上学习"选哪些因子+怎么加权"，产出组合因子（AlphaForge 式）。OOS 未达标不注册，防过拟合。</div>
             <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
               <div><label class="mac-label" for="drlMineEpisodes">训练轮数</label><input id="drlMineEpisodes" v-model.number="drlMineCfg.episodes" class="mac-input" type="number" min="5" max="500"/></div>
               <div><label class="mac-label" for="drlMineLimit">K线数量</label><input id="drlMineLimit" v-model.number="drlMineCfg.limit" class="mac-input" type="number"/></div>
@@ -3125,7 +3173,7 @@
               <div><label class="mac-label" for="drlMineCorrThreshold">冗余相关阈值</label><input id="drlMineCorrThreshold" v-model.number="drlMineCfg.corr_threshold" class="mac-input" type="number" step="0.05" min="0.5" max="1"/></div>
               <div class="col-span-2 flex items-end gap-2 pb-0.5">
                 <button class="mac-btn primary" @click="mineFactorByRl()" :disabled="drlMineLoading">{{drlMineLoading?'挖掘中…':'开始因子挖掘'}}</button>
-                <label class="mac-label mb-0" for="drlMineAutoRegister" style="white-space:nowrap">OOS 达标自动注册</label>
+                <label class="mac-label inline" for="drlMineAutoRegister" style="white-space:nowrap">OOS 达标自动注册</label>
                 <div id="drlMineAutoRegister" class="mac-toggle" role="switch" aria-label="OOS 达标自动注册" :aria-checked="drlMineCfg.auto_register?true:false" tabindex="0" :class="drlMineCfg.auto_register?'on':''" @click="drlMineCfg.auto_register=!drlMineCfg.auto_register" @keydown.enter.prevent="drlMineCfg.auto_register=!drlMineCfg.auto_register" @keydown.space.prevent="drlMineCfg.auto_register=!drlMineCfg.auto_register"></div>
               </div>
             </div>
@@ -3157,7 +3205,6 @@
               </div>
               <div class="flex gap-2 mt-3">
                 <button class="mac-btn primary" @click="applyRlCombo()" :disabled="!drlMineResult.report?.valid"><svg width="13" height="13"><use href="#i-play"/></svg>应用此组合为因子策略</button>
-                <span class="text-[12px] text-slate-500 self-center">应用到 factor_signal（factor=combo），可在回测页验证绩效</span>
               </div>
             </div>
           </div>
@@ -3181,35 +3228,30 @@
             <div><label class="mac-label" for="drlStartCash">起始资金</label><input id="drlStartCash" v-model.number="drlCfg.start_cash" class="mac-input" type="number"/></div>
           </div>
           <div class="flex gap-2 items-center mb-4">
-            <label class="mac-label mb-0" for="drlGpu" style="white-space:nowrap">GPU 加速</label>
+            <label class="mac-label inline" for="drlGpu" style="white-space:nowrap">GPU 加速</label>
             <div id="drlGpu" class="mac-toggle" role="switch" aria-label="DRL 训练 GPU 加速" :aria-checked="drlCfg.use_gpu?true:false" tabindex="0" :class="drlCfg.use_gpu?'on':''" @click="drlCfg.use_gpu=!drlCfg.use_gpu" @keydown.enter.prevent="drlCfg.use_gpu=!drlCfg.use_gpu" @keydown.space.prevent="drlCfg.use_gpu=!drlCfg.use_gpu"></div>
             <span class="text-[12px]" :class="drlCfg.use_gpu?'pos':'text-slate-500'">{{drlCfg.use_gpu?'已启用':'未启用'}}</span>
-            <span class="text-[12px] text-slate-500">特征预计算 GPU 化（需 NVIDIA GPU + cupy，不可用自动回退 CPU）</span>
           </div>
           <div class="flex gap-2 items-center mb-4">
-            <label class="mac-label mb-0" for="drlBaseModel" style="white-space:nowrap">续训模型（可选）</label>
+            <label class="mac-label inline" for="drlBaseModel" style="white-space:nowrap">续训模型（可选）</label>
             <select id="drlBaseModel" v-model="drlCfg.base_model" class="mac-input" style="width:280px">
               <option value="">从零开始训练</option>
               <option v-for="m in drlModels" :key="m.name" :value="m.path">{{m.name}}</option>
             </select>
-            <span class="text-[12px] text-slate-500">选择已训练模型作为起点，保留已学知识继续增强</span>
           </div>
           <div class="flex gap-2 items-center mb-4">
-            <label class="mac-label mb-0" for="drlEarlyStop" style="white-space:nowrap">早停保护</label>
+            <label class="mac-label inline" for="drlEarlyStop" style="white-space:nowrap">早停保护</label>
             <input id="drlEarlyStop" v-model.number="drlCfg.early_stop_patience" class="mac-input" type="number" min="0" style="width:70px"/>
             <span class="text-[12px] text-slate-500">验证收益连续 N 次无改善则提前停止（0=关闭）</span>
           </div>
           <div class="flex gap-2 items-center mb-4">
-            <label class="mac-label mb-0" for="drlForceTrain" style="white-space:nowrap">强制自动训练</label>
+            <label class="mac-label inline" for="drlForceTrain" style="white-space:nowrap">强制自动训练</label>
             <div id="drlForceTrain" class="mac-toggle" role="switch" aria-label="强制自动训练" :aria-checked="drlCfg.force_train?true:false" tabindex="0" :class="drlCfg.force_train?'on':''" @click="drlCfg.force_train=!drlCfg.force_train" @keydown.enter.prevent="drlCfg.force_train=!drlCfg.force_train" @keydown.space.prevent="drlCfg.force_train=!drlCfg.force_train"></div>
             <span class="text-[12px]" :class="drlCfg.force_train?'pos':'text-slate-500'">{{drlCfg.force_train?'已开启':'已关闭'}}</span>
-            <span class="text-[12px] text-slate-500">开启后触发早停也不中断，继续训练到设定轮数（进度不重置）</span>
           </div>
-          <div class="text-[12px] text-slate-500 mb-2">推荐默认值：entropy_coef=0.05, trend_align=0.1, dd_penalty=0.5, losing_penalty=0.2（可在下发参数中覆盖）</div>
           <div class="flex gap-2 items-center mb-4">
             <button class="mac-btn primary" @click="startDrlTrain()" :disabled="drlTrain.running">{{drlTrain.running?'训练中…':''}}<svg v-if="!drlTrain.running" width="13" height="13"><use href="#i-play"/></svg>{{drlTrain.running?'':'开始训练'}}</button>
             <button class="mac-btn" @click="loadDrlModels()">刷新模型库</button>
-            <span class="text-[12px] text-slate-500">状态: 波动率上升时降低仓位 · 趋势明朗时加仓</span>
           </div>
 
           <div v-if="drlTrain.running" class="mb-4">
@@ -3221,7 +3263,6 @@
             <div class="w-full h-2 rounded bg-black/30 overflow-hidden">
               <div class="h-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all" :style="{width:(drlTrain.episodes? (drlTrain.episode||0)/drlTrain.episodes*100:0)+'%'}"></div>
             </div>
-            <div class="text-[12px] text-slate-500 mt-1">loss 下降 = 策略在收敛；loss 震荡且收益不增 = 训练不稳定，可降低学习率或加大熵正则</div>
           </div>
 
           <div v-if="drlTrain.done" class="mac-card mb-4" style="border-color:rgba(48,209,88,.4)">
@@ -3244,10 +3285,6 @@
                 <span>衰减率 <b :class="drlTrain.oos_report.decay>0.5?'orange-c':'text-slate-300'">{{drlTrain.oos_report.decay!=null?(drlTrain.oos_report.decay*100).toFixed(0):'-'}}%</b></span>
                 <span>OOS夏普 <b class="text-slate-300">{{drlTrain.oos_report.oos_sharpe}}</b></span>
               </div>
-              <div class="text-[12px] mt-1.5" :class="drlTrain.oos_report.overfit_likely?'orange-c':'text-slate-400'">
-                <template v-if="drlTrain.oos_report.overfit_likely"><svg width="12" height="12" style="vertical-align:-1px;margin-right:2px"><use href="#i-alert"/></svg>衰减率过高：模型可能记住了训练段行情特征，建议降低训练轮数/加大验证段占比或换更丰富数据重训。</template>
-                <template v-else>已用一段训练时未见过的独立行情评估：衰减可接受，模型具备一定泛化能力。</template>
-              </div>
             </div>
             <div class="flex gap-2 mt-3">
               <button class="mac-btn primary" @click="useDrlModel(drlTrain.model_name)" v-if="drlTrain.model_name"><svg width="13" height="13"><use href="#i-play"/></svg>应用此智能体为当前策略</button>
@@ -3266,7 +3303,7 @@
               <div class="flex items-center gap-2 mb-2">
                 <span class="pn-badge">Pine Script® v5</span>
                 <span class="text-[12px] text-slate-500">DRL 神经引擎权重已固化，可直接粘贴 TradingView 运行</span>
-                <button class="mac-btn ml-auto" style="padding:2px 10px" @click="copyDrlPine()">复制代码</button>
+                <button class="mac-btn ml-auto btn-sm" style="padding:2px 10px" @click="copyDrlPine()">复制代码</button>
               </div>
               <div class="overflow-auto" style="max-height:340px;font-family:var(--mono);font-size:11.5px;line-height:1.6;white-space:pre">{{drlTrain.pine_code}}</div>
             </div>
@@ -3276,8 +3313,8 @@
 
           <div v-if="drlMode==='models'">
             <div class="flex items-center gap-2 mb-2">
-              <div class="mac-label mb-0">已训练模型库</div>
-              <button class="mac-btn ml-auto" style="padding:3px 10px;font-size:12px" @click="loadDrlModels()">刷新</button>
+              <div class="mac-label inline">已训练模型库</div>
+              <button class="mac-btn ml-auto btn-sm" style="padding:3px 10px;font-size:12px" @click="loadDrlModels()">刷新</button>
             </div>
             <table>
               <thead><tr><th>模型名</th><th class="num">大小</th><th class="num">创建时间</th><th></th></tr></thead>
@@ -3288,13 +3325,13 @@
                   <td class="num text-slate-400">{{m.created_at?fmtTs(Date.parse(m.created_at)):'-'}}</td>
                   <td>
                     <div class="flex gap-1.5 justify-end">
-                      <button class="mac-btn" style="padding:3px 10px" @click="useDrlModel(m.name)">使用</button>
-                      <button class="mac-btn" style="padding:3px 10px" @click="evaluateDrlModel(m.name)">评估</button>
-                      <button class="mac-btn danger" style="padding:3px 10px" @click="deleteDrlModel(m.name)">删除</button>
+                      <button class="mac-btn btn-sm" style="padding:3px 10px" @click="useDrlModel(m.name)">使用</button>
+                      <button class="mac-btn btn-sm" style="padding:3px 10px" @click="evaluateDrlModel(m.name)">评估</button>
+                      <button class="mac-btn danger btn-sm" style="padding:3px 10px" @click="deleteDrlModel(m.name)">删除</button>
                     </div>
                   </td>
                 </tr>
-                <tr v-if="!drlModels.length"><td colspan="4"><div class="empty-state"><span class="e-ico"><svg><use href="#i-dna"/></svg></span><span class="e-txt">暂无已训练模型 · 开始训练你的第一个自适应智能体</span></div></td></tr>
+                <tr v-if="!drlModels.length"><td colspan="4"><div class="empty-state"><span class="e-ico"><svg><use href="#i-dna"/></svg></span><span class="e-txt">暂无已训练模型</span></div></td></tr>
               </tbody>
             </table>
             <div v-if="drlEvalResult" class="text-[12px] text-slate-400 mt-2">
@@ -3306,18 +3343,17 @@
           <!-- 跨行情 OOS 独立评估：换币种/周期/时间段 -->
           <div v-if="drlMode==='oos'" class="mt-4 mac-card" style="background:rgba(0,0,0,.18); border-color:rgba(88,130,255,.3)">
             <div class="flex items-center gap-2 mb-2">
-              <span class="mac-label mb-0"><svg class="i-ico"><use href="#i-refresh"/></svg>跨行情泛化评估（换币种/周期/时间段）</span>
-              <span class="text-[12px] text-slate-500">把模型放到一段从未见过的行情上检验，避免只会背行情</span>
+              <span class="mac-label inline"><svg class="i-ico"><use href="#i-refresh"/></svg>跨行情泛化评估（换币种/周期/时间段）</span>
             </div>
             <div class="flex flex-wrap gap-2 items-end">
               <div>
-                <label class="mac-label mb-0 text-[12px]" for="drlOosModel">评估模型</label>
+                <label class="mac-label inline text-[12px]" for="drlOosModel">评估模型</label>
                 <select id="drlOosModel" v-model="drlOos.model" class="mac-input" style="min-width:170px">
                   <option v-for="m in drlModels" :key="m.name" :value="m.name">{{m.name}}</option>
                 </select>
               </div>
               <div>
-                <label class="mac-label mb-0 text-[12px]" for="drlOosDataSource">数据源</label>
+                <label class="mac-label inline text-[12px]" for="drlOosDataSource">数据源</label>
                 <select id="drlOosDataSource" v-model="drlOos.data_source" class="mac-input">
                   <option value="demo">演示行情</option>
                   <option value="exchange">实盘交易所</option>
@@ -3325,19 +3361,19 @@
                 </select>
               </div>
               <div v-if="drlOos.data_source==='exchange'">
-                <label class="mac-label mb-0 text-[12px]" for="drlOosSymbol">币种</label>
+                <label class="mac-label inline text-[12px]" for="drlOosSymbol">币种</label>
                 <input id="drlOosSymbol" v-model="drlOos.symbol" class="mac-input" style="width:110px" list="popularSymbolList" placeholder="BTC/USDT">
               </div>
               <div>
-                <label class="mac-label mb-0 text-[12px]" for="drlOosTimeframe">周期</label>
+                <label class="mac-label inline text-[12px]" for="drlOosTimeframe">周期</label>
                 <mac-select v-model="drlOos.timeframe" :options="drlOosTfOptions" style="width:100%"></mac-select>
               </div>
               <div>
-                <label class="mac-label mb-0 text-[12px]" for="drlOosLimit">K线数量</label>
+                <label class="mac-label inline text-[12px]" for="drlOosLimit">K线数量</label>
                 <input id="drlOosLimit" type="number" v-model.number="drlOos.limit" class="mac-input" style="width:90px" min="100">
               </div>
               <div v-if="drlOos.data_source==='csv'">
-                <label class="mac-label mb-0 text-[12px]" for="drlOosCsvPath">CSV路径</label>
+                <label class="mac-label inline text-[12px]" for="drlOosCsvPath">CSV路径</label>
                 <input id="drlOosCsvPath" v-model="drlOos.csv_path" class="mac-input" style="width:200px" placeholder="data/xxx.csv">
               </div>
               <button class="mac-btn primary" style="padding:6px 14px" @click="runOosEval()" :disabled="!drlOos.model || drlOos.loading">
@@ -3377,7 +3413,6 @@
       <div class="page-head perf-head">
         <div>
           <h1 class="page-title" style="margin:0"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-trophy"/></svg>历史战绩</h1>
-          <p class="text-[13px] text-slate-500" style="margin:3px 0 0">按月分组统计，支持三档密度切换与交易明细排序</p>
         </div>
         <div class="flex items-center gap-2 flex-wrap">
           <button class="mac-btn" @click="exportPerformance()" title="导出历史战绩为 CSV"><svg width="13" height="13"><use href="#i-download"/></svg>导出战绩</button>
@@ -3401,7 +3436,7 @@
             <template v-for="grp in perfGroups" :key="grp.key"><tbody class="perf-month-group"><tr class="perf-month-head"><th colspan="3">{{grp.label}}</th><td class="num" colspan="3">{{grp.count}} 笔 · 小计</td><td class="num" :class="grp.pnl>=0?'pos':'neg'">{{grp.pnl>=0?'+':''}}{{fmt(grp.pnl)}}</td><td colspan="2"></td></tr><tr v-for="t in grp.rows" :key="t.id"><td class="text-slate-500">{{t.ts}}</td><td>{{t.symbol}}</td><td :class="t.side==='buy'?'pos':'neg'">{{t.side==='buy'?'买入':'卖出'}}</td><td class="num">{{fmt(t.price)}}</td><td class="num">{{fmt(t.qty)}}</td><td class="num">{{fmt(t.fee)}}</td><td class="num" :class="(t.pnl||0)>=0?'pos':'neg'">{{t.pnl>=0?'+':''}}{{fmt(t.pnl)}}</td><td>{{t.strategy||'-'}}</td><td class="text-slate-500">{{t.reason||'—'}}</td></tr></tbody></template>
             <tbody v-if="!perfGroups.length"><tr><td colspan="9"><div class="empty-state"><span class="e-ico"><svg><use href="#i-inbox"/></svg></span><span class="e-txt">暂无交易记录</span></div></td></tr></tbody>
           </table></div>
-          <div class="perf-board-footer"><span>显示最近 {{Math.min(30,perfTradesView.length)}} 笔 · 共 {{perfTradesView.length}} 笔</span><button class="mac-btn" style="padding:2px 10px;font-size:12px" @click="switchView('live')">查看实盘持仓</button></div>
+          <div class="perf-board-footer"><span>显示最近 {{Math.min(30,perfTradesView.length)}} 笔 · 共 {{perfTradesView.length}} 笔</span><button class="mac-btn btn-sm" style="padding:2px 10px;font-size:12px" @click="switchView('live')">查看实盘持仓</button></div>
         </div>
       </div>
 
@@ -3416,7 +3451,7 @@
 <transition name="page" mode="out-in">  <!-- view: live -->
     <section v-if="view==='live'" class="space-y-5">
       <div class="page-head">
-        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-rocket"/></svg>实盘启动</h1><p>配置交易参数、切换模式、启动引擎</p></div>
+        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-rocket"/></svg>实盘启动</h1></div>
       </div>
 
       <!-- 当前状态 -->
@@ -3474,7 +3509,7 @@
                     <div class="flex gap-1 mt-1" style="border-top:1px solid var(--border);padding:6px 8px 4px">
                       <input v-model="liveSymbolManual" class="mac-input" style="flex:1;min-width:0;padding:4px 8px" placeholder="输入其他交易对（如 DOGE/USDT）"
                         @keydown.enter.prevent="addLiveSymbolManual()"/>
-                      <button class="mac-btn" style="padding:3px 10px" @click="addLiveSymbolManual()">确定</button>
+                      <button class="mac-btn btn-sm" style="padding:3px 10px" @click="addLiveSymbolManual()">确定</button>
                     </div>
                   </div>
                 </Teleport>
@@ -3529,7 +3564,7 @@
               <input id="paperStartCash" v-model.number="paperCfg.start_cash" type="number" min="100" class="mac-input"/></div>
             <div><label class="mac-label" for="paperFeeRate">手续费率</label>
               <input id="paperFeeRate" v-model.number="paperCfg.fee_rate" type="number" step="0.0001" min="0" max="0.1" class="mac-input"/>
-              <div class="text-[12px] text-slate-500 mt-1">默认 0.001 (0.1%) · 范围 0 ~ 0.1</div></div>
+              <div class="text-[12px] text-slate-500 mt-1">默认 0.001 · 范围 0 ~ 0.1</div></div>
           </div>
           <div class="flex gap-3 mt-5">
             <button class="mac-btn primary" @click="savePaperConfig()"><svg width="12" height="12"><use href="#i-check"/></svg>保存模拟配置</button>
@@ -3553,7 +3588,7 @@
                 </div>
                 <span class="text-[13px] font-semibold">纸面模式</span>
               </div>
-              <p class="text-[12px] text-slate-500 leading-relaxed">纯模拟交易，使用历史行情回放，适合策略验证与参数调优</p>
+              <p class="text-[12px] text-slate-500 leading-relaxed">历史行情回放，不下真单</p>
               <div v-if="liveCfg?.mode==='paper'" class="mt-2 text-[12px] font-medium pos flex items-center gap-1"><svg width="11" height="11"><use href="#i-check"/></svg>当前</div>
             </div>
             <div @click="setLiveMode('simulated')" class="cursor-pointer rounded-xl p-4 transition-all duration-200" style="border:1.5px solid" :style="liveCfg?.mode==='simulated' ? {borderColor:'rgb(191,90,242)',background:'color-mix(in srgb,rgb(191,90,242) 8%,transparent)'} : {borderColor:'var(--border)',background:'transparent'}" :class="{'hover:bg-white/5':liveCfg?.mode!=='simulated'}">
@@ -3563,7 +3598,7 @@
                 </div>
                 <span class="text-[13px] font-semibold">模拟实盘</span>
               </div>
-              <p class="text-[12px] text-slate-500 leading-relaxed">真实行情 + 模拟撮合，不下真单，验证策略在实时市场的表现</p>
+              <p class="text-[12px] text-slate-500 leading-relaxed">真实行情 + 模拟撮合，不下真单</p>
               <div v-if="liveCfg?.mode==='simulated'" class="mt-2 text-[12px] font-medium flex items-center gap-1" style="color:rgb(191,90,242)"><svg width="11" height="11"><use href="#i-check"/></svg>当前</div>
             </div>
             <div @click="setLiveMode('live')" class="rounded-xl p-4 transition-all duration-200" :class="liveStatus.running?'opacity-50 cursor-not-allowed':'cursor-pointer hover:bg-white/5'" style="border:1.5px solid" :style="liveCfg?.mode==='live' ? {borderColor:'var(--red)',background:'color-mix(in srgb,var(--red) 8%,transparent)'} : {borderColor:'var(--border)',background:'transparent'}">
@@ -3573,7 +3608,7 @@
                 </div>
                 <span class="text-[13px] font-semibold">实盘模式</span>
               </div>
-              <p class="text-[12px] text-slate-500 leading-relaxed">真实下单交易，需 API Key/Secret，小资金验证，<span class="neg">自担风险</span></p>
+              <p class="text-[12px] text-slate-500 leading-relaxed">真实下单，需 API Key/Secret，<span class="neg">自担风险</span></p>
               <div v-if="liveCfg?.mode==='live'" class="mt-2 text-[12px] font-medium neg flex items-center gap-1"><svg width="11" height="11"><use href="#i-check"/></svg>当前</div>
             </div>
           </div>
@@ -3595,11 +3630,11 @@
               </div>
               <div>
                 <div class="text-[14px] font-medium" :class="liveStatus.running?'pos':'text-slate-400'">{{liveStatus.running?'引擎运行中':'引擎已停止'}}</div>
-                <div class="text-[12px] text-slate-500 mt-0.5">启动前请核对：交易模式、交易所、交易对、周期、风控规则</div>
               </div>
             </div>
             <div class="flex gap-2">
               <button class="mac-btn primary" @click="startEngine()" v-if="!liveStatus.running" style="padding:8px 24px;font-size:14px"><svg width="14" height="14"><use href="#i-play"/></svg>启动引擎</button>
+              <button class="mac-btn danger" @click="closeAll()" v-else style="padding:8px 24px;font-size:14px" title="立即市价卖出全部持仓（紧急离场，绕开风控新开仓限制）"><svg width="14" height="14"><use href="#i-stop"/></svg>一键清仓</button>
               <button class="mac-btn danger" @click="stopEngine()" v-else style="padding:8px 24px;font-size:14px"><svg width="14" height="14"><use href="#i-stop"/></svg>停止引擎</button>
             </div>
           </div>
@@ -3767,6 +3802,15 @@ const app = createApp({
         renderPnlChart();
         toast('历史战绩已刷新','ok');
       } catch(e) { toast('历史战绩刷新失败：'+(e.message||e),'error'); }
+    }
+    // 视图返回时静默重建（不弹 toast）——切菜单不该每次都弹「已刷新」
+    async function loadPerformanceSilently() {
+      try {
+        perfTrades.value = perfTrades.value.length ? perfTrades.value : await api('/performance/trades?limit=200');
+        const eq = await api('/performance/equity?limit=500');
+        perfChart = renderEquity(perfChart, eq.map(x=>[x.ts,x.equity]), 'perf');
+        renderPnlChart();
+      } catch(e) {}
     }
     function exportPerformance() {
       const rows=[['时间','交易对','方向','价格','收益率/盈亏','策略 · 平仓原因','数量','手续费']];
@@ -5246,52 +5290,84 @@ const app = createApp({
       localStorage.setItem('cat_density', d);
     }
     function refreshCharts() {
+      // 主题切换：图表是 canvas，需 dispose + 重建才能换色。
+      // 旧实现逐行手写 dispose（factorIcChart 漏了、plateauChart 重复写了两遍），
+      // 现在统一走 VIEW_CHARTS：先全量释放，再按当前视图恢复。
       nextTick(()=>{
-        try { if (view.value==='strategy' && workshopChart) { workshopChart.dispose(); workshopChart=null; loadWorkshopChart(); } } catch(e) {}
-        try { if (view.value==='allstrategies' && strategyTreeChart) { strategyTreeChart.dispose(); strategyTreeChart=null; renderStrategyTree(); } } catch(e) {}
-        try { if (equityChart) { equityChart.dispose(); equityChart=null; } } catch(e) {}
-        try { if (perfChart) { perfChart.dispose(); perfChart=null; } } catch(e) {}
-        try { if (pnlChart) { pnlChart.dispose(); pnlChart=null; } } catch(e) {}
-        try { if (btChart) { btChart.dispose(); btChart=null; } } catch(e) {}
-        try { if (plateauChart) { plateauChart.dispose(); plateauChart=null; renderPlateauChart(); } } catch(e) {}
-        try { if (view.value==='quant' && xsChart) { xsChart.dispose(); xsChart=null; renderXsChart(); } } catch(e) {}
-        try { if (evolveCurveChart) { evolveCurveChart.dispose(); evolveCurveChart=null; } } catch(e) {}
-        try { if (plateauChart) { plateauChart.dispose(); plateauChart=null; renderPlateauChart(); } } catch(e) {}
-        if (view.value==='dashboard') loadEquity();
-        if (view.value==='performance') { const eq = api('/performance/equity?limit=500').then(x=>{ perfChart=renderEquity(perfChart, x.map(v=>[v.ts,v.equity]), 'perf'); }); renderPnlChart(); }
-        if (view.value==='backtest' && btResult.value) renderBtChart();
-        if (view.value==='evolve') renderEvolveCurve();   // 主题切换重建进化轮次曲线（此前漏重绘，切浅色后仍是旧主题色）
+        disposeViewCharts(null);
+        // 全量释放需要把 el._chart 也清掉，否则 initChart 会返回已 dispose 的实例
+        Object.keys(VIEW_CHARTS).forEach(key=>VIEW_CHARTS[key].ids.forEach(id=>{
+          const el = document.getElementById(id); if (el) el._chart = null;
+        }));
+        restoreViewCharts(view.value);
+        if (view.value==='strategy') loadWorkshopChart();
+        if (view.value==='allstrategies') renderStrategyTree();
       });
+    }
+    // 视图 → 图表恢复表（单一事实源）。
+    // 背景：一级视图是各自独立的 <transition mode="out-in"> 包 v-if 的 <section>，
+    // 切菜单 = 整个 section 卸载重建 ⇒ 图表容器 DOM 被换成新节点。
+    // 旧实现只在「离开」时 dispose 实例，却在「返回」时只重建了部分视图（backtest
+    // 只调 loadDataSeries、它会碰的是数据列表不是 btChart）⇒ 收益曲线切走再切回就永久空白。
+    // 现在统一为：离开时按下表 dispose，返回时按下表重建；两边读同一份配置，不会再漏。
+    // restore 用 DOM id 判定容器是否存在（v-if 未渲染时直接跳过），避免对空容器 echarts.init。
+    const VIEW_CHARTS = {
+      dashboard:     { ids:['equityChart'],          restore:()=>loadEquity() },
+      performance:   { ids:['perfChart','pnlChart'], restore:()=>{ loadPerformanceSilently(); } },
+      backtest:      { ids:['btChart'],              restore:()=>{ if (btResult.value) renderBtChart(); } },
+      strategy:      { ids:['workshopChart'],        restore:()=>loadWorkshopChart() },
+      allstrategies: { ids:['strategyTreeChart'],    restore:()=>loadAllStrategies() },
+      quant:         { ids:['drlCurveChart','factorIcChart','xsChart','plateauChart'],
+                       restore:()=>{ renderDrlCurve(); renderFactorIcChart(); renderXsChart(); renderPlateauChart(); } },
+      evolve:        { ids:['evolveCurveChart'],     restore:()=>renderEvolveCurve() },
+    };
+    // 所有受管图表实例的唯一索引：DOM id → 实例。dispose/恢复都走它，避免
+    // 「变量名写漏一处就永久丢图」（旧代码里 factorIcChart 就重复 dispose 了两次、
+    // plateauChart 却在离开时完全没释放）。
+    function disposeViewCharts(keepKey) {
+      const keep = keepKey && VIEW_CHARTS[keepKey] ? VIEW_CHARTS[keepKey].ids : [];
+      Object.keys(VIEW_CHARTS).forEach(key=>{
+        if (key===keepKey) return;
+        VIEW_CHARTS[key].ids.forEach(id=>{
+          if (keep.includes(id)) return;
+          const el = document.getElementById(id);
+          const inst = (el && el._chart) || null;
+          if (inst) { try { if (!inst.isDisposed()) inst.dispose(); } catch(e) {} }
+          // 实例变量一并置空，保证下次 restore 走「新建」分支
+          try { if (id==='equityChart') equityChart=null; else if (id==='perfChart') perfChart=null;
+                else if (id==='pnlChart') pnlChart=null; else if (id==='btChart') btChart=null;
+                else if (id==='workshopChart') workshopChart=null; else if (id==='strategyTreeChart') strategyTreeChart=null;
+                else if (id==='drlCurveChart') drlCurveChart=null; else if (id==='factorIcChart') factorIcChart=null;
+                else if (id==='xsChart') xsChart=null; else if (id==='plateauChart') plateauChart=null;
+                else if (id==='evolveCurveChart') evolveCurveChart=null; } catch(e) {}
+        });
+      });
+    }
+    function restoreViewCharts(k) {
+      const cfg = VIEW_CHARTS[k];
+      if (!cfg) return;
+      try { cfg.restore(); } catch(e) {}
     }
     function switchView(k) {
       // 首屏卡片入场动画的开关（<html data-boot>）：第一次切菜单就摘掉，
       // 此后卡片不再自带入场 —— 否则整个 section 重挂载会让上百个卡片重播动画（= 闪）。
       // 详见 <style> 里「动效单一来源」注释块。摘除是无副作用的（动画早已结束且终态即基样式）。
       document.documentElement.removeAttribute('data-boot');
-      // 离开视图时释放对应 ECharts 实例，防止切回时绑定到已销毁 DOM 导致白屏
-      if (view.value!==k) {
-        try { if (k!=='strategy' && workshopChart) { workshopChart.dispose(); workshopChart=null; } } catch(e) {}
-        try { if (k!=='allstrategies' && strategyTreeChart) { strategyTreeChart.dispose(); strategyTreeChart=null; } } catch(e) {}
-        try { if (k!=='dashboard' && equityChart) { equityChart.dispose(); equityChart=null; } } catch(e) {}
-        try { if (k!=='performance' && perfChart) { perfChart.dispose(); perfChart=null; } } catch(e) {}
-        try { if (k!=='performance' && pnlChart) { pnlChart.dispose(); pnlChart=null; } } catch(e) {}
-        try { if (k!=='backtest' && btChart) { btChart.dispose(); btChart=null; } } catch(e) {}
-        try { if (k!=='quant' && drlCurveChart) { drlCurveChart.dispose(); drlCurveChart=null; } } catch(e) {}
-        try { if (k!=='quant' && factorIcChart) { factorIcChart.dispose(); factorIcChart=null; } } catch(e) {}
-        try { if (k!=='quant' && xsChart) { xsChart.dispose(); xsChart=null; } } catch(e) {}
-        try { if (k!=='quant' && factorIcChart) { factorIcChart.dispose(); factorIcChart=null; } } catch(e) {}
-        try { if (k!=='evolve' && evolveCurveChart) { evolveCurveChart.dispose(); evolveCurveChart=null; } } catch(e) {}
-      }
+      // 离开视图时按恢复表释放图表实例，防止切回时绑定到已销毁 DOM 导致白屏
+      if (view.value!==k) disposeViewCharts(k);
       view.value = k;
       localStorage.setItem(VIEW_KEY, k);
       const url = new URL(location.href);
       url.searchParams.set('view', k);
       history.replaceState(null, '', url);
       nextTick(()=>{
+        // 先跑各视图的数据加载（可能改变 v-if 条件 / 重新填充 ref）
         if (k==='strategy') loadWorkshopChart();   // 工坊右栏实时图表
         if (k==='allstrategies') { loadAllStrategies(); }  // 全部策略页（二级菜单，含族谱图）
-        if (k==='evolve') { fetchEvolveStatus(); loadEvolveFactorStrategies(); fetchEvolveConfig(); fetchEvolveRounds(evolveCurveModel.value); renderEvolveCurve(); }
+        if (k==='evolve') { fetchEvolveStatus(); loadEvolveFactorStrategies(); fetchEvolveConfig(); fetchEvolveRounds(evolveCurveModel.value); }
         if (k==='backtest') loadDataSeries();
+        // 再统一恢复图表：数据已就位，容器若已渲染则立刻重建
+        nextTick(()=>restoreViewCharts(k));
       });
     }
 
@@ -5513,9 +5589,13 @@ const app = createApp({
     }
     function renderEquity(chart, data, key, benchData) {
       nextTick(()=>{
-        const el = document.getElementById(key==='dashboard'?'equityChart':key==='perf'?'perfChart':'btChart');
+        const elId = key==='dashboard'?'equityChart':key==='perf'?'perfChart':'btChart';
+        const el = document.getElementById(elId);
         if (!el) return;
-        if (!chart) chart = initChart(key==='dashboard'?'equityChart':key==='perf'?'perfChart':'btChart');
+        // 纵深防御：传入的实例若已 dispose（视图切换/主题切换后变量可能残留旧句柄），
+        // 直接 setOption 会静默失败 => 图表空白。这里统一回落到 initChart 重建。
+        if (!chart || chart.isDisposed()) chart = initChart(elId);
+        if (!chart) return;
         const ct = chartTheme();
         const series = [{type:'line', data, showSymbol:false, lineStyle:{color:ct.accent,width:2},
                          areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[
@@ -5544,7 +5624,9 @@ const app = createApp({
       nextTick(()=>{
         const el = document.getElementById('pnlChart');
         if (!el) return;
-        pnlChart = pnlChart || echarts.init(el);
+        // 与前同理：残留的已 dispose 句柄会让 setOption 静默失败 → 走 initChart 重建
+        if (!pnlChart || pnlChart.isDisposed()) pnlChart = initChart('pnlChart');
+        if (!pnlChart) return;
         // 只统计平仓（sell）的盈亏
         const pnls = perfTrades.value.filter(t=>t.side==='sell' && t.pnl!==null && t.pnl!==undefined);
         if (!pnls.length) {
@@ -5585,6 +5667,17 @@ const app = createApp({
     // ---------- 引擎 ----------
     async function startEngine() { try { await api('/trading/start', {method:'POST'}); engineStatus.value='running'; toast('交易引擎已启动','ok'); loadAll(); } catch(e){ toast(String(e.message||e),'error'); } }
     async function stopEngine() { try { await api('/trading/stop', {method:'POST'}); engineStatus.value='stopped'; toast('交易引擎已停止','info'); } catch(e){ toast(String(e.message||e),'error'); } }
+    async function closeAll() {
+      const running = engineStatus.value==='running' || liveStatus?.running;
+      if(!running){ toast('引擎未运行，无法清仓（停引擎≠清仓）','error'); return; }
+      const ok = await uiConfirm('将市价卖出全部持仓（紧急离场，绕开风控新开仓限制）。确定继续？','一键清仓');
+      if(!ok) return;
+      try {
+        const r = await api('/trading/close-all', {method:'POST', body: JSON.stringify({reason:'manual_close_all'})});
+        toast(r.detail || ('已平仓 '+r.closed_qty), r.ok?'ok':'error');
+        loadAll();
+      } catch(e){ toast(String(e.message||e),'error'); }
+    }
     function exportReport() {
       var rows=[['资产项','数值','备注']];
       if(portfolio){rows.push(['总资产(USDT)',fmt(portfolio.equity),'']);rows.push(['可用现金(USDT)',fmt(portfolio.cash),'']);rows.push(['持仓市值(USDT)',fmt(portfolio.positions_value),'']);(portfolio.positions||[]).forEach(function(p){rows.push([p.symbol,fmt(p.qty),'均价'+fmt(p.avg_price)+' 浮盈'+fmt(p.unrealized_pnl)])})}
@@ -6429,16 +6522,17 @@ const app = createApp({
         loadDrlModels(); loadAllStrategies(); loadStrategy();
       } catch(e){ toast(String(e.message||e),'error'); }
     }
-    function showDrlCurve() {
+    // 纯重绘（不切换 drlCurveShown）。视图返回时由 VIEW_CHARTS.quant.restore 调用 ——
+    // 必须与「显示/隐藏」按钮解耦，否则切回 quant 页会反而把曲线藏起来。
+    function renderDrlCurve() {
       const h = drlTrain.history || [];
-      if (!h.length) return;
-      drlCurveShown.value = !drlCurveShown.value;
-      if (!drlCurveShown.value) return;
-      // 等容器 v-if 渲染后再初始化（setTimeout 保证 Vue 挂载完成）
+      // 只有用户已展开（drlCurveShown=true）且容器已渲染时才需要重建
+      if (!h.length || !drlCurveShown.value) return;
       setTimeout(()=>{
         const el = document.getElementById('drlCurveChart');
         if (!el) return;
         drlCurveChart = initChart('drlCurveChart') || drlCurveChart;
+        if (!drlCurveChart) return;
         const ct = chartTheme();
         // 长训练降采样：几千/几万点压缩到最多 500 点，保证渲染流畅
         const maxPoints = 500;
@@ -6461,6 +6555,11 @@ const app = createApp({
         });
         drlCurveChart.resize();
       }, 100);
+    }
+    // 显示/隐藏按钮：切换开关后交给 renderDrlCurve 真正重绘
+    function showDrlCurve() {
+      drlCurveShown.value = !drlCurveShown.value;
+      if (drlCurveShown.value) renderDrlCurve();
     }
 
     // ---------- 时钟与定时刷新 ----------

@@ -94,6 +94,9 @@ _trash_archive/
 .vscode/
 *.swp
 
+# DSH 注入/路由套件（本机工具产物，不进项目库）
+/vendor/
+
 # SDD 工作区（临时产物，不进版本库）
 .superpowers/
 

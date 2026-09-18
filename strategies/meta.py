@@ -209,6 +209,7 @@ class MetaController(Strategy):
         "take_profit_pct": {"type": "float", "min": 0.001, "max": 0.5, "label": "止盈比例"},
         "size_pct": {"type": "float", "min": 0.05, "max": 1.0, "label": "下单比例"},
         "per_strategy_trades": {"type": "bool", "label": "按子策略独立记战绩（训练/部署同构）"},
+        "signal_novelty_filter": {"type": "bool", "label": "子策略信号新颖性滤波（训练/部署同构；密集信号池必需）"},
     }
 
     def reset(self) -> None:
@@ -284,6 +285,7 @@ class MetaController(Strategy):
                 # 取实例时错位/IndexError，前几个名字张冠李戴污染集成信号
                 log.warning("[meta] 子策略 %s 加载失败，剔除: %s", name, e)
         self._strategy_names = loaded
+        self._last_sig_dir = {n: 0.0 for n in self._strategy_names}  # 信号流滤波记忆
 
     @property
     def managed_executors(self) -> list[str]:
@@ -366,15 +368,30 @@ class MetaController(Strategy):
         """收集所有子策略的当前信号，返回 {name: signal}。"""
         result: dict[str, Any] = {}
         self._strategy_signals = {}
+        # 信号流新颖性滤波（与训练端 MetaControllerEnv 同构）：方向未变化的重复
+        # 信号抑制为无信号。经实验验证（.optim/exp_training/confirm_signal_filter.py）
+        # 能逃出密集信号坍缩；须与训练 cfg signal_novelty_filter 同步开启，否则
+        # 训练/部署状态口径不一致（同构约束）。
+        use_filter = bool(self.params.get("signal_novelty_filter", False))
+        last_dirs = getattr(self, "_last_sig_dir", {})
         for i, name in enumerate(self._strategy_names):
             st = self._sub_strategies[i]
             try:
                 sig = st.on_candle(ctx)
                 self._strategy_signals[name] = sig
+                direction = 1.0 if sig and sig.side == "buy" else (
+                    -1.0 if sig and sig.side == "sell" else 0.0)
+                if use_filter and direction != 0.0 and direction == last_dirs.get(name, 0.0):
+                    # 重复方向抑制：方向清零、置信度清零（原始 signal 保留供日志）
+                    direction, conf = 0.0, 0.0
+                else:
+                    conf = sig.confidence if sig else 0.0
+                last_dirs[name] = 1.0 if sig and sig.side == "buy" else (
+                    -1.0 if sig and sig.side == "sell" else 0.0)
                 result[name] = {
                     "signal": sig,
-                    "confidence": sig.confidence if sig else 0.0,
-                    "direction": 1.0 if sig and sig.side == "buy" else (-1.0 if sig and sig.side == "sell" else 0.0),
+                    "confidence": conf,
+                    "direction": direction,
                 }
             except Exception as e:
                 log.warning("[meta] 子策略 %s 信号异常: %s", name, e)
@@ -630,7 +647,8 @@ class MetaControllerEnv:
                  per_strategy_trades: bool = False,
                  align_maintain_scale: float = 0.15,
                  align_novelty_gate: bool = False,
-                 align_exit_penalty: bool = False):
+                 align_exit_penalty: bool = False,
+                 signal_novelty_filter: bool = False):
         self.df = df
         self.strategy_names, self.sub_strategies = _resolve_sub_strategies(strategy_names)
         self.n_strategies = len(self.strategy_names)
@@ -692,6 +710,14 @@ class MetaControllerEnv:
         # （best_dir==持仓方向）却平仓 → 罚 _align，与入场奖励对称，换手循环塑形净收益归零，
         # 真实收益/手续费重新主导。只影响训练梯度。
         self.align_exit_penalty = bool(align_exit_penalty)
+        # E-EXP：信号流新颖性滤波（默认关）。密集单边信号（factor_signal 54% 买入、
+        # conf=1）让状态与塑形输入几乎恒定 → 策略对同一状态输出同一动作 → "买→卖
+        # 逐根换手"确定性坍缩（生产归档实锤：9/13-9/14 每轮 OOS -0.21 被安检门拦截）。
+        # 开启后子策略方向与上一步相同（且非0）的重复信号被抑制为无信号——恒买流
+        # 压缩为"转移事件"，密集信号退化为稀疏，状态重获区分度。训练端（本 env）
+        # 与部署端 MetaController._collect_sub_signals 同构，必须一起开。
+        self.signal_novelty_filter = bool(signal_novelty_filter)
+        self._last_sig_dir: dict[str, float] = {n: 0.0 for n in self.strategy_names}
         self.n = len(df)
 
         # 状态维度：每子策略 (方向 + 置信度 + 胜率 + 近期均值) + 全局(持仓比+盈亏+波动率)
@@ -767,6 +793,15 @@ class MetaControllerEnv:
             except Exception as e:  # noqa: BLE001
                 log.warning("[meta_env] 子策略 %s 信号异常: %s", name, e)
                 signals[name] = {"direction": 0.0, "confidence": 0.0}
+        if self.signal_novelty_filter:
+            # 新颖性滤波：方向与上一步相同（且非0）的重复信号抑制为无信号
+            # （置信度也清零，塑形"最强信号"不会把抑制后的空信号当有效输入）。
+            # 状态与塑形共用 _sigs → 单点滤波，两处口径一致。
+            for name in self.strategy_names:
+                d = float(signals[name].get("direction", 0.0) or 0.0)
+                if d != 0.0 and d == self._last_sig_dir.get(name, 0.0):
+                    signals[name] = {"direction": 0.0, "confidence": 0.0}
+                self._last_sig_dir[name] = d
         return signals
 
     def _signals_at(self, t: int) -> dict[str, dict]:
@@ -874,6 +909,7 @@ class MetaControllerEnv:
         self._sigs = None
         self._last_trade_time = 0
         self._last_align_dir = 0.0  # 新颖性门控：episode 内信号方向记忆
+        self._last_sig_dir = {n: 0.0 for n in self.strategy_names}  # 信号流滤波：episode 内记忆
         return self._build_state(self._t)
 
     def step(self, action: int) -> tuple:
@@ -1049,7 +1085,8 @@ def train_meta_controller(df, cfg: dict,
                       per_strategy_trades=bool(cfg.get("per_strategy_trades", False)),
                       align_maintain_scale=float(cfg.get("align_maintain_scale", 0.15)),
                       align_novelty_gate=bool(cfg.get("align_novelty_gate", False)),
-                      align_exit_penalty=bool(cfg.get("align_exit_penalty", False)))
+                      align_exit_penalty=bool(cfg.get("align_exit_penalty", False)),
+                      signal_novelty_filter=bool(cfg.get("signal_novelty_filter", False)))
     # E-EXP：学习率退火（与 train_drl 同口径）；默认关
     lr_anneal = bool(cfg.get("lr_anneal", False))
     lr_final_ratio = float(cfg.get("lr_final_ratio", 0.2))

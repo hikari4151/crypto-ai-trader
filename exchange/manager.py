@@ -33,23 +33,42 @@ class ExchangeManager:
         return cfg
 
     async def start(self, api_key: str = "", secret: str = "", password: str = "",
-                    load_markets: bool = True) -> None:
-        """初始化客户端。load_markets=False 用于只拉钱包/余额的场景（跳过市场加载，更快）。"""
+                    load_markets: bool = True, testnet: bool = False) -> None:
+        """初始化客户端。load_markets=False 用于只拉钱包/余额的场景（跳过市场加载，更快）。
+
+        testnet=True 时对所有已建客户端调用 ccxt set_sandbox_mode(True)：
+        - 实盘就绪验证（GAP-02）：在交易所 sandbox/testnet 上演练真实订单生命周期，
+          不碰真实资金；
+        - 不支持 sandbox 的交易所显式报错，避免"以为在沙箱实际打真单"。
+        """
         import ccxt.async_support as ccxt
         if not hasattr(ccxt, self.exchange_id):
             raise ValueError(f"不支持的交易所: {self.exchange_id}")
         self._public = getattr(ccxt, self.exchange_id)(self._client_cfg())
+        if testnet:
+            try:
+                self._public.set_sandbox_mode(True)
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(f"{self.exchange_id} 不支持 testnet/sandbox: {e}") from e
         if load_markets:
             await self._public.load_markets()
-        log.info("[%s] public client 就绪%s", self.exchange_id, f"（代理 {self._proxy}）" if self._proxy else "")
+        log.info("[%s] public client 就绪%s%s", self.exchange_id,
+                 f"（代理 {self._proxy}）" if self._proxy else "",
+                 "（testnet/sandbox）" if testnet else "")
         if api_key:
             cfg = self._client_cfg(apiKey=api_key, secret=secret)
             if password:
                 cfg["password"] = password
             self._private = getattr(ccxt, self.exchange_id)(cfg)
+            if testnet:
+                try:
+                    self._private.set_sandbox_mode(True)
+                except Exception as e:  # noqa: BLE001
+                    raise RuntimeError(f"{self.exchange_id} 不支持 testnet/sandbox（private）: {e}") from e
             if load_markets:
                 await self._private.load_markets()
-            log.info("[%s] private client 就绪（已注入密钥，绝不写日志）", self.exchange_id)
+            log.info("[%s] private client 就绪（已注入密钥，绝不写日志%s）", self.exchange_id,
+                     "，testnet/sandbox" if testnet else "")
 
     @property
     def has_private(self) -> bool:

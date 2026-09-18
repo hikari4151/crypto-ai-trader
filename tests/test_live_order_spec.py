@@ -53,7 +53,7 @@ class SpecExchange:
         return f"{self._floor(price, self.precision.get('price')):.8f}"
 
     async def create_order(self, symbol, otype, side, amount, price=None, params=None):
-        if params:
+        if params and params.get("triggerPrice"):
             self.trigger_created.append((symbol, otype, side, amount, price, params))
             return {"id": "stop1", "status": "open", "filled": 0.0, "amount": amount,
                     "price": price or 0.0, "average": None, "fee": {"cost": 0.0}}

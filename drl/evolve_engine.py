@@ -79,7 +79,7 @@ def _strategy_drl_train_cfg(episodes: int) -> dict:
         "train_ratio": 0.6,
         "val_ratio": 0.2,
         "fee_rate": 0.001,
-        "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 20.0)),
+        "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 40.0)),
         "cost_scale": 1.0,
         "min_trade_zone": 0.05,
         "state_window": int(getattr(settings, "evolve_strategy_drl_state_window", 4)),
@@ -90,7 +90,11 @@ def _strategy_drl_train_cfg(episodes: int) -> dict:
         "val_eval_interval": 10,
         "early_stop_patience": 0,
         "reward_dd_penalty": 0.0,
-        "reward_losing_penalty": 0.0,
+        # E-EXP（2026-09 实验落地）：连亏抑制塑形。sweep_drl_rewards.py 30ep 双标的：
+        # baseline（vol20、无塑形）在 BTC OOS 为负（-0.006/sharpe-0.48）；vol40+此 0.5
+        # 后 OOS 转正（BTC +0.0005、ETH +0.0057/sharpe+0.42）。趋势塑形/尾部罚/回撤罚
+        # 均经实验判定无益或有害，保持 0。
+        "reward_losing_penalty": 0.5,
         "reward_trend_align": 0.0,
         # P1-5：OOS 安检门槛（settings.evolve_oos_min_bars，默认 250）
         # 与多段评估（3 段取中位数，降单段运气噪声）
@@ -124,6 +128,17 @@ def _oos_gate_passed(report: Optional[dict]) -> tuple[bool, str]:
         return False, "OOS 段样本不足，无样本外证据"
     if not rep.get("valid"):
         return False, str(rep.get("reason") or "OOS 安检未通过")
+    # E-EXP（2026-09 修复）：factor_quality_gate 用 |rank_ic| 判门，会放行
+    # OOS 方向反转的因子——组合因子权重按决策时点 IC 定向，OOS rank_ic 为负 =
+    # 实时"反着做"。生产实锤：round 727 发布因子 rank_ic=-0.0416 却 valid=True
+    # （.optim/exp_training/）。组合因子必须正向 rank_ic 才可发布/级联。
+    rank_ic = rep.get("rank_ic")
+    if rank_ic is not None:
+        try:
+            if float(rank_ic) <= 0.0:
+                return False, f"OOS 秩IC非正（{float(rank_ic):.4f}），因子方向反转，拒绝发布"
+        except (TypeError, ValueError):
+            return False, f"OOS 秩IC无效（{rank_ic}），拒绝发布"
     return True, ""
 
 
@@ -301,6 +316,7 @@ class EvolveEngine:
         self._factor_miner_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
                                      "last_error": "", "next_run": 0, "last_success": False,
                                      "oos_rejected": "", "_demo_streak": 0,
+                                     "_reject_streak": 0,   # E-EXP：连续 OOS 被拒计数（自适应重置）
                                      "loop_beat": 0.0, "restarts": 0,
                                      # 进化组合因子部署状态（Task：进化因子使用场景；combo_ 前缀
                                      # 避开 _pipeline_view/_mark_deployment_status 的 deployed_* 键覆盖）
@@ -1732,6 +1748,20 @@ class EvolveEngine:
         # 3. 加载上次最佳模型
         agent = self.zoo.load_agent("factor_miner")
         best_agent = agent  # 训练前保存当前最佳
+        # E-EXP（2026-09 实验落地）：自适应 from-scratch 重置——连续 OOS 被拒达到
+        # settings.evolve_factor_miner_reset_after_rejects 时，本轮不从旧模型续训
+        # （base_agent=None），强制从头训练打破"永久连拒"。实验依据：
+        # .optim/exp_training/replicate_prod_windows.py——生产 9/13-9/14 连续 15+ 轮
+        # 被拒（|rank_ic|0.004~0.028<0.03）而同窗口 masked from-scratch 过门槛率 44%，
+        # 重置后约 2-3 轮可重新产出一版通过安检的组合因子。
+        _reject_streak = int(self._factor_miner_status.get("_reject_streak", 0))
+        _reset_after = int(getattr(settings, "evolve_factor_miner_reset_after_rejects", 0) or 0)
+        if _reset_after > 0 and _reject_streak >= _reset_after:
+            best_agent = None
+            log.warning("[evolve] 因子挖掘连续 %d 轮 OOS 被拒，本轮 from-scratch 重训"
+                        "（打破连拒，阈值=%d）", _reject_streak, _reset_after)
+            self._factor_miner_status["last_error"] = (
+                f"连续 {_reject_streak} 轮被拒，已触发 from-scratch 重训")
 
         # 4. 计算因子矩阵（P4-E1：包 to_thread——对最多 rolling_window 根K线
         # 计算全部内置因子，纯 pandas 向量化数百毫秒~秒级，留在主协程会阻塞事件循环）
@@ -1876,7 +1906,10 @@ class EvolveEngine:
             return "demo"
         if not gate_ok:
             self._factor_miner_status["oos_rejected"] = gate_reason
-            log.warning("[evolve] 组合因子未通过 OOS 安检（%s），仅存档不设为 best", gate_reason)
+            # E-EXP：拒绝连击计数（自适应重置的触发依据；通过/回退时清零）
+            self._factor_miner_status["_reject_streak"] = _reject_streak + 1
+            log.warning("[evolve] 组合因子未通过 OOS 安检（%s），仅存档不设为 best"
+                        "（连续 %d 轮被拒）", gate_reason, _reject_streak + 1)
             try:
                 await asyncio.to_thread(
                     self.zoo.save_agent_archive, result["agent"], "factor_miner",
@@ -1906,6 +1939,8 @@ class EvolveEngine:
             return "oos_rejected"
 
         # 7. 保存最佳模型（OOS 安检通过的 exchange 模型才写 best）
+        # E-EXP：通过安检 → 清空拒绝连击计数
+        self._factor_miner_status["_reject_streak"] = 0
         is_best = True
         await asyncio.to_thread(
             self.zoo.save_agent, result["agent"], "factor_miner",

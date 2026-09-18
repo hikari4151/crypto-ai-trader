@@ -63,8 +63,8 @@ cp .env.example .env      # 编辑：MASTER_KEY / DATABASE_URL / 模式等
 # （键名与 config/settings.py 字段同名；风控与回测参数请直接在 Web 界面配置）
 ```
 
-- **纸面模式（默认）**：`PAPER_TRADING=true`，无需任何交易所密钥即可体验全流程。
-- **实盘模式**：`PAPER_TRADING=false`，并在 Web 界面「AI 设置」页填写交易所密钥（Fernet 加密存储）。
+- **纸面模式（默认）**：无需任何交易所密钥即可体验全流程。Web 「实盘启动」页可切换 纸面 / 模拟实盘 / 实盘 三种模式。
+- **实盘模式**：在 Web 「实盘启动」页的交易所凭据处填写 API Key/Secret（Fernet 加密存储，读取走「AI 设置」页旁的交易所凭据入口），然后切到「实盘模式」并启动引擎。**实盘前务必先在 testnet/sandbox 上验证订单生命周期（见 `docs/LIVE_READINESS.md` GAP-02），并用小资金验证。**
 
 ### 3. 启动
 

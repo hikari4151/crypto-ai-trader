@@ -63,13 +63,20 @@ async def test_partial_fill_registers_recorded_filled():
 
 
 @pytest.mark.asyncio
-async def test_create_order_failure_is_safe():
-    """② create_order 抛异常：place 返回 None、0 落库、0 注册表、余额不变。"""
+async def test_create_order_failure_registers_intent():
+    """② create_order 持续网络异常：重试耗尽 → place 返回 None、0 落库、余额不变，
+    登记 intent: 注册表（对账按 clientOrderId 认领，GAP-03）——不再静默丢单。"""
+    import ccxt
+
     db = Database("sqlite+aiosqlite:///:memory:")
     await db.init()
     ex = SimulatedExchange(start_cash=10000.0)
     ex.set_last_price(50000.0)
-    ex.fail_create_order_once = True
+
+    async def always_fail(*a, **k):
+        raise ccxt.NetworkError("simulated persistent create failure")
+    ex.create_order = always_fail
+
     om = OrderManager(db, EventBus(), paper=False)
     om.attach_exchange(ex)
     try:
@@ -77,7 +84,10 @@ async def test_create_order_failure_is_safe():
         fill = await om.place(sig, 50000.0, "dual_ma")
         assert fill is None
         assert await _rows(db) == [], "create 失败不得落库"
-        assert om._open_orders == {}, "create 失败不得登记注册表"
+        intents = [k for k in om._open_orders if k.startswith("intent:")]
+        assert len(intents) == 1, "create 失败必须登记 intent 供对账认领"
+        rec = om._open_orders[intents[0]]
+        assert rec["client_oid"].startswith("tr_"), "intent 必须带幂等 clientOrderId"
         assert ex._cash == pytest.approx(10000.0), "余额不得变动"
     finally:
         await om.close()

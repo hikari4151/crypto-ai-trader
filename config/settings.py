@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     evolve_meta_interval: int = 600             # 元策略训练间隔
     evolve_rolling_window: int = 5000             # 滚动窗口K线数
     evolve_factor_miner_episodes: int = 8         # 每轮因子挖掘训练轮数（连续训练取小值）
+    # E-EXP（2026-09 实验落地）：因子挖掘连续 OOS 被拒达到此阈值后，下一轮强制
+    # from-scratch 重训（base_agent=None）。证据：生产 9/13-9/14 连续 15+ 轮被拒
+    # （|rank_ic| 0.004~0.028<0.03）而同窗口 masked from-scratch 过门槛率 44%
+    # （.optim/exp_training/replicate_prod_windows.py）——续训循环会困在老化基线上，
+    # 周期重置可打破"永久连拒"。0=关闭。
+    evolve_factor_miner_reset_after_rejects: int = 5
     evolve_strategy_drl_episodes: int = 8          # 每轮策略 DRL 训练轮数（连续训练取小值）
     # 策略 DRL 网络规模：导出 Pine 时权重必须整段内联，故默认取「装得进 Pine」的组合。
     # 旧配置 state_window=20 + hidden=[64,64] = 21184 权重 ≈700KB 脚本 → 进化产物
@@ -161,7 +167,10 @@ class Settings(BaseSettings):
     evolve_symbols: list[str] = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # 训练标的池（留单个=固定品种训练）
     evolve_timeframe: str = ""                  # 训练时间周期（空则跟随 default_timeframe；指定如 "4h" 则独立训练周期）
     evolve_oos_min_bars: int = 250                # OOS 安检最小样本数（<此值视为无样本外证据）
-    evolve_vol_penalty: float = 20.0              # 策略 DRL 波动率惩罚（与 train_drl 默认对齐，原 0.5 偏小压不住波动）
+    evolve_vol_penalty: float = 40.0              # 策略 DRL 波动率惩罚（20→40 实验提升：
+                                             # .optim/exp_training/sweep_drl_rewards.py，30ep 双标的：
+                                             # OOS 收益 BTC -0.006→+0.0005、ETH +0.0005→+0.0057，
+                                             # 配合 reward_losing_penalty=0.5；baseline 在 BTC 实为负）
     evolve_cross_symbol_oos: bool = True          # 是否启用跨标的传导 OOS（P1-8）
     evolve_min_new_bars: int = 2                  # 增量训练触发阈值：新增 K 线达此根数才训练（1h 周期 2 根≈2 小时）
     # P0：单轮训练时间预算（秒）。>0 时训练到预算即提前结束（续训场景"学一点就停"

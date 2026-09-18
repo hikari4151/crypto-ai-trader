@@ -32,7 +32,7 @@ async def test_fetch_error_during_poll_registers_open_order():
         def __init__(self):
             self.cancel_calls = []
 
-        async def create_order(self, symbol, otype, side, amount, price=None):
+        async def create_order(self, symbol, otype, side, amount, price=None, params=None):
             return {"id": "flaky1", "status": "open", "filled": None, "amount": 0.5}
 
         async def fetch_order(self, order_id, symbol):

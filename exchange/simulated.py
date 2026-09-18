@@ -54,7 +54,7 @@ class SimulatedExchange:
         return qty * price * self._fee_rate
 
     def _fill(self, symbol: str, otype: str, side: str, amount: float,
-              price: float) -> dict:
+              price: float, client_order_id: Optional[str] = None) -> dict:
         """按成交价撮合：更新余额/持仓，返回 ccxt 风格 closed 订单。"""
         fee = self._apply_fee(amount, price)
         base, quote = self._split(symbol)
@@ -77,6 +77,7 @@ class SimulatedExchange:
                "amount": amount, "price": price, "average": price,
                "filled": amount, "status": "closed",
                "fee": {"cost": fee, "currency": quote},
+               "clientOrderId": client_order_id,
                "timestamp": time.time() * 1000}
         self._closed[oid] = rec
         return dict(rec)
@@ -93,6 +94,7 @@ class SimulatedExchange:
             self.fail_create_order_once = False
             import ccxt
             raise ccxt.NetworkError("simulated create_order failure")
+        cid = (params or {}).get("clientOrderId")
         # 触发式委托（服务端兜底止损 triggerPrice 条件单）：挂单簿等待触及，
         # 不立即撮合——否则 protective stop 一挂就市价平仓（语义错误）
         trigger = (params or {}).get("triggerPrice")
@@ -103,6 +105,7 @@ class SimulatedExchange:
                    "filled": 0.0, "status": "open",
                    "fee": {"cost": 0.0, "currency": "USDT"},
                    "triggerPrice": float(trigger),
+                   "clientOrderId": cid,
                    "timestamp": time.time() * 1000}
             self._open[oid] = rec
             return dict(rec)
@@ -114,13 +117,14 @@ class SimulatedExchange:
                    "amount": amount, "price": price, "average": None,
                    "filled": 0.0, "status": "open",
                    "fee": {"cost": 0.0, "currency": "USDT"},
+                   "clientOrderId": cid,
                    "timestamp": time.time() * 1000}
             self._open[oid] = rec
             return dict(rec)
         # 市价单：按 last_price ± slippage 立即成交
         lp = self._last_price or price or 50000.0
         exec_price = lp * (1 + self._slippage) if side == "buy" else lp * (1 - self._slippage)
-        return self._fill(symbol, otype, side, amount, exec_price)
+        return self._fill(symbol, otype, side, amount, exec_price, client_order_id=cid)
 
     async def fetch_order(self, order_id: str, symbol: str) -> dict:
         if self.fail_fetch_order_once:

@@ -43,6 +43,7 @@ class FactorSignalStrategy(Strategy):
         "stop_loss_pct": 0.03,
         "take_profit_pct": 0.06,
         "size_pct": 0.5,
+        "min_hold_bars": 0,         # 最短持仓K线数（压换手；0=旧行为不限）
         "expression": "",           # factor="custom" 时的因子表达式（沙箱白名单）
         "combo_spec": "",           # factor="combo" 时的因子组合 JSON（{key: 权重}，来自 RL 挖掘）
     }
@@ -55,12 +56,14 @@ class FactorSignalStrategy(Strategy):
         "stop_loss_pct": {"type": "float", "min": 0.001, "max": 0.2, "label": "止损比例"},
         "take_profit_pct": {"type": "float", "min": 0.001, "max": 0.5, "label": "止盈比例"},
         "size_pct": {"type": "float", "min": 0.05, "max": 1.0, "label": "下单比例"},
+        "min_hold_bars": {"type": "int", "min": 0, "max": 1000, "label": "最短持仓K线数(压换手)"},
         "expression": {"type": "str", "label": "自定义因子表达式（factor=custom 时生效）"},
         "combo_spec": {"type": "str", "label": "RL组合因子 JSON（factor=combo 时生效，如 {\"vol_ratio\":-0.04}）"},
     }
 
     def reset(self) -> None:
         self._entry = None
+        self._bars_held = 0
         self._closes: list[float] = []
         self._opens: list[float] = []
         self._highs: list[float] = []
@@ -212,16 +215,20 @@ class FactorSignalStrategy(Strategy):
         mode = p.get("mode", "trend")
 
         # ---- 持仓管理：止损止盈 ----
+        self._bars_held = (self._bars_held + 1) if position > 0 else 0
+        min_hold = int(p.get("min_hold_bars", 0) or 0)
         if position > 0 and self._entry:
             chg = (price - self._entry) / self._entry
+            # 止损永远放行（资金安全第一，不受最短持仓期约束）
             if chg <= -p["stop_loss_pct"]:
                 return Signal(symbol, "sell", 1.0, strategy=self.name, reason=f"止损 {chg:.2%}")
-            if chg >= p["take_profit_pct"]:
+            # 止盈/因子离场受 min_hold_bars 约束（压换手；0=不限，旧行为）
+            if chg >= p["take_profit_pct"] and self._bars_held >= min_hold:
                 return Signal(symbol, "sell", 1.0, strategy=self.name, reason=f"止盈 {chg:.2%}")
             # 信号反向时离场
-            if mode == "trend" and f < p["sell_threshold"]:
+            if mode == "trend" and f < p["sell_threshold"] and self._bars_held >= min_hold:
                 return Signal(symbol, "sell", 1.0, strategy=self.name, reason=f"因子转弱离场(f={f:.2f})")
-            if mode == "reversal" and f > (p["sell_threshold"] if p["sell_threshold"] else 70):
+            if mode == "reversal" and f > (p["sell_threshold"] if p["sell_threshold"] else 70) and self._bars_held >= min_hold:
                 return Signal(symbol, "sell", 1.0, strategy=self.name, reason=f"超买离场(f={f:.2f})")
             return None
 
@@ -242,3 +249,5 @@ class FactorSignalStrategy(Strategy):
 
     def on_fill(self, symbol: str, side: str, price: float) -> None:
         self._entry = price if side == "buy" else None
+        if side == "sell" or self._entry is None:
+            self._bars_held = 0

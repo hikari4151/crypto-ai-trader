@@ -140,6 +140,12 @@
   - h=1 OOS rank_IC=+0.017（valid=False）、h=4 IC=-0.018（valid=False）、**h=12 IC=-0.031/ICIR=1.15（valid=True）**；
   - 但**幸存者 0**：h=1 的候选搜索窗虽 +25%~+76%，留出窗仅 **2~4 笔**（成交样本远不足）；h=4/12 因子在测试阈值下**0 成交**（z 分布随周期变化，阈值未迁移）。
 - **策略搜索最终结论（P0-P16）**：现有策略执行器参数空间（P0-P3）、反转执行器（P5）、朴素阈值（P7）、DRL/等权因子 + 限价 maker（P9-P14）、长历史多周期重挖（P16）、跨品种多空（P15）**均未通过 GAP-01 全部门槛**；**跨品种一致性、样本量（≥30 笔）、保守撮合下 5x 成本仍正，三者从未同时满足**。继续在现有执行器/因子库里调参的边际收益已接近零，建议：或换数据/资产类别（资金费率、基差、链上、更高频），或先接受“暂无 edge”把精力放在实盘工程化。
+- **P18-P20 换数据源：资金费率（funding rate）实测（2026-09-18）**：
+  - P18（`.optim/p18_funding_fetch.py`）：从 Binance USDT-M 永续拉取 BTC/ETH/SOL 资金费率全历史，各 **3800 条（2023-04-01 ~ 2026-09-18，8h 一根）**，与 30k 根 1h K 线全段对齐；数据存 `.optim/funding/*.csv`。（修掉一个分页方向 bug：`since` 翻页应取 `batch[-1]` 往后，误用 `batch[0]` 只拿到第一页 1000 条。）
+  - P19（`.optim/p19_funding_factor_report.md`）：费率水平/90天z/变化/极端分位 4 因子 × 3 标的 × h=1/6/24，36 项检查**仅 2 项过质量门且方向相反**（ETH f_level h24 IC=-0.063 vs SOL +0.045）。
+  - P20（`.optim/p20_funding_8h_report.md`）：排除 ffill 台阶稀释，改在 **8h 结算时点**采样、标签取 8h/24h 收益，8 个组合 **0 个通过**（无不满足跨品种同号）。
+  - **关键观察**：ETH 与 SOL 的符号**系统性相反**（ETH：费率越高→未来跌，符合经典反转逻辑；SOL：费率越高→未来涨，样本期大涨特征），说明该信号不是稳定的市场结构；全部组合 ICIR 多为负或近零（IC 时序方向不稳）。
+  - **结论**：资金费率在所测样本/口径下**不构成跨品种稳健的 alpha**，不足以支撑实盘；若继续这条线，应转向**资金费率套利（赚费率本身，而非预测价格）**或引入**基差/持仓量**等组合信息，而不是单独用费率预测方向。
 
 ### GAP-02：从未在真实交易所 API 上验证订单
 
@@ -318,6 +324,9 @@
 | `tests/test_protective_stop.py::test_adopt_sees_okx_algo_orders` | 重启收养必须能看到 OKX 算法单（防重复挂单） |
 | `web/static/index.html`（AI 设置） | 修掉"已保存自定义模型被覆盖成 gpt"：加载守卫 `aiSettingsLoaded` + 非破坏性回填 |
 | `tests/test_ai_settings_persist.py` | 3 例：后端回显 KV 值/保存读回/前端不再破坏性覆盖 |
+| `.optim/funding/*.csv` | P18 资金费率数据：BTC/ETH/SOL 各 3800 条（8h，2023-04~2026-09） |
+| `.optim/p19_funding_factor_report.md` | P19 资金费率因子（1h ffill）：36 项仅 2 项过门且方向相反 |
+| `.optim/p20_funding_8h_report.md` | P20 8h 结算时点评估：8 个组合 0 通过（ETH/SOL 符号系统性相反） |
 | `core/logging_config.py` | GAP-07④：交易事件独立 `trading.log`（engine.*/core.bus），与 HTTP 访问日志分离 |
 | `tests/test_logging_split.py` | 2 例：交易事件隔离 + trader.log 不丢信息 + 重复 setup 不叠加 handler |
 | `tests/test_auto_start_restart_drill.py` | GAP-07②：真实 lifespan + trading_auto_start 断电恢复演练（自启/FIFO/风控冷却） |

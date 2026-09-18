@@ -3949,6 +3949,8 @@ const app = createApp({
     const ai = reactive({provider:'openai', base_url:'', model:'', api_key:'', has_api_key:false, api_key_masked:'', fetchingModels:false});
     // 拉取到的服务端模型列表（Cherry Studio 式：datalist 动态候选，空则用静态兜底）
     const aiModelListOptions = ref([]);
+    // 已加载过保存的 AI 配置（防止程序化赋值 provider 时把自定义模型覆盖成默认 gpt）
+    const aiSettingsLoaded = ref(false);
     const aiFeatureParams = ref(null);
     const autoAnalysis = ref(true);
     const aiMsg = ref(''); const aiMsgOk = ref(true); const aiTesting = ref(false);
@@ -5430,6 +5432,10 @@ const app = createApp({
       try {
         const d = await api('/ai/settings');
         Object.assign(ai, {provider:d.provider, base_url:d.base_url, model:d.model, has_api_key:d.has_api_key, api_key_masked:d.api_key_masked});
+        // 标记"已加载保存配置"：此后 watch(ai.provider) 才允许按提供商填默认模型。
+        // 否则程序化赋值 provider 会触发 watch，把刚读到的自定义模型覆盖成 gpt-4o-mini
+        //（历史 bug：界面显示 gpt 而不是已保存的 agnes-2.5-flash）
+        aiSettingsLoaded.value = true;
         aiFeatureParams.value = d.feature_params || null;
         try { const t = await api('/ai/auto-analysis-toggle'); autoAnalysis.value = t.enabled; } catch(e) {}
       } catch(e) {}
@@ -5703,8 +5709,13 @@ const app = createApp({
         const d = await api('/ai/models', {method:'POST', body:JSON.stringify({
           provider: ai.provider, base_url: ai.base_url, api_key: ai.api_key||''})});
         aiModelListOptions.value = d.models || [];
-        // 自动选中第一个（当前模型为空或不在列表时）
-        if (d.models && d.models.length && (!ai.model || !d.models.includes(ai.model))) ai.model = d.models[0];
+        // 只在模型为空时自动选中第一个；**绝不覆盖**已保存/已填写的模型名
+        //（历史 bug：自定义模型不在服务商 /models 列表里时被替换成列表第一个，
+        //  界面看起来像"配置没保存"）
+        if (d.models && d.models.length && !ai.model) ai.model = d.models[0];
+        if (d.models && d.models.length && ai.model && !d.models.includes(ai.model)) {
+          toast('当前模型 '+ai.model+' 不在服务商返回列表中，已保留你的配置','info');
+        }
         toast('已获取 '+d.models.length+' 个可用模型','ok');
       } catch(e){ toast('获取模型失败：'+(e.message||e),'error'); }
       finally{ ai.fetchingModels = false; }
@@ -5721,9 +5732,12 @@ const app = createApp({
     const AI_DEFAULT_MODELS = {openai:'gpt-4o-mini', deepseek:'deepseek-chat', custom:''};
     watch(()=>ai.provider, (p, old)=>{
       if (p===old) return;
+      // 程序化加载阶段（loadAiSettings 先赋 provider 再赋 model）不得回填默认值，
+      // 否则已保存的自定义模型会被覆盖成 gpt-4o-mini（历史 bug）
+      if (!aiSettingsLoaded.value) return;
       const d = AI_DEFAULT_MODELS[p];
-      if (d) ai.model = d;
-      else if (!ai.model) ai.model = 'gpt-4o-mini';
+      if (d) ai.model = d;                       // 用户主动切换提供商 → 给该商默认模型
+      else if (!ai.model) ai.model = '';         // 自定义：模型空着，等用户填写/拉取
     });
     // 策略代码页签切换或活动策略变化时，自动同步右侧行情图表回放
     watch(activeSpec, (spec) => {

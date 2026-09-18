@@ -112,7 +112,9 @@
 - P4 库因子筛选（`.optim/p4_factor_report.md`）：26 个库因子 × BTC/ETH/SOL 1h × h=1/6/24，OOS 后 30% 分窗 + 跨品种同号门。**19 个因子-周期组合通过门，全部为稳定负 IC（反转信号）**：如 trend_regime h24 mean IC=-0.072/ICIR=-0.65、obv_slope h1 IC=-0.054/ICIR=-0.89、rsi_14 h1 IC=-0.036/ICIR=-1.68。
 - P5 反转执行器验证（`.optim/p5_reversal_report.md`）：用正确量纲（bb_pos 0-1、rsi_osc ±40 等）把负 IC 因子转成 factor_signal reversal 策略，走 P2 协议 → **搜索窗 0 候选**：负 IC 未能通过当前执行器转成交易级正收益（止损/止盈/阈值实现损耗）。
 - P6 DRL 因子挖掘（进行中，`.optim/p6_drl_miner_report.json`）：本地 PPO 自动选因子组合，绕过 LLM。
-- ⚠️ AI 通道阻塞（2026-09-18 复测）：代理已通（OpenAI 走代理可达），但软件内配置的 AI key 在 **OpenAI / DeepSeek / SiliconFlow 三处均返回 401「API Key 无效」**——需要更换有效 AI key；本地 DRL/因子挖掘不受影响。
+- ✅ **AI 通道已可用（2026-09-18 更正）**：软件内保存的是**自定义兼容接口**（`provider=custom`、`base_url=https://api.agnes-ai.cn/v1`、`model=agnes-2.5-flash`），实测 `POST /api/ai/test` 返回「连接成功，模型回复: 正常」、`/models` 返回 agnes-2.0/2.5/3.0 系列。
+  - 之前的「AI key 401」是**误判**：我用 `config.settings` 里的默认 `ai_base_url`（api.openai.com）去测，而没走 DB 里保存的自定义地址。
+  - 🔴 **同时修掉一个真实前端 bug**：AI 设置页会把**已保存的自定义模型覆盖成默认 gpt**——两处元凶：① 提供商 watch 在程序化加载阶段回填默认模型（`gpt-4o-mini`）；② 「获取模型列表」时若保存的模型不在服务商返回列表里，直接替换成列表第一个（Node 复刻验证：场景 A 旧逻辑 `agnes-2.5-flash → gpt-4o-mini`，修复后保持 `agnes-2.5-flash`）。已加守卫 `aiSettingsLoaded` + 非破坏性回填，并加回归测试。
 
 **✅ P6/P7 DRL 因子挖掘实测（2026-09-18）**：
 
@@ -314,6 +316,8 @@
 | `exchange/manager.py`（fetch_algo_open_orders） | 修复 bug#2：OKX 条件单可见性（统一 open orders 不含算法单） |
 | `tests/test_exchange_manager_algo.py` | 算法单解析 + 非 OKX 安全降级 |
 | `tests/test_protective_stop.py::test_adopt_sees_okx_algo_orders` | 重启收养必须能看到 OKX 算法单（防重复挂单） |
+| `web/static/index.html`（AI 设置） | 修掉"已保存自定义模型被覆盖成 gpt"：加载守卫 `aiSettingsLoaded` + 非破坏性回填 |
+| `tests/test_ai_settings_persist.py` | 3 例：后端回显 KV 值/保存读回/前端不再破坏性覆盖 |
 | `core/logging_config.py` | GAP-07④：交易事件独立 `trading.log`（engine.*/core.bus），与 HTTP 访问日志分离 |
 | `tests/test_logging_split.py` | 2 例：交易事件隔离 + trader.log 不丢信息 + 重复 setup 不叠加 handler |
 | `tests/test_auto_start_restart_drill.py` | GAP-07②：真实 lifespan + trading_auto_start 断电恢复演练（自启/FIFO/风控冷却） |

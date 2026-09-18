@@ -38,6 +38,20 @@ class RedactFilter(logging.Filter):
         return True
 
 
+# 交易事件 logger 前缀：下单/成交/撤单/对账/风控熔断/保护止损（GAP-07 日志分级）
+_TRADING_LOGGER_PREFIXES = ("engine.",)
+_TRADING_LOGGER_EXACT = ("core.bus",)
+
+
+class TradingEventFilter(logging.Filter):
+    """只放行交易事件日志（engine.* / core.bus），把 HTTP 访问日志挡在 trading.log 外。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        name = record.name or ""
+        return (name.startswith(_TRADING_LOGGER_PREFIXES)
+                or name in _TRADING_LOGGER_EXACT)
+
+
 def setup_logging(level: str = "INFO", log_dir: str = "./data/logs") -> None:
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter(
@@ -59,7 +73,14 @@ def setup_logging(level: str = "INFO", log_dir: str = "./data/logs") -> None:
     handler.setFormatter(fmt)
     console = logging.StreamHandler()
     console.setFormatter(fmt)
-    for h in (handler, console):
+    # 交易事件单独成文件（GAP-07④）：运维只需盯 trading.log 就能看到
+    # 下单/成交/撤单/对账差异/风控熔断，不被 HTTP 轮询日志淹没
+    trading_handler = RotatingFileHandler(
+        Path(log_dir) / "trading.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    trading_handler.setFormatter(fmt)
+    trading_handler.addFilter(TradingEventFilter())
+    for h in (handler, console, trading_handler):
         h._trader_handler = True
         h.addFilter(RedactFilter())
         root.addHandler(h)

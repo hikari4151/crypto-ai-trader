@@ -155,8 +155,13 @@
 3. 对 Binance 与 OKX 各跑一遍（两个不同交易所，验证 ccxt 参数兼容性），覆盖：市价单、限价单、触发式止损单（protective stop 的 `triggerPrice` 参数）。
 4. 测试中记录并归档真实网络时延（下单→响应 RTT），与本地 p95 分开统计。
 
-**🚧 执行状态（2026-09-18）**：`exchange/manager.py` 已支持 `testnet=True`（ccxt `set_sandbox_mode`，不支持即显式报错）；已提供冒烟脚本 `.optim/p1_testnet_smoke.py`（连通性/余额/市场规格 + `--place-order` 限价挂撤单演练）。**待办：用户提供 Binance/OKX testnet 凭据实际跑一遍，并把网络时延归档。**
-> ⚠️ 环境证据（2026-09-18）：`okx` 公共行情 `load_from_exchange("okx","BTC/USDT","1h")` 实测 **RequestTimeout**；本机 13 个常见代理端口（7890/7891/7892/7897/7898/1080/10808/10809/8888/33210/2080/2081/8080）探测 **全部关闭**。OKX 的 testnet/live 验证前必须先启动本地代理并让 `proxy_url` 可达，否则即使配了密钥也连不上。
+**🚧 执行状态（2026-09-18）**：`exchange/manager.py` 已支持 `testnet=True`（ccxt `set_sandbox_mode`，不支持即显式报错）；已提供冒烟脚本 `.optim/p1_testnet_smoke.py` 与运行器 `.optim/p1b_okx_testnet_run.py`（从 DB 读密钥、不打印明文）。
+- ✅ **代理已通**：用户开启 VPN 后本机 7890 端口可用，应用自动探测生效（`resolved_proxy=http://127.0.0.1:7890`）；OKX 公共行情实测 120 根 K 线拉取成功、sandbox 客户端与市场规格读取成功。
+- ❌ **下单鉴权失败（实盘与模拟盘均失败）**：`okx {"msg":"API key doesn't exist","code":"50119"}`。
+  - 脱敏诊断（2026-09-18）：api_key len=36、secret len=32、passphrase len=13，**均无首尾空白**，格式与 OKX 规范一致 → 不是粘贴/截断问题；
+  - `testnet=True`（模拟盘）与 `testnet=False`（实盘只读 `fetch_balance`）**两种模式都返回 50119** → 该 key 在 OKX 侧不被识别（疑似已删除/属其他账号/未绑定当前出口 IP）。
+  - 处理：在 OKX 重新创建 API Key（**模拟盘验证请用「模拟交易」环境创建的 key**），确认 IP 白名单包含当前出口 IP，然后在「实盘启动」页重新保存凭据。
+- 待办：密钥可用后运行 `.venv/Scripts/python .optim/p1b_okx_testnet_run.py --place-order` 完成 GAP-02 验收 2/3（下单→撤单→复核 + 记录网络时延）。
 
 ### GAP-03：下单无幂等、创建失败不重试
 
@@ -231,6 +236,10 @@
 2. 组合层风控：总仓位/总每日亏损/单标的占比有独立检查。
 3. `run.py portfolio` 的组合回测结果可作为多标的策略上线前验证输入。
 
+**🚧 执行状态（2026-09-18）**：
+- **P15 跨品种多空研究证据（`.optim/p15_cross_section_report.md`）**：10 个主流币 1h 共同窗口 14176 根，P6 等权多因子做截面多空（low/high × k=1/2，含费用与5x费用），**OOS 净收益全负**（best high_k1 = -5.9e-05/bar，胜率50.8%），累计 -27%~-87%。
+- 结论：**多标的多空组合目前也没有可用的因子 edge**；GAP-06 建多标的引擎的价值需等到有组合级 alpha 证据后再投入，否则是给负期望系统加复杂度。建议先解决代理→testnet 实测与基线提交，再回头找组合级因子。
+
 ### GAP-07：运维与恢复证据不足
 
 **现状证据**：
@@ -248,7 +257,11 @@
 3. 修复 README 与实际的 live 配置入口不一致。
 4. 建立运行日志分级：交易事件（下单/成交/撤单/对账差异/熔断）与普通 HTTP 访问日志分离（当前 `data/svc_8001.log` 全是轮询 GET，交易事件混在业务日志，可观测性差）。
 
-**🚧 执行状态（2026-09-18）**：README 实盘入口描述已修正（指向实盘启动页/交易所凭据入口，并提示 testnet 先验证）。**待办：commit 基线快照、`trading_auto_start=true` 断电恢复演练、日志分级。**
+**✅ 执行状态（2026-09-18，已闭环）**：
+- ① **基线快照已提交 `7be56a2`**（23 文件；含 LIVE_READINESS、GAP-03/05 代码与测试）。
+- ② **断电恢复演练已完成**：`tests/test_auto_start_restart_drill.py` 用真实 lifespan + `trading_auto_start=true` 跑两段启停，验证重启后自动拉起引擎、FIFO 成本队列从 Trade 回放、风控冷却跨重启仍生效。
+- ③ README 实盘入口描述已修正（指向实盘启动页/交易所凭据入口 + testnet 提示）。
+- ④ **交易事件日志分级已完成**：`core/logging_config.py` 新增 `data/logs/trading.log`（只收 `engine.*` / `core.bus` 的下单/成交/撤单/对账/熔断事件），与 HTTP 访问日志分离；`tests/test_logging_split.py` 锁住行为（HTTP 日志不得进 trading.log、trader.log 仍保留全量、重复 setup 不叠加 handler）。
 
 ---
 
@@ -284,6 +297,10 @@
 | `.optim/p12_report.md` | P12 更长历史：DRL 权重过拟合（邻域 0/27）；等权全正但仅18笔 |
 | `.optim/p13_report.md` | P13 等权提频：7 个幸存者（≥30笔、5x正；最优留出+15.4%）；邻域 11/27、SOL 负 |
 | `.optim/p14_report.md` | P14 引擎 partial：等权最优配置留出转负(-2.7%)，保守口径证伪 |
+| `.optim/p15_cross_section_report.md` | P15 跨品种多空：10 币 1h 截面多空 OOS 净收益全负（无组合级 edge） |
+| `core/logging_config.py` | GAP-07④：交易事件独立 `trading.log`（engine.*/core.bus），与 HTTP 访问日志分离 |
+| `tests/test_logging_split.py` | 2 例：交易事件隔离 + trader.log 不丢信息 + 重复 setup 不叠加 handler |
+| `tests/test_auto_start_restart_drill.py` | GAP-07②：真实 lifespan + trading_auto_start 断电恢复演练（自启/FIFO/风控冷却） |
 | `strategies/factor_signal.py` | 新增 min_hold_bars 参数（默认0=兼容旧行为）；`tests/test_factor_signal_min_hold.py` 4 例 |
 | `engine/order_manager.py` | live 下单全流程；普通订单带 clientOrderId、create 重试、intent 登记、对账认领（GAP-03 已闭环） |
 | `engine/trading_engine.py` | live/simulated 启动装配、每日对账、断链平仓、`close_all_positions` 一键清仓、单 symbol 引擎 |

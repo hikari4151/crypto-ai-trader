@@ -46,6 +46,12 @@ class OrderManager:
         self.protective: Optional[ProtectiveStopManager] = None
         # 策略当前止损比例来源，由引擎注入（切换策略无需重建订单管理器）
         self._stop_pct_source = None
+        # 告警中心（引擎注入；为 None 时静默，不影响订单主链路）
+        self._monitor = None
+
+    def set_monitor(self, monitor) -> None:
+        """注入统一告警中心（引擎启动时调用）。"""
+        self._monitor = monitor
 
     def _apply_fifo(self, symbol: str, side: str, qty: float, price: float) -> Optional[float]:
         """实盘 FIFO 成本队列记账：buy 追加 lot，sell FIFO 摊销并返回成本价。
@@ -243,6 +249,11 @@ class OrderManager:
         }
         log.warning("[order] create 网络异常，登记意图待对账认领 clientOrderId=%s %s %s qty=%s",
                     client_oid, signal.side, signal.symbol, qty)
+        if self._monitor is not None:
+            self._monitor.alert("CRITICAL", "order_create_lost",
+                                f"下单响应丢失，已登记意图待对账认领：{signal.side} {signal.symbol}",
+                                key=f"{signal.symbol}:{client_oid}",
+                                client_oid=client_oid, qty=qty, price=price)
         self._ensure_reconcile()
 
     async def _reconcile_loop(self) -> None:

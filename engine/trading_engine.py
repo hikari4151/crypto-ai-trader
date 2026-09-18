@@ -39,6 +39,10 @@ class TradingEngine:
         self.paper = settings.paper_trading
         self.running = False
         self._tasks: list[asyncio.Task] = []
+        # 统一告警中心（GAP-07 运维）：断链/下单失败/对账差异/风控熔断/无保护持仓
+        # 汇聚成分级告警 → data/logs/alerts.log + SYSTEM 事件（前端可见）
+        from engine.monitor import AlertMonitor
+        self.monitor = AlertMonitor(bus, log_dir=settings.log_dir)
         self.exchange_id = settings.default_exchange
         self.symbol = settings.default_symbol
         self.timeframe = settings.default_timeframe
@@ -201,6 +205,7 @@ class TradingEngine:
                 self.order_manager.attach_exchange(self.exchange)
                 self.order_manager.set_stop_pct_source(
                     lambda: getattr(self.strategy, "params", {}).get("stop_loss_pct"))
+                self.order_manager.set_monitor(self.monitor)
                 self.portfolio = PortfolioManager(self.db, self.bus, False, None, self.exchange)
                 log.info("[engine] 模拟实盘：本地撮合，订单走 _place_live 全状态机")
             # 读取交易所密钥（解密失败降级为空串，避免纸面/模拟模式因密钥损坏无法启动）
@@ -225,6 +230,7 @@ class TradingEngine:
                 # 兜底止损的触发深度跟随策略软止损（热更新参数后自动生效）
                 self.order_manager.set_stop_pct_source(
                     lambda: getattr(self.strategy, "params", {}).get("stop_loss_pct"))
+                self.order_manager.set_monitor(self.monitor)
                 self.portfolio = PortfolioManager(self.db, self.bus, False, None, self.exchange)
             elif mode == "simulated" and api_key and secret:
                 # 注：simulated 已在上面分支创建 SimulatedExchange（本地撮合），
@@ -360,6 +366,11 @@ class TradingEngine:
                 out["market_stale_sec"] = -1 if age == float("inf") else int(age)
                 out["market_stale_threshold"] = int(t)
         except Exception:  # noqa: BLE001 观测字段失败不影响主状态
+            pass
+        # 告警摘要（前端可展示最近告警，运维不必登服务器看日志）
+        try:
+            out["alerts"] = self.monitor.summary()
+        except Exception:  # noqa: BLE001
             pass
         return out
 
@@ -662,6 +673,8 @@ class TradingEngine:
                 await self.portfolio.snapshot()
                 await self._daily_reconcile_if_due()   # T2
                 await self._check_market_stale()        # T5
+                # 统一告警巡检（断链/无保护持仓/风控冷却/总线降级）
+                await self.monitor.health_check(self)
             except Exception as e:  # noqa: BLE001
                 log.warning("[portfolio] 快照失败: %s", e)
             await asyncio.sleep(15)

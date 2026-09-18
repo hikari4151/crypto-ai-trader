@@ -324,6 +324,11 @@
 - ② **断电恢复演练已完成**：`tests/test_auto_start_restart_drill.py` 用真实 lifespan + `trading_auto_start=true` 跑两段启停，验证重启后自动拉起引擎、FIFO 成本队列从 Trade 回放、风控冷却跨重启仍生效。
 - ③ README 实盘入口描述已修正（指向实盘启动页/交易所凭据入口 + testnet 提示）。
 - ④ **交易事件日志分级已完成**：`core/logging_config.py` 新增 `data/logs/trading.log`（只收 `engine.*` / `core.bus` 的下单/成交/撤单/对账/熔断事件），与 HTTP 访问日志分离；`tests/test_logging_split.py` 锁住行为（HTTP 日志不得进 trading.log、trader.log 仍保留全量、重复 setup 不叠加 handler）。
+- ⑤ **统一告警中心已完成（2026-09-18，GAP-07 追加项）**：新增 `engine/monitor.py`——把散落的异常汇聚成分级告警，解决"没人看日志 = 没有告警"。
+  - **巡检项**：行情断流（hub 无新K线）、**持仓无兜底止损**（实盘最危险的静默状态）、风控冷却中、事件总线 handler 连续失败；另有下单响应丢失（order_manager intent 登记时触发）。
+  - **出口**：`data/logs/alerts.log`（结构化 JSON，运维可采集）+ SYSTEM 事件（前端可见）+ `GET /api/trading/alerts` 与 `status.alerts`。
+  - **工程性质**：同 (kind,key) 在 5 分钟去重窗口内只报一次（抑制次数累计可见，防刷屏）；巡检自身异常一律不抛出（不影响引擎周期循环）。
+  - **验证**：`tests/test_monitor_alerts.py`（5 例：去重/落盘/四类巡检/不抛异常）；**真实运行验证**——启动引擎（simulated, ETH/USDT 5m）后行情未接入，自动产生 `{"level":"CRITICAL","kind":"market_stale","message":"行情断流：ETH/USDT 5m 已 ∞ 秒无新K线"}` 并同时出现在 `alerts.log` 与 `/api/trading/alerts`。
 
 ---
 
@@ -384,6 +389,9 @@
 | `core/logging_config.py` | GAP-07④：交易事件独立 `trading.log`（engine.*/core.bus），与 HTTP 访问日志分离 |
 | `tests/test_logging_split.py` | 2 例：交易事件隔离 + trader.log 不丢信息 + 重复 setup 不叠加 handler |
 | `tests/test_auto_start_restart_drill.py` | GAP-07②：真实 lifespan + trading_auto_start 断电恢复演练（自启/FIFO/风控冷却） |
+| `engine/monitor.py` | GAP-07⑤：统一告警中心（断链/无保护持仓/风控冷却/总线降级 → alerts.log + 事件 + API） |
+| `tests/test_monitor_alerts.py` | 5 例：去重/结构化落盘/四类巡检/巡检不抛异常 |
+| `GET /api/trading/alerts` | 告警摘要接口；`status.alerts` 同步暴露（真实运行已验证 CRITICAL 断链告警） |
 | `strategies/factor_signal.py` | 新增 min_hold_bars 参数（默认0=兼容旧行为）；`tests/test_factor_signal_min_hold.py` 4 例 |
 | `engine/order_manager.py` | live 下单全流程；普通订单带 clientOrderId、create 重试、intent 登记、对账认领（GAP-03 已闭环） |
 | `engine/trading_engine.py` | live/simulated 启动装配、每日对账、断链平仓、`close_all_positions` 一键清仓、单 symbol 引擎 |

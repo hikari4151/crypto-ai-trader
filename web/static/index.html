@@ -1454,6 +1454,11 @@
       <span v-if="marketStale && engineStatus==='running'" class="pill" style="background:rgba(255,69,58,.16);color:#ff453a">
         <span class="status-dot dot-off"></span>行情断流{{marketStaleSec!=null&&marketStaleSec>=0?(' '+marketStaleSec+'s'):''}}
       </span>
+      <!-- 运行告警摘要（engine.monitor）：无保护持仓/下单丢失/风控冷却等，鼠标悬停看最近明细 -->
+      <span v-if="alertCritical>0" class="pill" style="background:rgba(255,69,58,.16);color:#ff453a"
+            :title="(alertRecent||[]).slice(0,5).map(a=>a.ts+' '+a.message).join('\n')">
+        <span class="status-dot dot-off"></span>告警 {{alertCritical}}
+      </span>
       <span class="pill hide-narrow" :class="liveStatus?.mode==='live'?'red':liveStatus?.mode==='simulated'?'purple':'blue'">{{liveStatus?.mode==='live'?'实盘':liveStatus?.mode==='simulated'?'模拟实盘':'纸面模拟'}}</span>
     </div>
   </div>
@@ -3758,6 +3763,9 @@ const app = createApp({
     const engineStatus = ref('stopped');
     const marketStale = ref(false);
     const marketStaleSec = ref(null);
+    // 运行告警（engine.monitor 摘要）：最近告警列表 + CRITICAL 计数
+    const alertRecent = ref([]);
+    const alertCritical = ref(0);
     const portfolio = ref(null);
     const perfSummary = ref(null);
     const trades = ref([]);
@@ -5396,6 +5404,10 @@ const app = createApp({
         engineStatus.value = st.running?'running':'stopped'; currentStrategy.value = st.strategy;
         marketStale.value = !!st.market_stale;
         marketStaleSec.value = (st.market_stale_sec!=null)?st.market_stale_sec:null;
+        // 统一告警中心摘要（GAP-07 运维）：最近告警 + CRITICAL 计数，前端直接展示
+        const al = st.alerts || {};
+        alertRecent.value = al.recent || [];
+        alertCritical.value = al.critical_recent || 0;
         portfolio.value = p;
         perfSummary.value = ps;
         trades.value = tr;
@@ -6693,7 +6705,7 @@ const app = createApp({
       analysis, analysisLoading, currentStrategy, strategyList, filteredStrategyList, paramSchema, strategyParams, riskRules, riskCooldown, optLogs, analyses, clearCooldown,
       analysisFull, openAnalysisFull, openAnalysisHistory, analysisPreview,
       perfGroups, loadPerformance, exportPerformance,
-      dashboardTab, dashboardSearch, dashboardRows, dashboardRisk,
+      dashboardTab, dashboardSearch, dashboardRows, dashboardRisk, alertRecent, alertCritical,
       riskGroups: RISK_GROUPS, riskDirtySet, riskRowCls, riskOff, riskSub, revertRisk,
       ai, aiMsg, aiMsgOk, aiTesting, aiFeatureParams, featureParamLabel, autoAnalysis, toggleAutoAnalysis, exKeys, notifyCfg, notifyTesting, notifyMsg, notifyMsgOk, loadNotifyConfig, saveNotifyConfig, testNotify,
       bt, btRunning, btResult, btHistory, btHistoryGroups, btHistoryLoading, btHistoryError, loadBtHistory, btLive, btStep, btGoto, openBtResult, btMetrics, btAdvice, btLegend, btRange, setBtRange, btTradeSearch, btTradeShowAll, btTradesAll, btTradesShown, exportBtTradesCsv, btLocalCoverage, btPlans, saveBtPlan, applyBtPlan, delBtPlan,

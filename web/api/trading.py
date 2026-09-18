@@ -47,6 +47,19 @@ async def status(engine=Depends(get_engine)):
     return engine.status()
 
 
+@router.get("/alerts")
+async def alerts(engine=Depends(get_engine)):
+    """运行告警摘要（GAP-07 运维）：最近告警 + 分类计数 + CRITICAL 数。
+
+    数据源：engine.monitor（断链/下单响应丢失/无保护持仓/风控冷却/总线降级）。
+    完整历史见 data/logs/alerts.log（结构化 JSON，可被运维采集）。
+    """
+    mon = getattr(engine, "monitor", None)
+    if mon is None:
+        return {"counts": {}, "recent": [], "critical_recent": 0}
+    return mon.summary()
+
+
 @router.get("/strategies")
 async def strategies(engine=Depends(get_engine)):
     # 内置 + 动态全量返回：回测/实盘下拉与「一键应用内置策略」流程都依赖本列表。

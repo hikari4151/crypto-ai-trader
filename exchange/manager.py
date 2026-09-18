@@ -114,6 +114,41 @@ class ExchangeManager:
     async def fetch_positions(self, symbols: Optional[list] = None) -> list:
         return await self._require_private().fetch_positions(symbols)
 
+    async def fetch_algo_open_orders(self, symbol: Optional[str] = None) -> list:
+        """条件单/算法单（OKX 的 trigger/conditional/oco 等）——ccxt 统一 `fetch_open_orders`
+        **不包含**它们（实测：OKX 兜底止损挂单成功但 `fetch_open_orders` 返回 0 条）。
+
+        影响：`ProtectiveStopManager.adopt()` 重启收养、`_reconcile_once()` 对账都会
+        误判“止损单不存在” → 重复挂单/裸奔窗口。此方法把 algo 挂单补进可见范围。
+
+        其他交易所无对应实现时返回 []（不影响既有路径）。
+        """
+        if self.exchange_id != "okx" or self._private is None:
+            return []
+        out: list = []
+        for ot in ("trigger", "conditional", "oco"):
+            try:
+                r = await self._private.private_get_trade_orders_algo_pending(
+                    {"instType": "SPOT", "ordType": ot})
+            except Exception as e:  # noqa: BLE001  # 单个 ordType 不支持不影响其它
+                log.debug("[%s] algo 挂单查询失败 ordType=%s: %s", self.exchange_id, ot, e)
+                continue
+            for it in (r or {}).get("data") or []:
+                inst = str(it.get("instId") or "")
+                sym = inst.replace("-", "/") if inst else ""
+                if symbol and sym and sym != symbol:
+                    continue
+                out.append({
+                    "id": str(it.get("algoId") or ""),
+                    "clientOrderId": it.get("algoClOrdId") or it.get("clOrdId") or "",
+                    "symbol": sym, "side": it.get("side"),
+                    "amount": float(it.get("sz") or 0.0), "remaining": float(it.get("sz") or 0.0),
+                    "status": "open", "type": "trigger",
+                    "triggerPrice": it.get("slTriggerPx") or it.get("triggerPx") or "",
+                    "info": it,
+                })
+        return out
+
     # ---------- 市场规格（下单前精度截断 / 最小名义额校验用） ----------
     def _spec_client(self) -> Any:
         client = self._private or self._public

@@ -209,8 +209,13 @@ class OrderManager:
 
     @staticmethod
     def _new_client_oid() -> str:
-        """普通订单幂等标识：每次下单尝试生成一次，重试/对账认领都复用同一 id。"""
-        return f"tr_{uuid.uuid4().hex[:24]}"
+        """普通订单幂等标识：每次下单尝试生成一次，重试/对账认领都复用同一 id。
+
+        必须**纯字母数字**（无下划线/连字符）：OKX 的 clOrdId 只允许 1–32 位字母数字，
+        带下划线会被拒（实测 `51000 Parameter clOrdId error`）；Binance 允许 ≤36 位。
+        "tr"+24 位 hex = 26 位，两端都安全。
+        """
+        return f"tr{uuid.uuid4().hex[:24]}"
 
     def _register_open_order(self, oid: str, signal: Signal, qty: float, limit_price: float,
                              protective: bool = False, client_oid: Optional[str] = None) -> None:
@@ -482,6 +487,16 @@ class OrderManager:
             log.warning("[order] 数量精度换算失败（原样下单）%s: %s", symbol, e)
             return qty
         if side == "sell":
+            qty_min = float(((mkt.get("limits") or {}).get("amount") or {}).get("min") or 0.0)
+            # 粉尘仓守卫（实盘证据 2026-09-18）：按最小额买入后手续费以 base 扣除，
+            # 持仓 0.00000999 < min_amount 0.00001 → 市价平仓被 OKX 拒 51020，
+            # 且反复重试都失败。此时明确报错并跳过，而不是每根K线打一次无效下单。
+            # 仅当"原始数量本身"低于交易所最小量才判定为粉尘；若只是精度截断为 0
+            # （原始量 ≥ min），仍按旧行为原样发出，交由交易所裁决。
+            if qty_min > 0 and qty < qty_min:
+                log.error("[order] 粉尘仓：卖出量 %s 低于交易所最小下单量 %s（%s），"
+                          "无法平仓，请合并/兑换小额资产后处理", qty, qty_min, symbol)
+                return 0.0
             return rounded if rounded > 0 else qty
         cost_min = float(((mkt.get("limits") or {}).get("cost") or {}).get("min") or 0.0)
         if rounded <= 0 or (cost_min > 0 and price > 0 and rounded * price < cost_min):

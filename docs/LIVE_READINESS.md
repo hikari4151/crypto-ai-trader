@@ -163,8 +163,13 @@
 - ~~❌ 下单鉴权失败（实盘与模拟盘均失败）：`okx 50119 API key doesn't exist`~~ → **已由用户更换新 key 解决**（旧 key 过期）。
 - ✅ **实盘鉴权已通（2026-09-18 复测）**：新 key `42c4****6eab`（len=36）实盘只读 `fetch_balance` 成功，账户非零余额 `{'USDT': 1.0}`；BTC/USDT 实时价 78097、规格 min_amount=1e-05 BTC（最小名义 ≈ **0.78 USDT**）。
 - ⚠️ **沙箱环境不匹配**：同一把实盘 key 走 `testnet=True` 返回 `50101 APIKey does not match current environment`（预期：实盘 key 不能用于模拟盘）。**沙箱验证需要单独在 OKX「模拟交易」环境创建 demo key。**
-- ⚠️ **实盘下单余额过小**：账户仅 1.0 USDT，接近最小名义 0.78 USDT（加手续费缓冲后基本不可用）——真实下单演练需要先入金或改用模拟盘。
-- 待办：①（推荐）创建 OKX 模拟盘 demo key → 运行 `.venv/Scripts/python .optim/p1b_okx_testnet_run.py --place-order` 完成下单→撤单→复核；②或用实盘 key 在最小额下单演练（需用户明确同意 + 入金）。
+- ⚠️ **实盘下单余额过小**：账户仅 1.0 USDT，接近最小名义 0.78 USDT（加手续费缓冲后基本不可用）。
+- ✅ **实盘最小额演练已完成（2026-09-18，用户明确授权；现货无强平风险）**，脚本 `.optim/p17_okx_live_drill.py`，报告 `.optim/p17_okx_live_drill.md`：
+  - **订单生命周期全部打通**（真实 OKX）：限价挂单 RTT **409ms** → 查询 `status=open`、**clientOrderId 原样回传** → 撤单 233ms → 复核 `status=canceled`；最小额买入成交（0.00001 BTC @ 78052.3，RTT 218ms）；**兜底止损挂单成功**（触发价 77271.78 = 入场 −1%，SL=TP/2，RTT 499ms）。
+  - 🔴 **实盘暴露 bug #1（已修复）**：OKX `clOrdId` 只允许 1–32 位**字母数字**，而 GAP-03 新增的幂等 ID 是 `tr_<hex>`、止损单是 `ps_<...>`（含下划线）→ OKX 直接拒单 `51000 Parameter clOrdId error`，**会导致 OKX 实盘全部下单失败**。修复：改为 `tr`+24 位 hex、`ps`+时间戳（纯字母数字，≤32）；测试同步加"必须 `isalnum()` 且 ≤32"断言。
+  - 🔴 **实盘暴露 bug #2（已修复）**：**OKX 条件单（兜底止损）不出现在 ccxt 统一 `fetch_open_orders` 里**（实测挂单成功但 `fetch_open_orders` 返回 0 条，须查 `orders-algo-pending`）→ 重启收养 `ProtectiveStopManager.adopt()` 与对账 `_reconcile_once()` 会误判"止损不存在"，导致**重复挂单/裸奔窗口**。修复：`ExchangeManager.fetch_algo_open_orders()`（OKX trigger/conditional/oco，其他交易所安全返回 `[]`）+ `adopt()` 合并算法单；`tests/test_exchange_manager_algo.py`、`tests/test_protective_stop.py::test_adopt_sees_okx_algo_orders` 锁住。
+  - ⚠️→✅ **运营发现（已加固）**：按最小额买入后，手续费以 base 扣除 → 持仓 0.00000999 BTC **低于 min_amount 0.00001**，市价平仓被拒 `51020`（**粉尘仓卖不掉**）。本次残留 dust ≈0.78 USDT 保留在账户（可用 OKX「小额资产兑换」清理）。代码侧加固：① `_fit_live_qty` 卖出前做粉尘检查（`qty < min_amount` → ERROR 日志并跳过，不再每根K线打无效下单）；② `close_all_positions` 清仓后**复核持仓是否真的减少**，未减少则返回 `ok=False` + `manual_close_all_not_filled` 事件（绝不谎报已离场）。测试：`tests/test_live_order_spec.py`（粉尘跳过/正常卖出）、`tests/test_close_all.py::test_close_all_reports_when_sell_not_filled`。
+- 待办：若要在**沙箱**复跑，需创建 OKX 模拟盘 demo key（实盘 key 走 sandbox 返回 50101）。
 
 ### GAP-03：下单无幂等、创建失败不重试
 
@@ -183,7 +188,9 @@
 3. 新增测试：模拟“create 已生效但响应丢失”（SimulatedExchange 记录订单后抛 NetworkError），断言重试/对账后不重复开仓。
 4. 市价单“视为成交”简化需显式注释并记录已知偏差；若交易所支持，改为按 `fetch_order` 确认。
 
-**✅ 执行状态（2026-09-18，已闭环）**：`engine/order_manager.py` 普通订单带 `tr_<uuid>` clientOrderId；create 网络异常最多重试 2 次（复用同一 id）；持续失败登记 `intent:` 注册表，对账按 clientOrderId 认领真实订单；`exchange/simulated.py` 透传 clientOrderId 供本地演练。测试：`tests/test_order_idempotency.py`（4 例）。市价单“视为成交”简化保留并注释，待 testnet 实测后再按 `fetch_order` 确认。
+**✅ 执行状态（2026-09-18，已闭环）**：`engine/order_manager.py` 普通订单带 `tr`+24位hex clientOrderId；create 网络异常最多重试 2 次（复用同一 id）；持续失败登记 `intent:` 注册表，对账按 clientOrderId 认领真实订单；`exchange/simulated.py` 透传 clientOrderId 供本地演练。测试：`tests/test_order_idempotency.py`（4 例）。
+- 🔴 **实盘修正（OKX 2026-09-18）**：幂等 ID 必须**纯字母数字**（原 `tr_`/`ps_` 含下划线被 OKX 拒 `51000 Parameter clOrdId error`，会导致 OKX 实盘全部下单失败）→ 已改为 `tr`+hex / `ps`+时间戳，并加 `isalnum()且≤32` 断言（`tests/test_order_idempotency.py`、`tests/test_live_order_spec.py`、`tests/test_live_branch_faults.py`）。
+- 🔴 **粉尘仓守卫**：卖出量本身低于交易所 `min_amount` 时跳过并报错（OKX 实测 51020：手续费扣 base 后持仓 0.00000999 < 0.00001 无法平仓），避免每根 K 线重复无效下单。
 
 ### GAP-04：回测/纸面执行模型偏理想
 
@@ -222,6 +229,7 @@
 4. 停引擎接口响应中明确提示“停引擎≠清仓”，避免用户误判。
 
 **✅ 执行状态（2026-09-18，已闭环）**：`engine/trading_engine.close_all_positions()`（三种模式统一走 `_execute_signal`，绕开风控新开仓限制）+ `POST /api/trading/close-all` + 前端仪表盘/实盘页“一键清仓”按钮（二次确认）。停引擎未运行时 close-all 返回 400 提示“停引擎≠清仓”。测试：`tests/test_close_all.py`（2 例）。
+- 🔴 **实盘加固（2026-09-18）**：清仓后**复核持仓是否真的减少**——若市价卖单被跳过（粉尘仓低于 `min_amount`）或被拒，返回 `ok=False` + 明确提示，并发布 `manual_close_all_not_filled` 事件；**绝不报 ok=True 让用户误以为已离场**（实盘 OKX 粉尘仓 51020 教训）。
 
 ### GAP-06：live 引擎单标的
 
@@ -302,6 +310,10 @@
 | `.optim/p14_report.md` | P14 引擎 partial：等权最优配置留出转负(-2.7%)，保守口径证伪 |
 | `.optim/p15_cross_section_report.md` | P15 跨品种多空：10 币 1h 截面多空 OOS 净收益全负（无组合级 edge） |
 | `.optim/p16_report.md` | P16 长历史(h=1/4/12)重挖：h12 因子过 IC 门但 0 成交，144 组全无幸存者 |
+| `.optim/p17_okx_live_drill.md` | P17 OKX 实盘最小额演练：订单生命周期打通（clientOrderId 回传/撤单/复核）+ 实盘暴露 2 个 bug |
+| `exchange/manager.py`（fetch_algo_open_orders） | 修复 bug#2：OKX 条件单可见性（统一 open orders 不含算法单） |
+| `tests/test_exchange_manager_algo.py` | 算法单解析 + 非 OKX 安全降级 |
+| `tests/test_protective_stop.py::test_adopt_sees_okx_algo_orders` | 重启收养必须能看到 OKX 算法单（防重复挂单） |
 | `core/logging_config.py` | GAP-07④：交易事件独立 `trading.log`（engine.*/core.bus），与 HTTP 访问日志分离 |
 | `tests/test_logging_split.py` | 2 例：交易事件隔离 + trader.log 不丢信息 + 重复 setup 不叠加 handler |
 | `tests/test_auto_start_restart_drill.py` | GAP-07②：真实 lifespan + trading_auto_start 断电恢复演练（自启/FIFO/风控冷却） |

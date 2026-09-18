@@ -21,8 +21,10 @@ from core.events import Event, EventType
 log = logging.getLogger(__name__)
 
 # clientOrderId 前缀：重启后据此从交易所挂单里收养我们自己挂的兜底止损，
-# 绝不误撤用户手工挂的单
-STOP_TAG = "ps_"
+# 绝不误撤用户手工挂的单。
+# 注意：必须纯字母数字——OKX clOrdId 只允许 1–32 位字母数字，带下划线会被拒
+# （实测 51000 Parameter clOrdId error），故不用 "ps_" 而用 "ps"。
+STOP_TAG = "ps"
 # 触发价对齐容差（相对值）： within 之内不重挂，避免每根 K 线打一次交易所
 _TRIGGER_TOL = 1e-4
 _QTY_TOL = 1e-3
@@ -148,12 +150,20 @@ class ProtectiveStopManager:
         """
         if not self.enabled or self.exchange is None:
             return None
+        open_orders: list = []
         try:
-            open_orders = await self.exchange.fetch_open_orders(symbol)
+            open_orders = list(await self.exchange.fetch_open_orders(symbol) or [])
         except Exception as e:  # noqa: BLE001
             log.warning("[stop] 收养查询挂单失败 %s: %s", symbol, e)
-            return None
-        for o in open_orders or []:
+        # OKX 等交易所的兜底止损是“算法单/条件单”，不在统一 open orders 里
+        # （实测 fetch_open_orders 返回 0 条）→ 必须补查，否则重启后重复挂单
+        try:
+            algo = getattr(self.exchange, "fetch_algo_open_orders", None)
+            if algo is not None:
+                open_orders += list(await algo(symbol) or [])
+        except Exception as e:  # noqa: BLE001
+            log.debug("[stop] 算法单收养查询失败 %s: %s", symbol, e)
+        for o in open_orders:
             cid = str(o.get("clientOrderId") or (o.get("info") or {}).get("clientOrderId") or "")
             if not cid.startswith(STOP_TAG):
                 continue

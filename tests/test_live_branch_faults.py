@@ -87,7 +87,8 @@ async def test_create_order_failure_registers_intent():
         intents = [k for k in om._open_orders if k.startswith("intent:")]
         assert len(intents) == 1, "create 失败必须登记 intent 供对账认领"
         rec = om._open_orders[intents[0]]
-        assert rec["client_oid"].startswith("tr_"), "intent 必须带幂等 clientOrderId"
+        assert rec["client_oid"].startswith("tr") and rec["client_oid"].isalnum(), \
+            "intent 必须带幂等 clientOrderId（纯字母数字，兼容 OKX clOrdId）"
         assert ex._cash == pytest.approx(10000.0), "余额不得变动"
     finally:
         await om.close()

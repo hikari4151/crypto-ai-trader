@@ -237,6 +237,32 @@ async def test_adopt_none_when_query_fails():
     assert await make_ps(Boom()).adopt("BTC/USDT") is None
 
 
+@pytest.mark.asyncio
+async def test_adopt_sees_okx_algo_orders():
+    """OKX 兜底止损是算法单，不在 fetch_open_orders 里 —— 必须靠 fetch_algo_open_orders 收养。
+
+    实盘证据（2026-09-18）：OKX 条件单挂单成功后 `fetch_open_orders` 返回 0 条，
+    只有 `private_get_trade_orders_algo_pending(ordType=trigger)` 能看到；
+    若收养看不到，重启后会重复挂止损（多笔裸单）并可能误清注册表。
+    """
+
+    class AlgoOnlyExchange(StopExchange):
+        def __init__(self):
+            super().__init__(open_orders=[])  # 统一接口看不到任何挂单
+            self.algo = [{
+                "id": "algo123", "side": "sell", "amount": 0.5, "remaining": 0.5,
+                "triggerPrice": 77271.78, "clientOrderId": f"{STOP_TAG}1789732313",
+            }]
+
+        async def fetch_algo_open_orders(self, symbol=None):
+            return list(self.algo)
+
+    ex = AlgoOnlyExchange()
+    rec = await make_ps(ex).adopt("BTC/USDT")
+    assert rec == {"id": "algo123", "trigger": 77271.78, "qty": 0.5}, \
+        "OKX 算法单必须被收养，否则重启后会重复挂止损"
+
+
 # ---------- 订单管理器接线 ----------
 
 @pytest.mark.asyncio

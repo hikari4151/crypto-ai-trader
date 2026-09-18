@@ -92,7 +92,9 @@ async def test_place_live_sends_client_order_id():
     assert len(ex.calls) == 1
     _sym, _type, _side, _qty, _price, params = ex.calls[0]
     cid = params.get("clientOrderId")
-    assert cid and cid.startswith("tr_"), f"缺 clientOrderId: {params}"
+    assert cid and cid.startswith("tr"), f"缺 clientOrderId: {params}"
+    # OKX clOrdId 约束：纯字母数字 ≤32 位（下划线会被 OKX 拒：51000）
+    assert cid.isalnum() and len(cid) <= 32, f"clientOrderId 不兼容 OKX: {cid!r}"
 
 
 @pytest.mark.asyncio
@@ -106,7 +108,7 @@ async def test_create_network_error_retries_same_client_order_id():
     assert result and result["qty"] == pytest.approx(0.1)
     assert ex.attempts == 3, "2 次失败 + 1 次成功共 3 次尝试"
     assert len(set(ex.cids)) == 1, "重试必须复用同一 clientOrderId（幂等）"
-    assert ex.cids[0].startswith("tr_")
+    assert ex.cids[0].startswith("tr") and ex.cids[0].isalnum()
 
 
 @pytest.mark.asyncio

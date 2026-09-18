@@ -135,6 +135,24 @@ def test_fit_live_qty_never_zeroes_a_sell():
     assert om._fit_live_qty("BTC/USDT", 0.0015, 50000.0, "sell") == pytest.approx(0.0015)
 
 
+def test_fit_live_qty_dust_sell_is_skipped():
+    """粉尘仓守卫：卖出量本身低于交易所 min_amount → 返回 0（跳过）。
+
+    实盘证据（OKX 2026-09-18）：最小额买入后手续费以 base 扣除，持仓
+    0.00000999 < min_amount 0.00001 → 平仓被拒 51020 且反复重试无效。
+    """
+    om = make_om(SpecExchange(precision={"amount": 8},
+                              limits={"amount": {"min": 1e-05}}))
+    assert om._fit_live_qty("BTC/USDT", 9.99e-06, 78000.0, "sell") == 0.0
+
+
+def test_fit_live_qty_normal_sell_passes_min_check():
+    """正常卖出量（≥ min_amount）不受粉尘守卫影响。"""
+    om = make_om(SpecExchange(precision={"amount": 8},
+                              limits={"amount": {"min": 1e-05}}))
+    assert om._fit_live_qty("BTC/USDT", 0.5, 78000.0, "sell") == pytest.approx(0.5)
+
+
 def test_fit_live_qty_degrades_without_specs():
     """规格不可用（未 load_markets/未知 symbol/假交易所）→ 原样返回，不下假单。"""
     om = make_om(SpecExchange(spec_available=False))
@@ -171,5 +189,8 @@ async def test_place_live_sends_fitted_amount_and_price():
     assert (otype, side, s_price) == ("market", "sell", None)
     assert s_qty == pytest.approx(0.123)
     assert s_params["triggerPrice"] == pytest.approx(50000.9 * 0.91, rel=1e-3)
-    assert str(s_params["clientOrderId"]).startswith("ps_")
+    cid = str(s_params["clientOrderId"])
+    assert cid.startswith("ps")
+    # OKX clOrdId 约束：纯字母数字 ≤32（带下划线会被 OKX 拒：51000）
+    assert cid.isalnum() and len(cid) <= 32
     assert om._open_orders["stop1"]["protective"] is True

@@ -922,11 +922,35 @@ class TradingEngine:
                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
             }, source="engine"))
             return {"ok": False, "closed_qty": 0.0, "detail": str(e)}
+        # 复核：市价卖单可能被跳过（粉尘仓低于交易所最小下单量 → _fit_live_qty 返回 0）。
+        # 实盘证据（OKX 2026-09-18）：只买入最小额时手续费吃掉 base，持仓低于 min_amount
+        # 后平仓被拒 51020；此处必须如实告知"没平掉"，绝不能报 ok=True 让用户以为已离场。
+        remaining = position
+        try:
+            if self.exchange and self.exchange.has_private:
+                if getattr(self.exchange, "is_local_matching", False):
+                    self._live_balance = await self._live_balance_cached()
+                else:
+                    self._live_balance = await self.exchange.fetch_balance()
+                    self._live_balance_ts = time.time()
+                remaining = self._current_position_qty()
+        except Exception as e:  # noqa: BLE001
+            log.warning("[engine] 清仓后复核余额失败（按已发送处理）: %s", e)
+        if remaining > 0 and remaining >= position * 0.999:
+            detail = (f"持仓未减少（{remaining}）：可能低于交易所最小下单量（粉尘仓）"
+                      f"或被拒单，请人工处理")
+            await self.bus.publish(Event(EventType.SYSTEM, {
+                "kind": "manual_close_all_not_filled", "symbol": self.symbol,
+                "qty": position, "remaining": remaining, "detail": detail,
+                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }, source="engine"))
+            return {"ok": False, "closed_qty": 0.0, "detail": detail}
         await self.bus.publish(Event(EventType.SYSTEM, {
             "kind": "manual_close_all", "symbol": self.symbol, "qty": position,
             "reason": reason, "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         }, source="engine"))
-        return {"ok": True, "closed_qty": position, "detail": "已发送市价平仓"}
+        return {"ok": True, "closed_qty": round(position - max(remaining, 0.0), 12),
+                "detail": "已发送市价平仓"}
 
     def _current_position_qty(self) -> float:
         """返回当前持仓数量（供断链平仓使用）。"""

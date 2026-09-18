@@ -95,3 +95,30 @@ async def test_close_all_rejects_when_engine_stopped():
     finally:
         await eng.order_manager.close()
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_all_reports_when_sell_not_filled():
+    """清仓复核：卖单被跳过/被拒（如粉尘仓）→ 必须 ok=False 如实告知。
+
+    实盘证据（OKX 2026-09-18）：最小额买入后手续费扣 base，持仓低于 min_amount
+    时平仓被拒 51020；此时绝不能返回 ok=True 让用户以为已离场。
+    """
+    db = Database("sqlite+aiosqlite:///:memory:")
+    await db.init()
+    eng, ex = await _engine_with_position(db)
+    eng.running = True
+
+    async def _noop_execute(*a, **k):
+        return None  # 模拟卖单被跳过（粉尘仓低于最小下单量）
+
+    eng._execute_signal = _noop_execute
+    try:
+        res = await eng.close_all_positions("dust_test")
+        assert res["ok"] is False, res
+        assert res["closed_qty"] == 0.0
+        assert "未减少" in res["detail"] or "粉尘" in res["detail"], res
+        assert ex._positions.get("BTC", 0.0) > 0, "持仓应仍在（平仓没成功）"
+    finally:
+        await eng.order_manager.close()
+        await db.close()

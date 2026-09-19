@@ -316,6 +316,12 @@ class OrderManager:
             filled = float(order.get("filled") or 0.0)
             if filled > 0:
                 # 迟到成交（撤单竞态下已成交等）：回灌
+                log.info("[order] 对账回灌迟到成交 oid=%s filled=%s", oid, filled)
+                if self._monitor is not None:
+                    self._monitor.alert("WARNING", "order_reconcile_late_fill",
+                                        f"迟到成交回灌：{rec.get('side')} {rec.get('symbol')} "
+                                        f"filled={filled}（撤单竞态/响应丢失）",
+                                        key=f"{rec.get('symbol')}:{oid}", oid=oid, filled=filled)
                 await self._backfill_fill(oid, rec, order)
             elif str(order.get("status") or "") in _TERMINAL_ORDER_STATUS:
                 # 已终结且未成交（撤单/过期）：清理注册表
@@ -328,7 +334,14 @@ class OrderManager:
                     self.protective.forget(rec["symbol"], oid)
                     await self._resync_protective(rec["symbol"])
             else:
+                # 对账差异：本地注册表有、交易所列表未见但订单仍 open——
+                # 可能是交易所侧订单列表过滤差异/API 不一致，属实盘高危残留
                 log.warning("[order] 对账：注册表有但交易所列表未见且仍 open，下轮复查 oid=%s", oid)
+                if self._monitor is not None:
+                    self._monitor.alert("CRITICAL", "order_reconcile_missing",
+                                        f"对账差异：本地有记录但交易所 open 列表未见 {rec.get('side')} "
+                                        f"{rec.get('symbol')}（仍 open，下轮复查）",
+                                        key=f"{rec.get('symbol')}:{oid}", oid=oid)
 
     async def _backfill_fill(self, oid: str, rec: dict, order: dict) -> None:
         """迟到成交回灌：记 Trade 行 + 发布 ORDER_FILL(late) 事件。

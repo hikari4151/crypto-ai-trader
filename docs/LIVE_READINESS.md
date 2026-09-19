@@ -329,6 +329,11 @@
   - **出口**：`data/logs/alerts.log`（结构化 JSON，运维可采集）+ SYSTEM 事件（前端可见）+ `GET /api/trading/alerts` 与 `status.alerts`。
   - **工程性质**：同 (kind,key) 在 5 分钟去重窗口内只报一次（抑制次数累计可见，防刷屏）；巡检自身异常一律不抛出（不影响引擎周期循环）。
   - **验证**：`tests/test_monitor_alerts.py`（5 例：去重/落盘/四类巡检/不抛异常）；**真实运行验证**——启动引擎（simulated, ETH/USDT 5m）后行情未接入，自动产生 `{"level":"CRITICAL","kind":"market_stale","message":"行情断流：ETH/USDT 5m 已 ∞ 秒无新K线"}` 并同时出现在 `alerts.log` 与 `/api/trading/alerts`。
+- ⑥ **异常场景故障注入演练已完成（2026-09-18，`tests/test_fault_injection_drill.py`，4 例全绿）**：验证「异常发生 → 告警产生 → 系统安全降级/自愈」全链路（全部本地 simulated + 假行情，不依赖网络，没开 VPN 也能跑）：
+  - **S1 行情断连**：hub 断流 → `market_stale` CRITICAL 告警 + `status.market_stale=True`（引擎 portfolio_loop 每 15s 自动巡检也能触发）；
+  - **S2 下单响应丢失**：create_order 连续 3 次超时（引擎重试 2 次上限）→ `order_create_lost` 告警 + `intent:` 登记待对账认领；恢复后重下单正常成交；
+  - **S3 对账差异**：本地注册表有、交易所 open 列表未见且订单仍 open → **新增 `order_reconcile_missing` CRITICAL 告警**（此前只写日志不告警，本次补线）+ 注册表保留下轮复查；
+  - **S4 迟到成交回灌**：撤单竞态下实际已成交 → **新增 `order_reconcile_late_fill` WARNING 告警** + Trade 回灌 + 注册表清理。
 
 ---
 
@@ -391,6 +396,7 @@
 | `tests/test_auto_start_restart_drill.py` | GAP-07②：真实 lifespan + trading_auto_start 断电恢复演练（自启/FIFO/风控冷却） |
 | `engine/monitor.py` | GAP-07⑤：统一告警中心（断链/无保护持仓/风控冷却/总线降级 → alerts.log + 事件 + API） |
 | `tests/test_monitor_alerts.py` | 5 例：去重/结构化落盘/四类巡检/巡检不抛异常 |
+| `tests/test_fault_injection_drill.py` | 4 例：故障注入演练（断流/下单丢失/对账差异/迟到成交 → 告警 + 安全降级） |
 | `GET /api/trading/alerts` | 告警摘要接口；`status.alerts` 同步暴露（真实运行已验证 CRITICAL 断链告警） |
 | `strategies/factor_signal.py` | 新增 min_hold_bars 参数（默认0=兼容旧行为）；`tests/test_factor_signal_min_hold.py` 4 例 |
 | `engine/order_manager.py` | live 下单全流程；普通订单带 clientOrderId、create 重试、intent 登记、对账认领（GAP-03 已闭环） |

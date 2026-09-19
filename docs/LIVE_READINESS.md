@@ -302,8 +302,9 @@
 - **引擎支持 symbol 列表（验收 1 ✅）**：`live_trading_config.symbols`（逗号分隔或 list，缺省=单标的，完全向后兼容）；`TradingEngine` 增加 `self.symbols` + `self.strategies`（每 symbol 独立策略实例），hub 用 `self.symbols` 列表多订阅（hub 本就按 `(symbol,timeframe)` 键控，零改动）；`_on_candle` 按 symbol 分发到各自策略实例、`_pending_signals` 按 symbol 存（旧单值 `_pending_signal` 以 property 兼容，单标的路径与测试零改动）；`select_strategy`/`update_strategy_params` 同步应用到所有实例。
 - **组合层风控（验收 2 ✅）**：`_check_portfolio_risk()` 每 15s 巡检（复用 portfolio.snapshot 结果，不重复打交易所），总仓位 >95% 与单标的占比 >60% 产生 CRITICAL/WARNING 告警（monitor 出口）。
 - **P15 结论仍成立**：多标的多空组合无 alpha → 该引擎是**能力储备**，不是上线依据；工程上验证「多 symbol 订阅/独立策略/组合风控」可行且单标的完全兼容。
-- 测试：`tests/test_multi_symbol_engine.py`（3 例：独立策略路由/单标的兼容/组合风控告警）；全量 pytest exit 0。
-- 待办：验收 3（`run.py portfolio` 回测作为上线前验证输入）——等有组合级 alpha 证据后再接；`web/api/live.py` 的 LiveConfigIn 暴露 symbols 字段。
+- 测试：`tests/test_multi_symbol_engine.py`（3 例：独立策略路由/单标的兼容/组合风控告警）+ `tests/test_live_config_symbols.py`（3 例：逗号字符串规范化/双形态往返/空=单标的）；全量 pytest exit 0。
+- **API 与前端入口已补（2026-09-18）**：`web/api/live.py` 的 `LiveConfigIn.symbols`（接受逗号分隔字符串或 list，保存规范化为 list）+ GET/PUT 往返 + 前端实盘配置表单「多标的（可选）」输入框（端到端验证：PUT list/字符串 → GET 回读 → 引擎 `_load_live_config` 加载出 symbols 列表与独立策略实例）。
+- 待办：验收 3（`run.py portfolio` 回测作为上线前验证输入）——等有组合级 alpha 证据后再接。
 
 ### GAP-07：运维与恢复证据不足
 

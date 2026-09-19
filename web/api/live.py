@@ -2,6 +2,8 @@
 import logging
 import math
 
+from typing import Optional, Union
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -29,6 +31,9 @@ class LiveConfigIn(BaseModel):
     timeframe: str = "1h"
     start_cash: float = Field(default=10000.0, ge=1, allow_inf_nan=False)
     strategy: str = ""   # 启动策略名；为空 = 保持引擎当前策略
+    # GAP-06 多标的：可选 symbol 列表（逗号分隔字符串或 list，保存为 list）。
+    # 空/缺省 = 单标的（symbol 字段），完全向后兼容。
+    symbols: Union[str, list[str]] = Field(default_factory=list)
 
 
 class PaperConfigIn(BaseModel):
@@ -55,6 +60,8 @@ async def get_live_config(db: Database = Depends(get_db)):
         # P2-5：KV 历史残留 NaN/Inf 回退默认（曾 float(nan) 序列化 500/非法 JSON）
         "start_cash": _finite(cfg.get("start_cash", 10000.0), 10000.0),
         "strategy": cfg.get("strategy", ""),
+        # GAP-06 多标的：symbols 列表（缺省=单标的）
+        "symbols": list(cfg.get("symbols") or []),
     }
 
 
@@ -63,8 +70,16 @@ async def save_live_config(body: LiveConfigIn, db: Database = Depends(get_db)):
     """保存实盘启动参数（下次启动生效）。"""
     if not math.isfinite(body.start_cash) or body.start_cash < 1:
         raise HTTPException(status_code=400, detail="初始资金必须为有限且大于 0 的数值")
-    await db.kv_json_set("live_trading_config", body.model_dump())
-    return {"ok": True, "message": "实盘配置已保存"}
+    data = body.model_dump()
+    # GAP-06 多标的：symbols 规范化（list 或逗号分隔字符串），空=单标的；
+    # 主 symbol 保证在列表首位（引擎 _load_live_config 会再兜底）
+    syms = data.get("symbols") or []
+    if isinstance(syms, str):
+        syms = [s.strip() for s in syms.split(",") if s.strip()]
+    syms = [str(s) for s in syms if str(s).strip()]
+    data["symbols"] = syms
+    await db.kv_json_set("live_trading_config", data)
+    return {"ok": True, "message": "实盘配置已保存", "symbols": syms}
 
 
 @router.get("/paper-config")

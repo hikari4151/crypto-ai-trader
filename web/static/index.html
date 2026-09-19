@@ -3520,6 +3520,11 @@
                 </Teleport>
               </div>
             </div>
+            <div><label class="mac-label" for="liveSymbols">多标的（可选）</label>
+              <input id="liveSymbols" v-model="liveCfg.symbolsText" class="mac-input" style="width:100%"
+                placeholder="空=单标的；如 SOL/USDT,ETH/USDT"/>
+              <div class="text-[10px] mt-1" style="color:var(--muted)">逗号分隔多个交易对；主标的仍由上方「交易对」决定</div>
+            </div>
             <div><label class="mac-label" for="liveTimeframe">周期</label>
               <mac-select v-model="liveCfg.timeframe" :options="liveTfOptions" style="width:100%"></mac-select></div>
             <div><label class="mac-label" for="liveStrategy">策略</label>
@@ -5153,7 +5158,7 @@ const app = createApp({
       } catch(e){ toast(String(e.message||e),'error'); }
     }
     // ---------- 实盘 ----------
-    const liveCfg = reactive({exchange:'binance', symbol:'BTC/USDT', timeframe:'1h', start_cash:10000, mode:'paper', strategy:''});
+    const liveCfg = reactive({exchange:'binance', symbol:'BTC/USDT', timeframe:'1h', start_cash:10000, mode:'paper', strategy:'', symbolsText:''});
     const liveStatus = reactive({mode:'paper', running:false, exchange:'binance', symbol:'BTC/USDT', timeframe:'1h', start_cash:10000, paper:true});
     const liveModeMsg = ref(''); const liveModeMsgOk = ref(true);
     // ---------- 模拟模式配置 ----------
@@ -5175,13 +5180,19 @@ const app = createApp({
         const d = await api('/live/config');
         Object.assign(liveCfg, {exchange:d.exchange, symbol:d.symbol, timeframe:d.timeframe, start_cash:d.start_cash, strategy:d.strategy||''});
         liveCfg.mode = d.mode;
+        // GAP-06 多标的：symbols 数组 → 逗号分隔文本（空=单标的）
+        liveCfg.symbolsText = (d.symbols||[]).join(',');
         const s = await api('/live/status');
         Object.assign(liveStatus, s);
       } catch(e) {}
     }
     async function saveLiveConfig() {
       try {
-        await api('/live/config', {method:'PUT', body:JSON.stringify(liveCfg)});
+        const body = Object.assign({}, liveCfg);
+        // 逗号分隔文本 → 数组发给后端（后端再兜底规范化）
+        body.symbols = (body.symbolsText||'').split(',').map(s=>s.trim()).filter(Boolean);
+        delete body.symbolsText;
+        await api('/live/config', {method:'PUT', body:JSON.stringify(body)});
         toast('实盘配置已保存','ok'); loadLiveConfig();
       } catch(e){ toast(String(e.message||e),'error'); }
     }

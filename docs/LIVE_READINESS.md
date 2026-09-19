@@ -194,6 +194,10 @@
   - ETH：搜索候选 14 个，留出候选 4 个；完整留出净收益仅 **+0.0069%~+0.0137%**，年化 **+0.0109%~+0.0219%**，41 笔交易，属于噪声/摩擦范围，远非可上线 alpha。
   - SOL：搜索候选 22 个，完整留出幸存者 **0 个**。
   - **三标的无共同通过项**；BTC 全负、SOL 0 幸存者、ETH 仅微小正值且未通过 5x 成本/引擎级证据门。故 P33 把 P3 的“样本不足”补成了可信的否定：**5m 技术指标网格也没有实盘 edge**。报告：`.optim/p33_search_5m_report.md` / `.json`。
+- **P34 订单流（Taker 主动买卖）实测（2026-09-19）**：P0–P33 唯一未试的免费正交维度（真实成交方向）。利用 Binance K 线自带 taker_buy_quote 字段可持续翻页（不受 aggTrades 数天限制），拉 1h BTC/ETH/SOL 自 2024-01 起（各约 2.3 万根），因子 taker_ratio / taker_z90 / taker_chg × h=1/6/24：
+  - **27 项检查 0 通过**：IC 方向跨品种不统一（BTC h24 +0.015 / ETH -0.002 / SOL +0.029）；ICIR 几乎全负（-0.12~-0.56，IC 时序方向不稳）；SOL h24 IS -0.018 → OOS +0.033 **翻转**；最强 SOL taker_ratio h24 = +0.029 仍低于 0.03 门槛。
+  - **结论：订单流维度同样无 stable alpha**。至此 P0–P34 已覆盖技术指标(1h/5m长历史)、资金费率(方向+套利)、基差、链上、分域、DVOL、LLM 假设、订单流——**没有任何维度通过严格实盘验证门槛**。报告：`.optim/p34_taker_report.md` / `.json`。
+  - **工程侧结论**：免费/公开数据维度已系统性挖尽；剩余候选（做市/订单簿真钱实验、付费链上实体净流）均需额外资金或授权，属另一类投入。
 
 ### GAP-02：从未在真实交易所 API 上验证订单
 
@@ -405,6 +409,10 @@
 | `.optim/p29_llm_hyp_report.md` | P29 LLM 提假设（18 个）：四关通过 2 项（同一表达式重复） |
 | `.optim/p30_voldiv_report.md` | P30 严格复核该式：BTC 5折第3折变号、与量比相关 0.81、交易级年化 -16.7% → 否决 |
 | `.optim/p31_llm_loop_v2_report.md` | P31 闭环 v2（80 个）：0 通过；30/40 因幻觉列名不可执行 |
+| `.optim/kline5m/*.csv` | P33 数据：BTC/ETH/SOL 5m 各 220k 根（2024-01~2026-02） |
+| `.optim/p33_search_5m_report.md` | P33 5m 长历史复核：BTC 留出全负、ETH 噪声微利、SOL 0 幸存者 → 无 edge |
+| `.optim/kline1h_taker/*.csv` | P34 数据：BTC/ETH/SOL 1h 订单流（taker_ratio）2024-01 起 |
+| `.optim/p34_taker_report.md` | P34 订单流因子：27 项 0 通过（IC 跨品种不统一、IS/OOS 翻转）→ 无 edge |
 | `core/logging_config.py` | GAP-07④：交易事件独立 `trading.log`（engine.*/core.bus），与 HTTP 访问日志分离 |
 | `tests/test_logging_split.py` | 2 例：交易事件隔离 + trader.log 不丢信息 + 重复 setup 不叠加 handler |
 | `tests/test_auto_start_restart_drill.py` | GAP-07②：真实 lifespan + trading_auto_start 断电恢复演练（自启/FIFO/风控冷却） |

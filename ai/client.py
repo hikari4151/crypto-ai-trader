@@ -42,6 +42,8 @@ _MODEL_MAX_TOKEN_CAPS: dict[str, int] = {
     "deepseek-chat": 8192,
     "deepseek-reasoner": 8192,
     "deepseek-r1": 8192,
+    "agnes": 16000,  # 实测 agnes-2.5-flash max_tokens=16000 HTTP 200（此前缺映射回退 8000，
+                     # 设计/迭代预设 12000 被无谓 clamp，长 Pine 代码可能截断）
     "o1": 32000,
     "o1-mini": 32000,
     "o3": 32000,

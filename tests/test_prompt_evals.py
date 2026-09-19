@@ -123,3 +123,20 @@ def test_backtests_block_capped_at_5():
 def test_fewshot_examples_cover_features():
     from ai.client import _FEWSHOT_EXAMPLES, AI_FEATURE_PARAMS
     assert set(_FEWSHOT_EXAMPLES) == set(AI_FEATURE_PARAMS), "few-shot 应覆盖全部功能"
+
+
+def test_agnes_max_token_cap_not_shrunk():
+    """agnes 系列必须有模型上限映射，且不低于设计/迭代的 max_tokens 预设。
+
+    实测（2026-09-19）：agnes-2.5-flash max_tokens=16000 返回 HTTP 200，
+    但此前缺映射回退默认 8000，导致 strategy_design/strategy_iterate 预设的
+    12000 被无谓 clamp 到 8000，长 Pine 代码可能截断。本测试固守防回退。
+    """
+    from ai.client import AI_FEATURE_PARAMS, _max_token_cap_for_model
+
+    cap = _max_token_cap_for_model("agnes-2.5-flash")
+    assert cap == 16000, f"agnes cap 应为 16000（实测支持），实际 {cap}"
+    # 设计/迭代预设必须 ≤ cap，否则每次调用都被防御性 clamp（功能降级）
+    for feat in ("strategy_design", "strategy_iterate"):
+        preset = AI_FEATURE_PARAMS[feat]["max_tokens"]
+        assert preset <= cap, f"{feat} max_tokens={preset} 超过 agnes cap={cap}"

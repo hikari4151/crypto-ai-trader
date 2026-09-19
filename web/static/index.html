@@ -48,7 +48,14 @@
 <script src="/static/vendor/echarts.min.js" integrity="sha384-o5uz97et3bErHvpKfD4Jz4n0JfhJDWABFuF4NP+iEEDxE1VwMWJ19QGR0lqFZnr6" crossorigin="anonymous"></script>
 <style>
   html{scroll-behavior:smooth;scrollbar-gutter:stable}
-  *{box-sizing:border-box;overscroll-behavior:contain;-webkit-tap-highlight-color:transparent}
+  /* ⚠️ 不要在 * 上写 overscroll-behavior:contain（2026-09-19 修）——
+     该属性语义是「滚到边界后不把滚动传给父级」，全局施加会让每个 overflow:auto 的
+     嵌套容器变成「滚动陷阱」：内容不溢出时它自己滚不动，却把 wheel 事件吞掉，
+     父级（body）永远收不到 ⇒ 光标落在面板上时整页滚不动。
+     实测：.settings-panel 在 * 规则下 ovsB=contain 且 canScroll=false，
+     而 body 明明可滚（1156>805），手势就是这样丢的。
+     移动端若要隔离滚动链，请逐容器按需加，不要全局开。 */
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   [v-cloak]{display:none}
   /* ===== 设计 token（apple-design：色板/字体/圆角/阴影/动效单一来源） ===== */
   :root{
@@ -57,7 +64,9 @@
     --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
     --text:#f5f5f7; --muted:#98989f; --border:rgba(255,255,255,.08); --border2:rgba(255,255,255,.13);
     --menu-bg:rgba(24,24,28,.72); --win-bg:rgba(30,30,36,.78); --bar-bg:rgba(255,255,255,.05);
-    --input-bg:rgba(0,0,0,.3); --accent:#0A84FF; --green:#30d158; --red:#ff453a; --orange:#ff9f0a;
+    /* 输入框底色 .3 → .18（2026-09-19）：.3 在 --bg-1:#1c1c1e 的窗口里"挖空感"过强，
+       空框比数字抢眼。降到 .18 让框"退后"、数值"上前"。 */
+    --input-bg:rgba(0,0,0,.18); --accent:#0A84FF; --green:#30d158; --red:#ff453a; --orange:#ff9f0a;
     --sidebar-bg:rgba(0,0,0,.2); --hover:rgba(255,255,255,.07);
     --shadow:0 12px 32px rgba(0,0,0,.28);
     /* 圆角阶梯（收敛：6/8/10/12/14/20，全部组件从 token 取值） */
@@ -122,7 +131,7 @@
     color-scheme:light;
     --text:#1d1d1f; --muted:#6e6e73; --border:rgba(0,0,0,.09); --border2:rgba(0,0,0,.15);
     --menu-bg:rgba(248,248,250,.8); --win-bg:rgba(248,248,250,.88); --bar-bg:rgba(0,0,0,.03);
-    --input-bg:rgba(0,0,0,.05); --sidebar-bg:rgba(0,0,0,.04); --hover:rgba(0,0,0,.06);
+    --input-bg:rgba(0,0,0,.035); --sidebar-bg:rgba(0,0,0,.04); --hover:rgba(0,0,0,.06);
     --shadow:0 10px 28px rgba(0,0,0,.10); --accent:#007AFF;
     --accent-deep:color-mix(in srgb,var(--accent) 88%,#000);
     --accent-light:color-mix(in srgb,var(--accent) 82%,#fff);
@@ -198,8 +207,6 @@
   p{line-height:1.65}
   code{font-family:var(--mono);font-size:.9em;background:var(--hover);padding:1px 5px;border-radius:var(--r-xs)}
   ::selection{background:rgba(63,140,255,.3)}
-  /* macOS 系统设置大标题（Apple：大标题收紧字距 -0.03em，行高 1.2） */
-  .page-title{font-size:var(--fs-large-title);font-weight:600;letter-spacing:var(--fs-large-title-ls);line-height:1.2;margin:2px 0 6px}
 
   /* ---------- 毛玻璃确认/输入弹窗 ---------- */
   /* F-7：模糊集中在 mask 一层（blur 24px，提高采样质量），内层不再叠加 backdrop-filter，
@@ -260,8 +267,10 @@
     box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
   /* ---------- 共享页面壳层 ---------- */
   .app-main{max-width:1440px}
-  .page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;width:100%;min-height:58px}
-  .page-head .page-title{margin:0}
+  /* 大标题已移除（与顶栏 46+44px 重复且抢层级），页头只剩右侧操作区。
+     原来 space-between + min-height:58px 是为「左标题 / 右按钮」配平的，
+     现在唯一子项必须靠右，高度也不再需要为大标题撑。 */
+  .page-head{display:flex;align-items:flex-start;justify-content:flex-end;gap:18px;width:100%;min-height:0}
   .page-head > div:first-child{min-width:0}
   .page-head p,.page-head .page-subtitle{margin:4px 0 0;color:var(--muted);font-size:13px;line-height:1.45}
   .page-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
@@ -316,7 +325,7 @@
   @keyframes menuDropIn{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}
   .menu-sub .menu-item{display:flex;width:100%;align-items:center;gap:7px;text-align:left;white-space:nowrap}
   .menu-sub .menu-item svg{opacity:.7;flex:none}
-  :root[data-theme="light"] .menu-sub{background:rgba(255,255,255,.92)}
+  /* 浅色玻璃由下方「浮层玻璃统一」区块的合并规则统一负责（.menu-sub + .macsel-menu） */
   .menu-item:hover{background:var(--hover);color:var(--text)}
   .menu-item.active{background:linear-gradient(180deg,var(--accent),var(--accent-deep));color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
   .status-dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:6px}
@@ -374,10 +383,22 @@
      竖直 padding 归零、改由 height + line-height 居中——这样文本、数字、日期三类的
      内容盒高度都等于控件高度减 border，不再随 padding 与行盒叠加出各自的数值。
      ⚠️ 多行 textarea 不在统一范围内：给 textarea 单独的 height:auto + padding 覆写（见下）。 */
-  .mac-input{background:var(--input-bg);border:1px solid var(--border2);border-radius:var(--r-sm);padding:0 12px;font-size:var(--fs-body);
+  /* 数值右对齐 + 等宽数字（2026-09-19）：
+     此前 .mac-input 无 text-align（值居中），而 [type="number"] 单独写了 text-align:right
+     ⇒ 同一页里「初始资金」居中、「手续费率」右对齐，两套对齐规则并存 = 最刺眼的不齐。
+     现统一：所有输入框右对齐 + 吃 body 的 tabular-nums，个/十/百/千位共享同一条右边界。
+     ⚠️ 文本输入（URL/路径/密钥）由 .mac-input[type="text"],.mac-input:not([type]) 还原为左对齐。 */
+  /* 圆角 8px → var(--r-xs) 6px（2026-09-19）：Apple 的 8px 是给按钮的，
+     输入框用 6px 更贴合系统设置观感；--r-sm 仍留给按钮/分段控件。 */
+  .mac-input{background:var(--input-bg);border:1px solid var(--border2);border-radius:var(--r-xs);padding:0 11px;font-size:var(--fs-body);
     color:var(--text);outline:none;width:100%;transition:box-shadow .18s ease,border-color .18s ease;line-height:1.4;
+    text-align:right;font-variant-numeric:tabular-nums;
     height:var(--ctrl-h);box-sizing:border-box}
-  .mac-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,132,255,.22)}
+  /* 文本类控件还原左对齐：数值右对齐只适用于数字，长文本右对齐会读不出开头 */
+  .mac-input[type="text"],.mac-input[type="search"],.mac-input[type="email"],.mac-input[type="password"],
+  .mac-input[type="url"],.mac-input:not([type]){text-align:left}
+  input.mac-input[list]{text-align:left}
+    .mac-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(10,132,255,.22)}
   .mac-input::placeholder{color:var(--muted)}
   /* 多行输入例外：textarea 必须能长高，故还原内距与高度。
      当前模板没有 textarea，此处是给将来加备注/JSON 编辑框留的正确默认值。 */
@@ -458,7 +479,7 @@
 
   /* ---------- 历史战绩模版布局 ---------- */
   .perf-page{width:100%}
-  .perf-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;width:100%}
+  .perf-head{display:flex;align-items:flex-start;justify-content:flex-end;gap:18px;width:100%}
   .perf-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%;min-height:34px}
   .perf-filter{display:inline-flex;align-items:center;padding:7px 12px;border:1px solid var(--border);border-radius:var(--r-md);background:color-mix(in srgb,var(--bg-2) 68%,transparent);font-size:12px;color:var(--text);white-space:nowrap}
   .perf-board{width:100%;overflow:hidden}
@@ -797,11 +818,142 @@
   .mac-form-row .fr-ctrl .mac-input{max-width:320px}
   .mac-form-hint{font-size:var(--fs-caption);color:var(--muted);line-height:1.5}
   .mac-form-err{font-size:var(--fs-caption);color:var(--red-text);font-weight:600}
-  /* 数值输入：去掉浏览器原生步进箭头（macOS 数字框无步进器），右对齐配合 tabular-nums */
-  .mac-input[type="number"]{-moz-appearance:textfield;appearance:textfield;text-align:right;flex:none;width:126px}
+  /* ---- 风控规则：组内两列（2026-09-19 第十轮）----
+     风控有 16 个字段、可用宽 1126px，一行一字段时每行只用 ~530px（约一半空白），
+     且 .fr-ctrl 原为 flex-end，输入框被甩到行最右、与标签隔 ~590px 死区。
+     这里在分组内起两列，每格内部沿用「标签左 + 控件右」两列 grid，行高收敛到单行。
+     长说明文案**不上版面**（sub-as-title）：它们是 20~40 字散文，塞进 420px 格子
+     必然折 2~3 行并裁切，且与输入框争夺同一格宽度。改为挂在控件 title 上悬停可见。
+     ⚠️ 不能直接复用 .fr-grid：那边子元素是 grid 的 .mac-field-row，
+        这里子元素是 flex 的 .mac-form-row，选择器链不同，必须另起作用域。
+     ⚠️ 列宽封顶 420px（同 .fr-grid 的 340px 思路）：用 1fr 会让两列各被拉到 550px+，
+        内容只需 ~300px ⇒ 列间又出现大片空档。
+     ⚠️ 踩过两版：① 每格 flex-direction:column（标签上控件下）⇒ 行高 98~115px 且
+        输入框与标签留白；② 把 sub 留在格内 ⇒ 文字被裁、行高 53/70 跳动。 */
+  .risk-grid{display:grid;grid-template-columns:repeat(2,minmax(0,420px));
+    column-gap:28px;row-gap:0;align-items:start;justify-content:start;
+    padding:2px 16px 8px}
+  /* 组内两列时行不再画分隔线：横向要跨列对齐，竖线会打断网格感 */
+  .risk-grid > .mac-form-row{display:grid;
+    grid-template-columns:minmax(0,1fr) 148px 40px;
+    column-gap:10px;align-items:center;
+    padding:7px 0;border-bottom:none;min-height:var(--ctrl-h)}
+  .risk-grid > .mac-form-row:hover{background:none}
+  /* col1：标签单行 + 溢出省略（完整释义在 title 里，悬停可见） */
+  .risk-grid > .mac-form-row > .fr-label{flex:none;width:100%;
+    font-size:var(--fs-footnote);font-weight:500;color:var(--text);line-height:1.35;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* col2：控件列。输入框撑满本列、开关居左，
+     宽度固定后跨行右缘成一条竖线（原先 633/631、1077/1085 参差即因单位宽度不定） */
+  .risk-grid > .mac-form-row > .fr-ctrl{flex:none;width:100%;
+    display:flex;align-items:center;justify-content:flex-end;gap:8px;white-space:nowrap}
+  .risk-grid > .mac-form-row .fr-ctrl .mac-input{width:100%;max-width:100%;flex:1 1 auto}
+  /* col3：单位独占定宽列（44px），左对齐 —— USDT / 笔 / ×均量 / 分钟文案长短不再影响控件位置 */
+  .risk-grid > .mac-form-row > .fr-unit{flex:none;width:40px;min-width:0;
+    text-align:left;font-size:var(--fs-footnote);color:var(--muted)}
+  /* ⚠️ 不要改 .mac-toggle 自身的 display / height ——
+     它是自包含组件（40×24 + ::after 旋钮 top:2px 定死），
+     一旦被拉高（height:var(--ctrl-h)=34px）或用 inline-flex 改变格式化上下文，
+     20px 旋钮就不再垂直居中，且 ::after 从"绝对定位覆盖层"变成"flex item"两套规则打架。
+     实测记录：track 变 40×34、display 变 flex、margin-left 被解析成 108px ⇒
+     开关呈现「鸭蛋上贴个球」。这里只保证它不被 flex 压缩、在控件列内居右。 */
+  .risk-grid > .mac-form-row .fr-ctrl .mac-toggle{flex:none;margin-left:auto}
+  @media (max-width:720px){
+    .risk-grid{grid-template-columns:1fr;column-gap:0;padding:2px 16px 8px}
+    .risk-grid > .mac-form-row{grid-template-columns:minmax(0,1fr) 148px 40px;padding:10px 0}
+  }
+  /* 数值输入：去掉浏览器原生步进箭头（macOS 数字框无步进器）。
+     2026-09-19：删除原 `flex:none;width:126px` —— 宽度锁定后与 grid-cols-4 打架，
+     同一行四个框宽度参差（300/350/300/340px）。对齐已上提到 .mac-input 基类，
+     宽度交给容器（grid 单元格 / .mac-field-row 的弹性控件区）。 */
+  .mac-input[type="number"]{-moz-appearance:textfield;appearance:textfield}
   .mac-input[type="number"]::-webkit-outer-spin-button,.mac-input[type="number"]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
   /* 单位紧跟控件；min-width 让同一分组内各行的单位文字左对齐成一条竖线 */
   .fr-unit{flex:none;font-size:var(--fs-footnote);color:var(--muted);min-width:2.6em}
+  /* ---- 行式字段 .mac-field-row（2026-09-19）----
+     用于「标签在框外顶部」的裸 label+grid 场景（回测高级参数、DRL 参数区、跨行情 OOS）。
+     对齐 MacField 组件的 mac-form-row：左标签固定 + 控件弹性 + 单位独立成列。
+     四处规则：
+       ① 标签左置、一行一字段（放弃 grid-cols-N，多列是框宽参差的根源）
+       ② 值右对齐（继承 .mac-input）
+       ③ 单位固定 1.8em 列宽 ⇒ 同组内单位左边界成一条竖线，不随标签长度漂移
+       ④ 约束提示走 ::after 的 title（见 .mac-field-row[data-hint]），不独占一行 */
+  /* ⚠️ 比例（2026-09-19 第二轮，实测校准）：
+     第一版用 `/14px` 内距 + label 150px 死宽 + 控件区 flex-end 靠右 ⇒
+     实测 labelRight=226 / ctrlX=240 / 控件区 1146px，输入框只 200px，
+     右侧空出 946px —— 这就是「比例和排版很奇怪」。
+     现改为：标签宽度随内容（min 84 / max 148），控件区紧跟其后（flex-start），
+     输入框基准 168px，单位列 2.2em。整行左右两侧各留 14px，中间不再有大片空洞。 */
+  /* ⚠️ 用 grid 而非 flex（2026-09-19 第三轮）：
+     flex + `margin-left:auto` 会把控件推到行尾，实测 labelRight=160 / ctrlX=1288，
+     中间空出 1127px 死区。改 grid 两列后，控件区**从标签右侧立即开始**。 */
+  .mac-field-row{display:grid;grid-template-columns:minmax(88px,120px) 1fr;
+    align-items:center;column-gap:16px;padding:6px 14px;border-bottom:1px solid var(--border)}
+  .mac-field-row:last-child{border-bottom:none}
+  .mac-field-row > .fr-label{font-size:var(--fs-body);color:var(--muted);font-weight:500;
+    letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* 控件区：紧跟标签左对齐，不再两端对推 */
+  .mac-field-row > .fr-ctrl{display:flex;align-items:center;gap:8px;
+    justify-content:flex-start;min-width:0}
+  /* ⚠️ 框宽是常量、伸缩量给单位列（2026-09-19 第五轮定稿）
+     实测边界：最窄容器(回测侧栏)行宽仅 296px ⇒ 132+16+120+28=296 刚好卡住。
+     120px 是这个约束下的最大值；框宽固定 ⇒ 右边缘在任何面板里都对齐。 */
+  .mac-field-row .mac-input{width:120px;flex:0 0 120px;min-width:0}
+  /* 单位列按内容定宽、永不压缩：窄容器里若让它参与伸缩，实测只剩 14.4px，
+     "USDT" 会被截成 "U…"、"根" 截成 "#"。宁可让它把行撑满，
+     也不省略 —— 单位被吃掉比右侧多几像素留白糟糕得多。 */
+  .mac-field-row .fr-unit{flex:0 0 auto;font-size:var(--fs-caption);color:var(--muted);
+    text-align:left;white-space:nowrap;padding-left:2px}
+  .mac-field-row:hover{background:color-mix(in srgb,var(--bg-1) 45%,transparent)}
+  /* 需要整行铺满的控件（select / 自定义下拉）—— 必须显式加 .stretch。
+     ⚠️ 别用 `:only-child`：它只判断"元素是不是独子"，不看类型，
+     于是「只有 input 没有单位列」的行会被一起拉满（实测 12 行里错 10 行）。 */
+  .mac-field-row .fr-ctrl.stretch,
+  .mac-field-row .fr-ctrl.stretch > .mac-input,
+  .mac-field-row .fr-ctrl > .menu-drop,
+  .mac-field-row .fr-ctrl > mac-select{flex:1 1 auto;width:100%;max-width:none}
+  /* ---- 分区 + 两列（2026-09-19 第七轮，方案 A）----
+     字段数 ≥ 6 的面板用这套：语义分组给结构，两列省一半高度。
+     一行仍是一个 .mac-field-row，因此上面所有对齐规则原样生效；
+     只是把「行」塞进两列容器，并由 .fr-grid 负责列宽。
+     ⚠️ 半宽格里的框宽必须弹性：格子宽度随容器变（宽面板 ~480 / 侧栏降级单列），
+        沿用固定 120px 会在窄格溢出 ⇒ 这里覆盖成 flex:1 1 auto + max-width。 */
+  /* ⚠️ 列宽必须有上限（2026-09-19 第八轮实测）：
+     用 1fr 时每列被拉到 657px，而行内容只需 ~280px ⇒
+     每列浪费 370px，两列各自靠左漂浮，读第二列要跨过大片空白。
+     340px = 88(标签) + 12(gap) + 220(控件) + 20(余量)，两列共 704px 左对齐。
+     用 minmax(0,340px) 而非固定 px：窄面板自动收缩，配合 720px 断点转单列。 */
+  .fr-grid{display:grid;grid-template-columns:repeat(2,minmax(0,340px));
+    column-gap:28px;align-items:start;justify-content:start}
+  /* 88px：实测 72px 装不下「Actor 学习率」「强制自动训练」等标签（labClip:true） */
+  .fr-grid > .mac-field-row{grid-template-columns:88px minmax(0,1fr);
+    column-gap:12px;padding:6px 0;border-bottom:none}
+  .fr-grid > .mac-field-row:hover{background:none}
+  .fr-grid > .mac-field-row > .fr-label{font-size:var(--fs-footnote);
+    color:var(--text);font-weight:400}
+  /* 半宽格里框宽弹性、封顶 178px：格子 340-88-12=240，留出单位列位置 */
+  .fr-grid > .mac-field-row .mac-input{width:0;flex:1 1 auto;min-width:0;max-width:178px}
+  .fr-grid > .mac-field-row .fr-unit{font-size:var(--fs-caption)}
+  /* 跨列行里的 select 收到单列宽度，与上方两列左边缘对齐 */
+  .fr-grid > .mac-field-row.fr-span > .fr-ctrl > .mac-input{max-width:340px}
+  /* 跨两列的整行内容（分区标题、开关行、按钮行、长文本控件） */
+  .fr-grid > .fr-span{grid-column:1 / -1}
+  /* 分区小标题：给字段装语义结构。这条是本次改造的核心 ——
+     原来 12 个字段视觉上完全等价，读不出其实是 3 组。 */
+  .fr-group{display:flex;align-items:center;gap:8px;margin:4px 0 2px;
+    font-size:var(--fs-caption);font-weight:600;color:var(--muted);
+    letter-spacing:.4px;text-transform:none}
+  .fr-group::after{content:"";flex:1;height:1px;background:var(--border)}
+  .fr-group:not(:first-child){margin-top:14px}
+  @media (max-width:720px){
+    .mac-field-row{grid-template-columns:1fr;row-gap:6px;padding:9px 14px}
+    .mac-field-row > .fr-label{max-width:none}
+    .mac-field-row .mac-input{flex:1 1 auto;width:100%}
+    /* 两列降级为单列，并恢复行式外观（否则半宽样式在窄屏会挤成一团） */
+    .fr-grid{grid-template-columns:1fr;column-gap:0}
+    .fr-grid > .mac-field-row{grid-template-columns:1fr;row-gap:6px;padding:9px 0}
+    .fr-grid > .mac-field-row > .fr-label{max-width:none}
+  }
   /* 长文本控件（URL/路径）拉满剩余宽度 */
   .fr-ctrl.wide .mac-input{max-width:none;flex:1 1 auto;width:100%}
   /* 行悬停：System Settings 式轻高亮，标示当前编辑行 */
@@ -949,6 +1101,18 @@
   .mac-card{backdrop-filter:blur(20px) saturate(170%);background:color-mix(in srgb,var(--bg-3) 42%,transparent);box-shadow:inset 0 1px 0 var(--glass-edge)}
   .stat-card{backdrop-filter:blur(36px) saturate(200%);box-shadow:var(--shadow),inset 0 1px 0 var(--glass-hi)}
   .menu-sub{backdrop-filter:blur(26px) saturate(190%);background:color-mix(in srgb,var(--bg-2) 82%,transparent)}
+  /* ---- 二级下拉统一玻璃（2026-09-19）：所有二级选项面板都用同一档毛玻璃 ----
+     背景模糊 26px + 饱和度 190%，与 .mac-window(36px/200%) 同系但更轻
+     —— 二级面板面积小、层级低，过强会糊成一团。
+     半透明底 82% 让下层内容透出来；inset 高光边制造玻璃厚度。 */
+  .menu-sub,.macsel-menu{
+    backdrop-filter:blur(26px) saturate(190%);
+    -webkit-backdrop-filter:blur(26px) saturate(190%);
+    background:color-mix(in srgb,var(--bg-2) 82%,transparent);
+    box-shadow:var(--shadow),inset 0 1px 0 var(--glass-hi);
+    border:1px solid var(--border2)}
+  :root[data-theme="light"] .menu-sub,
+  :root[data-theme="light"] .macsel-menu{background:rgba(255,255,255,.72)}
   .settings-sidebar{backdrop-filter:blur(24px) saturate(180%)}
   .bt-steps{backdrop-filter:blur(24px) saturate(200%)}
   .toast{backdrop-filter:blur(32px) saturate(200%)}
@@ -1212,8 +1376,9 @@
     .evolve-model-grid{grid-template-columns:1fr}
     .evolve-page-head{flex-direction:row;align-items:flex-start}
     .evolve-page-head .page-actions{flex:none}
-    .evolve-page-head .page-actions .mac-btn{font-size:0;padding:7px 9px}
-    .evolve-page-head .page-actions .mac-btn svg{margin:0}
+    /* 大标题移除后不再需要把按钮缩成纯图标来配平，恢复文字标签 */
+    .evolve-page-head .page-actions .mac-btn{padding:5px 11px}
+    .evolve-page-head .page-actions .mac-btn svg{margin-right:4px}
     .evolve-curve-foot .ml-auto{margin-left:0!important}
     .evolve-lab .grid.grid-cols-2,.evolve-lab .grid.grid-cols-2.lg\\:grid-cols-4{grid-template-columns:1fr}
     .evolve-lab .col-span-2{grid-column:span 1}
@@ -1454,6 +1619,11 @@
       <span v-if="marketStale && engineStatus==='running'" class="pill" style="background:rgba(255,69,58,.16);color:#ff453a">
         <span class="status-dot dot-off"></span>行情断流{{marketStaleSec!=null&&marketStaleSec>=0?(' '+marketStaleSec+'s'):''}}
       </span>
+      <!-- 引擎假死：REST 活着但主循环心跳停滞（阻塞交易所请求/死锁） -->
+      <span v-if="engineLoopAlive===false && engineStatus==='running'" class="pill" style="background:rgba(255,69,58,.16);color:#ff453a"
+            :title="'引擎主循环心跳已停滞 '+(engineHeartbeatAge!=null?engineHeartbeatAge+'s':'')+'(阈值60s)，REST 仍响应——请立即检查'">
+        <span class="status-dot dot-off"></span>引擎假死{{engineHeartbeatAge!=null?(' '+engineHeartbeatAge+'s'):''}}
+      </span>
       <!-- 运行告警摘要（engine.monitor）：无保护持仓/下单丢失/风控冷却等，鼠标悬停看最近明细 -->
       <span v-if="alertCritical>0" class="pill" style="background:rgba(255,69,58,.16);color:#ff453a"
             :title="(alertRecent||[]).slice(0,5).map(a=>a.ts+' '+a.message).join('\n')">
@@ -1501,7 +1671,7 @@
     <section v-if="view==='dashboard'" class="space-y-5">
       <div class="page-head">
         <div>
-          <h1 class="page-title" style="margin:0"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-chart"/></svg>仪表盘</h1>
+          
         </div>
         <div class="flex items-center gap-2 flex-wrap">
           <button class="mac-btn" @click="exportReport()" title="导出当前仪表盘数据为 CSV"><svg width="13" height="13"><use href="#i-download"/></svg>导出报表</button>
@@ -1560,9 +1730,6 @@
     <!-- ========== AI 与 API（System Settings 风格） ========== -->
 <transition name="page" mode="out-in">  <!-- view: settings -->
     <section v-if="view==='settings'" class="space-y-5">
-      <div class="page-head">
-        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>AI 与 API</h1></div>
-      </div>
       <div class="mac-window">
         <div class="mac-titlebar">
           <div class="traffic"><span class="tl r"></span><span class="tl y"></span><span class="tl g"></span></div>
@@ -1595,15 +1762,17 @@
             </div>
             <div class="mac-form-section" v-for="g in riskGroups" :key="g.key">
               <div class="mac-form-section-title"><svg><use :href="g.icon"></use></svg>{{g.title}}</div>
+              <div class="risk-grid">
               <template v-for="f in g.fields" :key="f.k">
                 <!-- in-DOM 模板：自定义组件必须成对闭合，写成 /> 会把后续兄弟节点吞进 slot -->
-                <mac-field v-if="f.kind==='switch'" :label="f.label" :sub="riskSub(f)" :class="riskRowCls(f)">
+                <mac-field v-if="f.kind==='switch'" :label="f.label" :sub="riskSub(f)" sub-as-title :class="riskRowCls(f)">
                   <mac-switch v-model="riskRules[f.k]" :aria-label="f.label"></mac-switch>
                 </mac-field>
-                <mac-field v-else :label="f.label" :unit="f.unit" type="number" :step="f.step" :min="f.min" :max="f.max"
+                <mac-field v-else :label="f.label" :unit="f.unit" type="number" :step="f.step" :min="f.min" :max="f.max" sub-as-title
                            :sub="riskSub(f)" :disabled="riskOff(f)" :class="riskRowCls(f)"
                            v-model.number="riskRules[f.k]"></mac-field>
               </template>
+              </div>
             </div>
             <div class="mac-card" style="padding:10px"
                  :style="riskCooldown.active?'border-color:rgba(255,69,58,.45)':'border-color:rgba(48,209,88,.35)'">
@@ -1895,9 +2064,6 @@
     <!-- ========== 全部策略（二级菜单独立页） ========== -->
 <transition name="page" mode="out-in">  <!-- view: allstrategies -->
     <section v-if="view==='allstrategies'" class="space-y-5">
-      <div class="page-head">
-        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-folder"/></svg>全部策略</h1></div>
-      </div>
       <!-- 概览 KPI：规模 + 质量分布一眼可见，免去扫表数数。数据来自 strategyStats 纯前端聚合 -->
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="stat-card">
@@ -2005,7 +2171,7 @@
 <transition name="page" mode="out-in">  <!-- view: strategy -->
     <section v-if="view==='strategy'" class="space-y-5">
       <div class="page-head">
-        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>AI 策略工坊</h1></div>
+        <div></div>
         <!-- 统一策略选择入口：点击弹出二级面板展示全部可用策略 -->
         <div class="page-actions">
           <button class="mac-btn primary" @click="openUnifiedPicker()">
@@ -2426,7 +2592,7 @@
     <section v-if="view==='backtest'" class="space-y-5">
       <div class="page-head">
         <div>
-          <h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-flask"/></svg>历史回测</h1>
+          
         </div>
         <div class="page-actions">
           <div class="menu-drop" :class="{open: formDrop==='btPlan'}">
@@ -2436,12 +2602,9 @@
             <Teleport to="body">
               <div v-if="formDrop==='btPlan'" ref="formDropMenu" class="menu-sub" :style="formDropStyle" @click.stop style="min-width:260px;max-height:320px;overflow-y:auto">
                 <div class="text-[12px] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">已保存的回测方案</div>
-                <span v-if="!btPlans.length" class="menu-item sub" style="justify-content:center;color:var(--muted)">暂无方案</span>
+                <!-- 二级选项只留名称：原 {{p.at}} 时间戳副标题属「描述」，按要求移除 -->
                 <span v-for="(p,i) in btPlans" :key="p.at+i" class="menu-item sub" style="justify-content:space-between;gap:8px" @click="applyBtPlan(i)">
-                  <span style="display:flex;flex-direction:column;min-width:0">
-                    <span class="font-mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{p.name}}</span>
-                    <span class="text-[11px]" style="color:var(--muted)">{{p.at}}</span>
-                  </span>
+                  <span class="font-mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{p.name}}</span>
                   <button class="mac-btn" style="padding:0 7px;font-size:11px;flex:none" title="删除方案" @click.stop="delBtPlan(i)">✕</button>
                 </span>
                 <div style="border-top:1px solid var(--border);padding:6px 8px 4px">
@@ -2540,16 +2703,25 @@
             <div class="mac-form-section">
               <div class="mac-form-section-title"><svg><use href="#i-sliders"/></svg>高级参数</div>
               <div class="mac-form-body">
-                <div class="grid grid-cols-3 gap-3">
-                  <div><label class="mac-label" for="btStartCash">初始资金</label><input id="btStartCash" v-model.number="bt.start_cash" class="mac-input" style="width:100%"/></div>
-                  <div><label class="mac-label" for="btFeeRate">手续费率</label><input id="btFeeRate" v-model.number="bt.fee_rate" class="mac-input" style="width:100%" step="0.0001"/></div>
-                  <div><label class="mac-label" for="btSlippage">滑点</label><input id="btSlippage" v-model.number="bt.slippage" class="mac-input" style="width:100%" step="0.0001"/></div>
+                <div class="mac-field-row">
+                  <label class="fr-label" for="btStartCash">初始资金</label>
+                  <div class="fr-ctrl"><input id="btStartCash" v-model.number="bt.start_cash" class="mac-input" type="number" min="0"/><span class="fr-unit">USDT</span></div>
                 </div>
-                <div class="grid grid-cols-2 gap-3" style="margin-top:12px">
-                  <div><label class="mac-label" for="btLimit">K 线数量</label><input id="btLimit" v-model.number="bt.limit" class="mac-input" style="width:100%" min="100" max="5000"/></div>
-                  <div><label class="mac-label" for="btGpuToggle">GPU 加速</label>
-                    <div class="flex items-center gap-2" style="margin-top:5px"><div id="btGpuToggle" class="mac-toggle" role="switch" aria-label="回测 GPU 加速" :aria-checked="bt.use_gpu?true:false" tabindex="0" :class="bt.use_gpu?'on':''" @click="bt.use_gpu=!bt.use_gpu" @keydown.enter.prevent="bt.use_gpu=!bt.use_gpu" @keydown.space.prevent="bt.use_gpu=!bt.use_gpu"></div><span class="text-[12px]" :class="bt.use_gpu?'pos':'text-slate-500'">{{bt.use_gpu?'已启用':'未启用'}}</span></div>
-                  </div>
+                <div class="mac-field-row">
+                  <label class="fr-label" for="btFeeRate">手续费率</label>
+                  <div class="fr-ctrl"><input id="btFeeRate" v-model.number="bt.fee_rate" class="mac-input" type="number" step="0.0001" min="0" max="0.1" title="默认 0.001 · 范围 0 ~ 0.1"/></div>
+                </div>
+                <div class="mac-field-row">
+                  <label class="fr-label" for="btSlippage">滑点</label>
+                  <div class="fr-ctrl"><input id="btSlippage" v-model.number="bt.slippage" class="mac-input" type="number" step="0.0001" min="0" title="默认 0 · 按成交价比例计的滑点成本"/></div>
+                </div>
+                <div class="mac-field-row">
+                  <label class="fr-label" for="btLimit">K 线数量</label>
+                  <div class="fr-ctrl"><input id="btLimit" v-model.number="bt.limit" class="mac-input" type="number" min="100" max="5000" placeholder="留空用最新"/><span class="fr-unit">根</span></div>
+                </div>
+                <div class="mac-field-row">
+                  <label class="fr-label" for="btGpuToggle">GPU 加速</label>
+                  <div class="fr-ctrl"><div id="btGpuToggle" class="mac-toggle" role="switch" aria-label="回测 GPU 加速" :aria-checked="bt.use_gpu?true:false" tabindex="0" :class="bt.use_gpu?'on':''" @click="bt.use_gpu=!bt.use_gpu" @keydown.enter.prevent="bt.use_gpu=!bt.use_gpu" @keydown.space.prevent="bt.use_gpu=!bt.use_gpu"></div><span class="text-[12px]" :class="bt.use_gpu?'pos':'text-slate-500'">{{bt.use_gpu?'已启用':'未启用'}}</span></div>
                 </div>
               </div>
             </div>
@@ -2612,7 +2784,7 @@
 <transition name="page" mode="out-in">  <!-- view: quant -->
     <section v-if="view==='quant'" class="space-y-5">
       <div class="page-head">
-        <div><h1 class="page-title" style="margin:0"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-dna"/></svg>量化研究</h1></div>
+        <div></div>
         <div class="page-actions" v-show="qTab==='ic'||qTab==='usage'">
           <div class="mac-seg" style="padding:2px">
             <button :class="qdata_source==='demo'?'active':''" @click="qdata_source='demo'">演示数据</button>
@@ -2916,7 +3088,7 @@
       <!-- ========== 持续进化引擎 ========== -->
 <transition name="page" mode="out-in">  <!-- view: evolve -->
     <section v-if="view==='evolve'" class="space-y-5 evolve-page">
-      <div class="page-head evolve-page-head"><div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-brain"/></svg>持续进化</h1></div><div class="page-actions"><button class="mac-btn" disabled title="进化日志导出尚未提供接口"><svg width="13" height="13"><use href="#i-download"/></svg>导出进化日志</button><button class="mac-btn primary" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button></div></div>
+      <div class="page-head evolve-page-head"><div class="page-actions"><button class="mac-btn" disabled title="进化日志导出尚未提供接口"><svg width="13" height="13"><use href="#i-download"/></svg>导出进化日志</button><button class="mac-btn primary" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button></div></div>
       <!-- 运行状态：陈旧提示 + 状态栏 + 控制/触发 + 回退基线 -->
       <div class="mac-window evolve-status-window">
         <div class="mac-titlebar">
@@ -3169,18 +3341,44 @@
 
           <!-- 模式一：RL 因子组合挖掘 -->
           <div v-if="drlMode==='factor'">
-            <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-              <div><label class="mac-label" for="drlMineEpisodes">训练轮数</label><input id="drlMineEpisodes" v-model.number="drlMineCfg.episodes" class="mac-input" type="number" min="5" max="500"/></div>
-              <div><label class="mac-label" for="drlMineLimit">K线数量</label><input id="drlMineLimit" v-model.number="drlMineCfg.limit" class="mac-input" type="number"/></div>
-              <div><label class="mac-label" for="drlMineHorizon">预测周期 h</label><input id="drlMineHorizon" v-model.number="drlMineCfg.horizon" class="mac-input" type="number" min="1" max="30"/></div>
-              <div><label class="mac-label" for="drlMineIcWindow">滚动IC窗口</label><input id="drlMineIcWindow" v-model.number="drlMineCfg.ic_window" class="mac-input" type="number" min="30" max="500"/></div>
-              <div><label class="mac-label" for="drlMineMaxSteps">最多选因子数</label><input id="drlMineMaxSteps" v-model.number="drlMineCfg.max_steps" class="mac-input" type="number" min="1" max="12"/></div>
-              <div><label class="mac-label" for="drlMineCorrThreshold">冗余相关阈值</label><input id="drlMineCorrThreshold" v-model.number="drlMineCfg.corr_threshold" class="mac-input" type="number" step="0.05" min="0.5" max="1"/></div>
-              <div class="col-span-2 flex items-end gap-2 pb-0.5">
-                <button class="mac-btn primary" @click="mineFactorByRl()" :disabled="drlMineLoading">{{drlMineLoading?'挖掘中…':'开始因子挖掘'}}</button>
-                <label class="mac-label inline" for="drlMineAutoRegister" style="white-space:nowrap">OOS 达标自动注册</label>
-                <div id="drlMineAutoRegister" class="mac-toggle" role="switch" aria-label="OOS 达标自动注册" :aria-checked="drlMineCfg.auto_register?true:false" tabindex="0" :class="drlMineCfg.auto_register?'on':''" @click="drlMineCfg.auto_register=!drlMineCfg.auto_register" @keydown.enter.prevent="drlMineCfg.auto_register=!drlMineCfg.auto_register" @keydown.space.prevent="drlMineCfg.auto_register=!drlMineCfg.auto_register"></div>
+            <div class="fr-group">挖掘参数</div>
+            <div class="fr-grid">
+              <div class="mac-field-row">
+                <label class="fr-label" for="drlMineEpisodes" title="训练轮数">训练轮数</label>
+                <div class="fr-ctrl"><input id="drlMineEpisodes" v-model.number="drlMineCfg.episodes" class="mac-input" type="number" min="5" max="500"/><span class="fr-unit">轮</span></div>
               </div>
+              <div class="mac-field-row">
+                <label class="fr-label" for="drlMineLimit" title="K 线数量">K 线数量</label>
+                <div class="fr-ctrl"><input id="drlMineLimit" v-model.number="drlMineCfg.limit" class="mac-input" type="number" placeholder="留空用最新"/><span class="fr-unit">根</span></div>
+              </div>
+              <div class="mac-field-row">
+                <label class="fr-label" for="drlMineHorizon" title="预测周期">预测周期</label>
+                <div class="fr-ctrl"><input id="drlMineHorizon" v-model.number="drlMineCfg.horizon" class="mac-input" type="number" min="1" max="30"/><span class="fr-unit">h</span></div>
+              </div>
+              <div class="mac-field-row">
+                <label class="fr-label" for="drlMineIcWindow" title="滚动 IC 窗口">IC 窗口</label>
+                <div class="fr-ctrl"><input id="drlMineIcWindow" v-model.number="drlMineCfg.ic_window" class="mac-input" type="number" min="30" max="500"/><span class="fr-unit">根</span></div>
+              </div>
+            </div>
+            <div class="fr-group">因子筛选</div>
+            <div class="fr-grid">
+              <div class="mac-field-row">
+                <label class="fr-label" for="drlMineMaxSteps" title="最多选因子数">最多因子数</label>
+                <div class="fr-ctrl"><input id="drlMineMaxSteps" v-model.number="drlMineCfg.max_steps" class="mac-input" type="number" min="1" max="12"/><span class="fr-unit">个</span></div>
+              </div>
+              <div class="mac-field-row">
+                <label class="fr-label" for="drlMineCorrThreshold" title="冗余相关阈值：高于此相关系数的因子视为冗余，会被剔除">冗余阈值</label>
+                <div class="fr-ctrl"><input id="drlMineCorrThreshold" v-model.number="drlMineCfg.corr_threshold" class="mac-input" type="number" step="0.05" min="0.5" max="1" title="高于此相关系数的因子视为冗余，会被剔除"/></div>
+              </div>
+              <div class="mac-field-row fr-span">
+                <label class="fr-label" for="drlMineAutoRegister" title="OOS 达标自动注册">自动注册</label>
+                <div class="fr-ctrl">
+                  <div id="drlMineAutoRegister" class="mac-toggle" role="switch" aria-label="OOS 达标自动注册" :aria-checked="drlMineCfg.auto_register?true:false" tabindex="0" :class="drlMineCfg.auto_register?'on':''" @click="drlMineCfg.auto_register=!drlMineCfg.auto_register" @keydown.enter.prevent="drlMineCfg.auto_register=!drlMineCfg.auto_register" @keydown.space.prevent="drlMineCfg.auto_register=!drlMineCfg.auto_register"></div>
+                </div>
+              </div>
+            </div>
+            <div class="flex gap-2" style="padding:10px 0 4px">
+              <button class="mac-btn primary" @click="mineFactorByRl()" :disabled="drlMineLoading">{{drlMineLoading?'挖掘中…':'开始因子挖掘'}}</button>
             </div>
             <div v-if="drlMineLoading" class="text-[12px] text-slate-400 mb-3">RL 正在因子池上试错学习（约数秒~1分钟）…</div>
             <div v-if="drlMineResult" class="mac-card mb-4" :style="{borderColor: drlMineResult.report?.valid?'rgba(48,209,88,.4)':'rgba(255,159,10,.4)'}">
@@ -3216,45 +3414,96 @@
 
           <!-- 模式二：自适应策略训练（执行层） -->
           <template v-if="drlMode==='strategy'">
-          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-            <div><label class="mac-label" for="drlEpisodes">训练轮数</label><input id="drlEpisodes" v-model.number="drlCfg.episodes" class="mac-input" type="number" min="10" max="500"/></div>
-            <div><label class="mac-label" for="drlLimit">K线数量</label><input id="drlLimit" v-model.number="drlCfg.limit" class="mac-input" type="number"/></div>
-            <div><label class="mac-label" for="drlVolPenalty">波动率风险惩罚</label><input id="drlVolPenalty" v-model.number="drlCfg.vol_penalty" class="mac-input" type="number" step="5"/></div>
-            <div><label class="mac-label" for="drlEntropyCoef">熵正则(探索)</label><input id="drlEntropyCoef" v-model.number="drlCfg.entropy_coef" class="mac-input" type="number" step="0.01"/></div>
-            <div><label class="mac-label" for="drlDdPenalty">回撤惩罚</label><input id="drlDdPenalty" v-model.number="drlCfg.reward_dd_penalty" class="mac-input" type="number" step="0.1"/></div>
-            <div><label class="mac-label" for="drlLosingPenalty">连亏惩罚</label><input id="drlLosingPenalty" v-model.number="drlCfg.reward_losing_penalty" class="mac-input" type="number" step="0.1"/></div>
-            <div><label class="mac-label" for="drlTrendAlign">趋势一致奖励</label><input id="drlTrendAlign" v-model.number="drlCfg.reward_trend_align" class="mac-input" type="number" step="0.1"/></div>
-            <div><label class="mac-label" for="drlValGapPenalty">过拟合衰减</label><input id="drlValGapPenalty" v-model.number="drlCfg.reward_val_gap_penalty" class="mac-input" type="number" step="0.1" min="0"/></div>
+          <div class="fr-group fr-span">训练规模</div>
+          <div class="fr-grid">
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlEpisodes" title="训练轮数">训练轮数</label>
+              <div class="fr-ctrl"><input id="drlEpisodes" v-model.number="drlCfg.episodes" class="mac-input" type="number" min="10" max="500"/><span class="fr-unit">轮</span></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlLimit" title="K 线数量">K 线数量</label>
+              <div class="fr-ctrl"><input id="drlLimit" v-model.number="drlCfg.limit" class="mac-input" type="number" placeholder="留空用最新"/><span class="fr-unit">根</span></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlStartCash" title="起始资金">起始资金</label>
+              <div class="fr-ctrl"><input id="drlStartCash" v-model.number="drlCfg.start_cash" class="mac-input" type="number" min="0"/><span class="fr-unit">USDT</span></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlEarlyStop" title="验证收益连续 N 次无改善则提前停止，0 = 关闭">早停保护</label>
+              <div class="fr-ctrl"><input id="drlEarlyStop" v-model.number="drlCfg.early_stop_patience" class="mac-input" type="number" min="0"/><span class="fr-unit">次</span></div>
+            </div>
           </div>
-          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-            <div><label class="mac-label" for="drlLrActor">Actor 学习率</label><input id="drlLrActor" v-model.number="drlCfg.lr_actor" class="mac-input" type="number" step="0.001"/></div>
-            <div><label class="mac-label" for="drlLrCritic">Critic 学习率</label><input id="drlLrCritic" v-model.number="drlCfg.lr_critic" class="mac-input" type="number" step="0.001"/></div>
-            <div><label class="mac-label" for="drlGamma">折扣因子 γ</label><input id="drlGamma" v-model.number="drlCfg.gamma" class="mac-input" type="number" step="0.01"/></div>
-            <div><label class="mac-label" for="drlStartCash">起始资金</label><input id="drlStartCash" v-model.number="drlCfg.start_cash" class="mac-input" type="number"/></div>
+
+          <div class="fr-group fr-span">奖励塑形</div>
+          <div class="fr-grid">
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlVolPenalty" title="波动率风险惩罚">波动率惩罚</label>
+              <div class="fr-ctrl"><input id="drlVolPenalty" v-model.number="drlCfg.vol_penalty" class="mac-input" type="number" step="5"/></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlEntropyCoef" title="熵正则（探索）">熵正则</label>
+              <div class="fr-ctrl"><input id="drlEntropyCoef" v-model.number="drlCfg.entropy_coef" class="mac-input" type="number" step="0.01"/></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlDdPenalty" title="回撤惩罚">回撤惩罚</label>
+              <div class="fr-ctrl"><input id="drlDdPenalty" v-model.number="drlCfg.reward_dd_penalty" class="mac-input" type="number" step="0.1"/></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlLosingPenalty" title="连亏惩罚">连亏惩罚</label>
+              <div class="fr-ctrl"><input id="drlLosingPenalty" v-model.number="drlCfg.reward_losing_penalty" class="mac-input" type="number" step="0.1"/></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlTrendAlign" title="趋势一致奖励">趋势奖励</label>
+              <div class="fr-ctrl"><input id="drlTrendAlign" v-model.number="drlCfg.reward_trend_align" class="mac-input" type="number" step="0.1"/></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlValGapPenalty" title="过拟合衰减：验证集与训练集收益差值的惩罚">过拟合衰减</label>
+              <div class="fr-ctrl"><input id="drlValGapPenalty" v-model.number="drlCfg.reward_val_gap_penalty" class="mac-input" type="number" step="0.1" min="0"/></div>
+            </div>
           </div>
-          <div class="flex gap-2 items-center mb-4">
-            <label class="mac-label inline" for="drlGpu" style="white-space:nowrap">GPU 加速</label>
-            <div id="drlGpu" class="mac-toggle" role="switch" aria-label="DRL 训练 GPU 加速" :aria-checked="drlCfg.use_gpu?true:false" tabindex="0" :class="drlCfg.use_gpu?'on':''" @click="drlCfg.use_gpu=!drlCfg.use_gpu" @keydown.enter.prevent="drlCfg.use_gpu=!drlCfg.use_gpu" @keydown.space.prevent="drlCfg.use_gpu=!drlCfg.use_gpu"></div>
-            <span class="text-[12px]" :class="drlCfg.use_gpu?'pos':'text-slate-500'">{{drlCfg.use_gpu?'已启用':'未启用'}}</span>
+
+          <div class="fr-group fr-span">优化器</div>
+          <div class="fr-grid">
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlLrActor" title="Actor 学习率">Actor lr</label>
+              <div class="fr-ctrl"><input id="drlLrActor" v-model.number="drlCfg.lr_actor" class="mac-input" type="number" step="0.001"/></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlLrCritic" title="Critic 学习率">Critic lr</label>
+              <div class="fr-ctrl"><input id="drlLrCritic" v-model.number="drlCfg.lr_critic" class="mac-input" type="number" step="0.001"/></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlGamma" title="折扣因子 γ">折扣因子 γ</label>
+              <div class="fr-ctrl"><input id="drlGamma" v-model.number="drlCfg.gamma" class="mac-input" type="number" step="0.01" min="0" max="1"/></div>
+            </div>
           </div>
-          <div class="flex gap-2 items-center mb-4">
-            <label class="mac-label inline" for="drlBaseModel" style="white-space:nowrap">续训模型（可选）</label>
-            <select id="drlBaseModel" v-model="drlCfg.base_model" class="mac-input" style="width:280px">
-              <option value="">从零开始训练</option>
-              <option v-for="m in drlModels" :key="m.name" :value="m.path">{{m.name}}</option>
-            </select>
+          <div class="fr-group fr-span">运行环境</div>
+          <div class="fr-grid">
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlGpu" title="使用 GPU 加速训练">GPU 加速</label>
+              <div class="fr-ctrl">
+                <div id="drlGpu" class="mac-toggle" role="switch" aria-label="DRL 训练 GPU 加速" :aria-checked="drlCfg.use_gpu?true:false" tabindex="0" :class="drlCfg.use_gpu?'on':''" @click="drlCfg.use_gpu=!drlCfg.use_gpu" @keydown.enter.prevent="drlCfg.use_gpu=!drlCfg.use_gpu" @keydown.space.prevent="drlCfg.use_gpu=!drlCfg.use_gpu"></div>
+                <span class="text-[12px]" :class="drlCfg.use_gpu?'pos':'text-slate-500'">{{drlCfg.use_gpu?'已启用':'未启用'}}</span>
+              </div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlForceTrain" title="强制自动训练：开启后可回炉重训">强制重训</label>
+              <div class="fr-ctrl">
+                <div id="drlForceTrain" class="mac-toggle" role="switch" aria-label="强制自动训练" :aria-checked="drlCfg.force_train?true:false" tabindex="0" :class="drlCfg.force_train?'on':''" @click="drlCfg.force_train=!drlCfg.force_train" @keydown.enter.prevent="drlCfg.force_train=!drlCfg.force_train" @keydown.space.prevent="drlCfg.force_train=!drlCfg.force_train"></div>
+                <span class="text-[12px]" :class="drlCfg.force_train?'pos':'text-slate-500'">{{drlCfg.force_train?'已开启':'已关闭'}}</span>
+              </div>
+            </div>
+            <div class="mac-field-row fr-span">
+              <label class="fr-label" for="drlBaseModel" title="选择已训练模型作为起点，保留已学知识继续增强">续训模型</label>
+              <div class="fr-ctrl">
+                <select id="drlBaseModel" v-model="drlCfg.base_model" class="mac-input">
+                  <option value="">从零开始训练</option>
+                  <option v-for="m in drlModels" :key="m.name" :value="m.path">{{m.name}}</option>
+                </select>
+              </div>
+            </div>
           </div>
-          <div class="flex gap-2 items-center mb-4">
-            <label class="mac-label inline" for="drlEarlyStop" style="white-space:nowrap">早停保护</label>
-            <input id="drlEarlyStop" v-model.number="drlCfg.early_stop_patience" class="mac-input" type="number" min="0" style="width:70px"/>
-            <span class="text-[12px] text-slate-500">验证收益连续 N 次无改善则提前停止（0=关闭）</span>
-          </div>
-          <div class="flex gap-2 items-center mb-4">
-            <label class="mac-label inline" for="drlForceTrain" style="white-space:nowrap">强制自动训练</label>
-            <div id="drlForceTrain" class="mac-toggle" role="switch" aria-label="强制自动训练" :aria-checked="drlCfg.force_train?true:false" tabindex="0" :class="drlCfg.force_train?'on':''" @click="drlCfg.force_train=!drlCfg.force_train" @keydown.enter.prevent="drlCfg.force_train=!drlCfg.force_train" @keydown.space.prevent="drlCfg.force_train=!drlCfg.force_train"></div>
-            <span class="text-[12px]" :class="drlCfg.force_train?'pos':'text-slate-500'">{{drlCfg.force_train?'已开启':'已关闭'}}</span>
-          </div>
-          <div class="flex gap-2 items-center mb-4">
+          <div class="flex gap-2 items-center mb-2">
             <button class="mac-btn primary" @click="startDrlTrain()" :disabled="drlTrain.running">{{drlTrain.running?'训练中…':''}}<svg v-if="!drlTrain.running" width="13" height="13"><use href="#i-play"/></svg>{{drlTrain.running?'':'开始训练'}}</button>
             <button class="mac-btn" @click="loadDrlModels()">刷新模型库</button>
           </div>
@@ -3367,7 +3616,7 @@
               </div>
               <div v-if="drlOos.data_source==='exchange'">
                 <label class="mac-label inline text-[12px]" for="drlOosSymbol">币种</label>
-                <input id="drlOosSymbol" v-model="drlOos.symbol" class="mac-input" style="width:110px" list="popularSymbolList" placeholder="BTC/USDT">
+                <input id="drlOosSymbol" v-model="drlOos.symbol" class="mac-input" type="text" style="width:110px;text-align:left" list="popularSymbolList" placeholder="BTC/USDT">
               </div>
               <div>
                 <label class="mac-label inline text-[12px]" for="drlOosTimeframe">周期</label>
@@ -3375,11 +3624,11 @@
               </div>
               <div>
                 <label class="mac-label inline text-[12px]" for="drlOosLimit">K线数量</label>
-                <input id="drlOosLimit" type="number" v-model.number="drlOos.limit" class="mac-input" style="width:90px" min="100">
+                <input id="drlOosLimit" type="number" v-model.number="drlOos.limit" class="mac-input" style="width:96px;text-align:right" min="100" title="评估所用的 K 线根数">
               </div>
               <div v-if="drlOos.data_source==='csv'">
                 <label class="mac-label inline text-[12px]" for="drlOosCsvPath">CSV路径</label>
-                <input id="drlOosCsvPath" v-model="drlOos.csv_path" class="mac-input" style="width:200px" placeholder="data/xxx.csv">
+                <input id="drlOosCsvPath" v-model="drlOos.csv_path" class="mac-input" type="text" style="width:200px;text-align:left" placeholder="data/xxx.csv">
               </div>
               <button class="mac-btn primary" style="padding:6px 14px" @click="runOosEval()" :disabled="!drlOos.model || drlOos.loading">
                 {{drlOos.loading?'评估中…':'评估'}}
@@ -3417,7 +3666,7 @@
     <section v-if="view==='performance'" class="space-y-5 perf-page">
       <div class="page-head perf-head">
         <div>
-          <h1 class="page-title" style="margin:0"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-trophy"/></svg>历史战绩</h1>
+          
         </div>
         <div class="flex items-center gap-2 flex-wrap">
           <button class="mac-btn" @click="exportPerformance()" title="导出历史战绩为 CSV"><svg width="13" height="13"><use href="#i-download"/></svg>导出战绩</button>
@@ -3455,9 +3704,6 @@
     <!-- ========== 实盘启动 ========== -->
 <transition name="page" mode="out-in">  <!-- view: live -->
     <section v-if="view==='live'" class="space-y-5">
-      <div class="page-head">
-        <div><h1 class="page-title"><svg width="22" height="22" style="vertical-align:-3px;margin-right:6px;color:var(--accent)"><use href="#i-rocket"/></svg>实盘启动</h1></div>
-      </div>
 
       <!-- 当前状态 -->
       <div class="mac-window">
@@ -3551,9 +3797,11 @@
                 </Teleport>
               </div>
             </div>
-            <div class="lg:col-span-2"><label class="mac-label" for="liveStartCash">起始资金 (USDT)</label>
-              <input id="liveStartCash" v-model.number="liveCfg.start_cash" type="number" class="mac-input"/>
-              <div class="text-[12px] text-slate-500 mt-1">实盘与模拟实盘模式使用此资金（模拟实盘=用实盘参数做模拟验证）</div></div>
+            <div><label class="mac-label" for="liveStartCash">起始资金</label>
+              <div class="flex items-center gap-2">
+                <input id="liveStartCash" v-model.number="liveCfg.start_cash" type="number" min="0" class="mac-input" title="实盘与模拟实盘模式使用此资金"/>
+                <span class="fr-unit">USDT</span>
+              </div></div>
           </div>
           <div class="flex gap-3 mt-5">
             <button class="mac-btn primary" @click="saveLiveConfig()"><svg width="12" height="12"><use href="#i-check"/></svg>保存配置</button>
@@ -3569,12 +3817,15 @@
           <span class="mac-title"><svg><use href="#i-testtube"/></svg>模拟模式配置</span>
         </div>
         <div class="mac-body">
-          <div class="grid grid-cols-2 gap-4 max-w-lg">
-            <div><label class="mac-label" for="paperStartCash">初始资金 (USDT)</label>
-              <input id="paperStartCash" v-model.number="paperCfg.start_cash" type="number" min="100" class="mac-input"/></div>
-            <div><label class="mac-label" for="paperFeeRate">手续费率</label>
-              <input id="paperFeeRate" v-model.number="paperCfg.fee_rate" type="number" step="0.0001" min="0" max="0.1" class="mac-input"/>
-              <div class="text-[12px] text-slate-500 mt-1">默认 0.001 · 范围 0 ~ 0.1</div></div>
+          <div class="max-w-xl">
+            <div class="mac-field-row">
+              <label class="fr-label" for="paperStartCash">初始资金</label>
+              <div class="fr-ctrl"><input id="paperStartCash" v-model.number="paperCfg.start_cash" type="number" min="100" class="mac-input"/><span class="fr-unit">USDT</span></div>
+            </div>
+            <div class="mac-field-row" style="border-bottom:none">
+              <label class="fr-label" for="paperFeeRate">手续费率</label>
+              <div class="fr-ctrl"><input id="paperFeeRate" v-model.number="paperCfg.fee_rate" type="number" step="0.0001" min="0" max="0.1" class="mac-input" placeholder="0.001" title="默认 0.001 · 范围 0 ~ 0.1"/></div>
+            </div>
           </div>
           <div class="flex gap-3 mt-5">
             <button class="mac-btn primary" @click="savePaperConfig()"><svg width="12" height="12"><use href="#i-check"/></svg>保存模拟配置</button>
@@ -3768,6 +4019,9 @@ const app = createApp({
     const engineStatus = ref('stopped');
     const marketStale = ref(false);
     const marketStaleSec = ref(null);
+    // 引擎主循环活性（heartbeat）：REST 活着但引擎假死时明确提示（GAP-07⑦）
+    const engineLoopAlive = ref(true);
+    const engineHeartbeatAge = ref(null);
     // 运行告警（engine.monitor 摘要）：最近告警列表 + CRITICAL 计数
     const alertRecent = ref([]);
     const alertCritical = ref(0);
@@ -5415,6 +5669,9 @@ const app = createApp({
         engineStatus.value = st.running?'running':'stopped'; currentStrategy.value = st.strategy;
         marketStale.value = !!st.market_stale;
         marketStaleSec.value = (st.market_stale_sec!=null)?st.market_stale_sec:null;
+        // 引擎主循环活性（心跳滞停=假死，REST 活着但引擎卡死）
+        engineLoopAlive.value = st.engine_loop_alive!==false;
+        engineHeartbeatAge.value = (st.heartbeat_age_sec!=null)?st.heartbeat_age_sec:null;
         // 统一告警中心摘要（GAP-07 运维）：最近告警 + CRITICAL 计数，前端直接展示
         const al = st.alerts || {};
         alertRecent.value = al.recent || [];
@@ -6716,7 +6973,7 @@ const app = createApp({
       analysis, analysisLoading, currentStrategy, strategyList, filteredStrategyList, paramSchema, strategyParams, riskRules, riskCooldown, optLogs, analyses, clearCooldown,
       analysisFull, openAnalysisFull, openAnalysisHistory, analysisPreview,
       perfGroups, loadPerformance, exportPerformance,
-      dashboardTab, dashboardSearch, dashboardRows, dashboardRisk, alertRecent, alertCritical,
+      dashboardTab, dashboardSearch, dashboardRows, dashboardRisk, alertRecent, alertCritical, engineLoopAlive, engineHeartbeatAge,
       riskGroups: RISK_GROUPS, riskDirtySet, riskRowCls, riskOff, riskSub, revertRisk,
       ai, aiMsg, aiMsgOk, aiTesting, aiFeatureParams, featureParamLabel, autoAnalysis, toggleAutoAnalysis, exKeys, notifyCfg, notifyTesting, notifyMsg, notifyMsgOk, loadNotifyConfig, saveNotifyConfig, testNotify,
       bt, btRunning, btResult, btHistory, btHistoryGroups, btHistoryLoading, btHistoryError, loadBtHistory, btLive, btStep, btGoto, openBtResult, btMetrics, btAdvice, btLegend, btRange, setBtRange, btTradeSearch, btTradeShowAll, btTradesAll, btTradesShown, exportBtTradesCsv, btLocalCoverage, btPlans, saveBtPlan, applyBtPlan, delBtPlan,
@@ -6844,6 +7101,9 @@ app.component('MacField', {
     placeholder: { type: String, default: '' },
     disabled: { type: Boolean, default: false },
     wide: { type: Boolean, default: false },
+    // 说明文案改挂到控件 title（悬停可见），版面只留「标签 + 控件」。
+    // 供字段多、说明长的面板（风控规则）使用：这类散文常驻版面会把行高顶到 2~3 倍。
+    subAsTitle: { type: Boolean, default: false },
     // v-model 带修饰符时 Vue 会传 modelModifiers；不声明就作为 fallthrough attr 落到 DOM 上
     modelModifiers: { type: Object, default: () => ({}) }
   },
@@ -6854,7 +7114,7 @@ app.component('MacField', {
   },
   template: `
     <div class="mac-form-row">
-      <label class="fr-label" :for="slotted ? null : uid">{{label}}<span v-if="sub" class="fr-sub">{{sub}}</span></label>
+      <label class="fr-label" :for="slotted ? null : uid" :title="subAsTitle && sub ? sub : null">{{label}}<span v-if="sub && !subAsTitle" class="fr-sub">{{sub}}</span></label>
       <div class="fr-ctrl" :class="{wide: wide}">
         <slot v-if="slotted"></slot>
         <template v-else>

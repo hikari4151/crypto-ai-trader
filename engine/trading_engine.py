@@ -115,6 +115,10 @@ class TradingEngine:
         # run25 R1：断链自动平仓失败后待重试标志（_stale_alerted 只控制告警；
         # 平仓失败若不复位该标志会永不重试，仓位裸奔直到行情恢复）
         self._stale_close_pending: bool = False
+        # 运维看门狗 heartbeat：_portfolio_loop 每 15s 打点，
+        # /api/health 据此判定"引擎主循环是否活着"——REST 进程活着但引擎
+        # 线程卡死（阻塞交易所请求/死锁）时 heartbeat 停止增长即暴露
+        self._heartbeat_ts: float = time.time()
 
         bus.subscribe(EventType.MARKET_CANDLE, self._on_candle)
         # 高频价格采样：供风控闪崩/暴涨检测使用（hub 约每秒发布一次 ticker）
@@ -432,6 +436,17 @@ class TradingEngine:
             out["alerts"] = self.monitor.summary()
         except Exception:  # noqa: BLE001
             pass
+        # 运维看门狗：引擎主循环心跳（_portfolio_loop 每 15s 打点）。
+        # loop_alive = 引擎运行时心跳未超过 60s 停滞；REST 进程活着但引擎
+        # 线程卡死时 heartbeat_age 持续增长，外部监控据此发现假死。
+        try:
+            hb_age = time.time() - self._heartbeat_ts
+            out["heartbeat_age_sec"] = int(hb_age)
+            out["engine_loop_alive"] = bool(
+                (not self.running) or hb_age <= 60.0
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return out
 
     async def _load_dynamic_strategies(self) -> None:
@@ -739,6 +754,7 @@ class TradingEngine:
     async def _portfolio_loop(self) -> None:
         while self.running:
             try:
+                self._heartbeat_ts = time.time()  # 看门狗打点
                 snap = await self.portfolio.snapshot()
                 await self._daily_reconcile_if_due()   # T2
                 await self._check_market_stale()        # T5

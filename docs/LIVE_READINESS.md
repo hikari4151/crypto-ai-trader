@@ -338,6 +338,11 @@
   - **S2 下单响应丢失**：create_order 连续 3 次超时（引擎重试 2 次上限）→ `order_create_lost` 告警 + `intent:` 登记待对账认领；恢复后重下单正常成交；
   - **S3 对账差异**：本地注册表有、交易所 open 列表未见且订单仍 open → **新增 `order_reconcile_missing` CRITICAL 告警**（此前只写日志不告警，本次补线）+ 注册表保留下轮复查；
   - **S4 迟到成交回灌**：撤单竞态下实际已成交 → **新增 `order_reconcile_late_fill` WARNING 告警** + Trade 回灌 + 注册表清理。
+- ⑦ **运维看门狗（2026-09-19）**：解决"REST 进程活着但引擎主循环假死（阻塞交易所请求/死锁）无人察觉"的盲区：
+  - **引擎心跳**：`_portfolio_loop` 每 15s 打点 `_heartbeat_ts`，`status()` 暴露 `heartbeat_age_sec` + `engine_loop_alive`（心跳停滞 >60s 且引擎 running → 假死；未运行不误报）；
+  - **运维总览** `GET /api/ops/overview`（`web/api/ops.py`）：一次拿全引擎活性/告警计数/行情新鲜度/日志与 DB 大小，聚合 `health` 判定（CRITICAL 告警 OR 断流 OR 假死 → false）；
+  - **独立探针** `scripts/watchdog.py`：退出码 0=健康 / 1=服务不可达 / 2=引擎假死或断流或 CRITICAL（供 supervisor/systemd/cron 轮询）；
+  - 验证：`tests/test_ops_monitor.py`（5 例：心跳新鲜/老化假死/停止不误报/overview 聚合/CRITICAL→health=false）+ 真实运行 watchdog 返回 exit 0 + 假死场景 loop_alive=False 识别正确。
 
 ---
 
@@ -404,6 +409,9 @@
 | `GET /api/trading/alerts` | 告警摘要接口；`status.alerts` 同步暴露（真实运行已验证 CRITICAL 断链告警） |
 | `engine/trading_engine.py`（多标的） | GAP-06：symbols 列表 + 每 symbol 独立策略实例 + 组合风控（总仓位/单标的占比告警） |
 | `tests/test_multi_symbol_engine.py` | 3 例：独立策略路由/单标的向后兼容/组合风控告警 |
+| `web/api/ops.py` | 运维总览 `/api/ops/overview`：引擎活性+告警+行情+日志/DB 大小，聚合 health |
+| `scripts/watchdog.py` | 独立看门狗探针（exit 0/1/2），供 supervisor/systemd 轮询 |
+| `tests/test_ops_monitor.py` | 5 例：心跳新鲜/老化假死/停止不误报/overview 聚合/CRITICAL→health=false |
 | `strategies/factor_signal.py` | 新增 min_hold_bars 参数（默认0=兼容旧行为）；`tests/test_factor_signal_min_hold.py` 4 例 |
 | `engine/order_manager.py` | live 下单全流程；普通订单带 clientOrderId、create 重试、intent 登记、对账认领（GAP-03 已闭环） |
 | `engine/trading_engine.py` | live/simulated 启动装配、每日对账、断链平仓、`close_all_positions` 一键清仓、单 symbol 引擎 |

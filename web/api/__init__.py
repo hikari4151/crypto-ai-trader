@@ -8,6 +8,7 @@ from .factors import router as factors_router
 from .live import router as live_router
 from .market import router as market_router
 from .notify import router as notify_router
+from .ops import router as ops_router
 from .performance import router as performance_router
 from .portfolio import router as portfolio_router
 from .risk import router as risk_router
@@ -16,5 +17,5 @@ from .trading import router as trading_router
 
 __all__ = ["ai_router", "backtest_router", "data_router", "drl_router", "evolve_router",
            "exchanges_router", "factors_router", "live_router", "market_router", "notify_router",
-           "performance_router", "portfolio_router", "risk_router", "strategy_repo_router",
-           "trading_router"]
+           "ops_router", "performance_router", "portfolio_router", "risk_router",
+           "strategy_repo_router", "trading_router"]

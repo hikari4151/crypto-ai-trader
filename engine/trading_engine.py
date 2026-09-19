@@ -52,7 +52,8 @@ class TradingEngine:
         # 成交时点：True=信号在下一根K线开盘成交（与回测一致），False=当前K线收盘即时成交
         self.trade_on_open = bool(settings.trade_on_open)
         # 待成交信号（trade_on_open 时：上一根收盘产生、待下一根开盘成交的信号，(signal, 挂单尝试次数)）
-        self._pending_signal: Optional[tuple] = None
+        # 待成交信号（trade_on_open 时：上一根收盘产生、待下一根开盘成交的信号）
+        # 多标的：按 symbol 存 _pending_signals；单标的旧引用经 property 兼容。
 
         self.paper_account = PaperAccount(start_cash=settings.default_start_cash) if self.paper else None
         self.exchange: Optional[ExchangeManager] = None
@@ -70,6 +71,15 @@ class TradingEngine:
         self.evolve = EvolveEngine(db, bus, settings.data_dir / "models")
 
         self.strategy = get_strategy(settings.default_strategy)
+        # GAP-06 多标的：symbols 列表 + 每标的独立策略实例。
+        # 兼容层：self.symbol = symbols[0]（主标的），self.strategy = 主标的策略
+        # （既有 40+ 处 self.symbol/self.strategy 引用全部仍指向主标的，行为不变；
+        # 多标的时其余标的的行情/信号走 same 路径但用各自策略实例）。
+        self.symbols: list[str] = [self.symbol]
+        self.strategies: dict[str, object] = {self.symbol: self.strategy}
+        # 每符号待成交信号（trade_on_open 时按 symbol 存）；旧单值 _pending_signal
+        # 以 property 形式只读写主标的，兼容既有测试与单标的路径
+        self._pending_signals: dict[str, tuple] = {}
         # 当前策略的 MA 快/慢线周期（dual_ma 的 fast_period/slow_period 生效，
         # 回测与实时关键路径同一来源 strategies.base.strategy_ma_periods）
         self._ma_fast_period, self._ma_slow_period = self._strategy_ma_periods()
@@ -115,6 +125,34 @@ class TradingEngine:
         # 持续进化部署后热加载当前运行实例：策略与锁均已就绪
         self.evolve.set_deployment_reload(self.reload_active_strategy_model)
 
+    # ---------------- 多标的兼容层 ----------------
+    @property
+    def _pending_signal(self) -> Optional[tuple]:
+        """旧单值待成交信号：读写主标的（`_pending_signals[self.symbol]`）。
+
+        GAP-06 多标的后信号按 symbol 存；保留本 property 让既有单标的代码
+        （_on_candle_locked_inner 的 trade_on_open 路径、select_strategy 重置、
+        测试直接读写）行为完全不变。
+        """
+        return self._pending_signals.get(self.symbol)
+
+    @_pending_signal.setter
+    def _pending_signal(self, val: Optional[tuple]) -> None:
+        if val is None:
+            self._pending_signals.pop(self.symbol, None)
+        else:
+            self._pending_signals[self.symbol] = val
+
+    def _strategy_for(self, symbol: str) -> object:
+        """取某标的的策略实例。
+
+        主标的始终返回 self.strategy（外部代码/测试直接替换 self.strategy 时兼容）；
+        副标的用 strategies[symbol]，缺失回退主标的策略（防 KeyError 拖垮行情循环）。
+        """
+        if symbol == self.symbol:
+            return self.strategy
+        return self.strategies.get(symbol) or self.strategy
+
     async def _load_live_config(self) -> None:
         """从数据库 KV 读取实盘/模拟启动配置（交易所/交易对/周期/初始资金/手续费）。"""
         try:
@@ -125,6 +163,26 @@ class TradingEngine:
                 self.exchange_id = cfg.get("exchange") or self.exchange_id
                 self.symbol = cfg.get("symbol") or self.symbol
                 self.timeframe = cfg.get("timeframe") or self.timeframe
+                # GAP-06 多标的：cfg["symbols"] 可为逗号分隔字符串或 list；
+                # 缺省/空 = 单标的（完全向后兼容）。主 symbol 保持第一个。
+                syms = cfg.get("symbols") or []
+                if isinstance(syms, str):
+                    syms = [s.strip() for s in syms.split(",") if s.strip()]
+                if isinstance(syms, (list, tuple)) and syms:
+                    syms = [str(s) for s in syms]
+                    if self.symbol not in syms:
+                        syms.insert(0, self.symbol)  # 主标的必须在内
+                    self.symbols = syms
+                    self.symbol = syms[0]
+                    # 同步每 symbol 独立策略实例：修剪不在 symbols 的残留键
+                    #（__init__ 默认建了 settings.default_symbol 的实例），
+                    # 再给缺的标的补独立实例（否则副标的会回退主策略实例）
+                    self.strategies = {s: self.strategies.get(s) for s in self.symbols}
+                    base = self.strategy
+                    for s in self.symbols:
+                        if self.strategies.get(s) is None:
+                            self.strategies[s] = (base.clone() if hasattr(base, "clone")
+                                                  else get_strategy(base.name))
                 # 启动策略：实盘启动参数可指定策略名，启动时应用（无效策略名回退默认，不阻断启动）
                 # 必须位于 if cfg 守卫内：全新数据库无该 KV 时 cfg 为 None
                 try:
@@ -252,7 +310,7 @@ class TradingEngine:
                 #（paper=False），回放逻辑天然复用（exp17）
                 await self._restore_live_position_state()
 
-            self.hub = MarketDataHub(self.exchange_id, [self.symbol], [self.timeframe], self.bus,
+            self.hub = MarketDataHub(self.exchange_id, list(self.symbols), [self.timeframe], self.bus,
                                      ma_fast_period=self._ma_fast_period, ma_slow_period=self._ma_slow_period)
             self.running = True
             # 启动时清空上一轮残留的待成交信号（跨重启不携带）
@@ -350,6 +408,8 @@ class TradingEngine:
                "mode": getattr(self, "trading_mode", "paper" if self.paper else "live"),
                "exchange": self.exchange_id,
                "symbol": self.symbol, "timeframe": self.timeframe, "strategy": self.strategy.name,
+               # GAP-06 多标的：symbols 列表（主标的在前）；单标的场景 = [symbol] 向后兼容
+               "symbols": list(self.symbols),
                "degraded": b["degraded"], "bus": b["handlers"]}
         prot = getattr(self.order_manager, "protective", None)
         out["protective_stop"] = prot.status() if prot is not None else None
@@ -382,7 +442,11 @@ class TradingEngine:
 
     # ---------------- 行情处理 ----------------
     async def _on_ticker(self, event: Event) -> None:
-        """高频价格采样：供风控闪崩/暴涨检测使用（hub 约每秒发布一次）。"""
+        """高频价格采样：供风控闪崩/暴涨检测使用（hub 约每秒发布一次）。
+
+        GAP-06 多标的：主标的参与闪崩/暴涨检测（保持向后兼容），其余标的跳过
+        （风险采样是主标的风控阈值，多标的组合风控在 _portfolio_loop 每 15s 巡检）。
+        """
         if not self.running:
             return
         if event.payload.get("symbol") != self.symbol:
@@ -432,8 +496,10 @@ class TradingEngine:
         if not snap or not self.running:
             return
         symbol = snap.get("symbol")
-        if symbol != self.symbol:
+        if symbol not in self.symbols:
             return
+        # GAP-06 多标的：每个 symbol 用独立策略实例（主标的 = self.strategy）
+        strategy = self._strategy_for(symbol)
         indicators = snap.get("indicators", {})
         price = float(indicators.get("close") or 0.0)
         vol_ratio = float(indicators.get("vol_ratio") or 1.0)
@@ -447,7 +513,7 @@ class TradingEngine:
 
         # ---- 成交时点：trade_on_open=True 时，先在当前K线开盘成交上一根收盘产生的信号 ----
         # （与回测引擎口径一致：信号在第 i 根收盘产生、第 i+1 根开盘成交，杜绝前视）
-        if self.trade_on_open and self._pending_signal is not None:
+        if self.trade_on_open and self._pending_signals.get(symbol) is not None:
             candles = snap.get("candles") or []
             if candles:
                 open_ = float(candles[-1][1])
@@ -455,8 +521,8 @@ class TradingEngine:
                 low_ = float(candles[-1][3])
             else:
                 open_ = high_ = low_ = 0.0
-            sig, tries = self._pending_signal
-            self._pending_signal = None
+            sig, tries = self._pending_signals[symbol]
+            self._pending_signals.pop(symbol, None)
             fill_ref: Optional[float] = None
             lim = getattr(sig, "limit_price", None)
             if getattr(sig, "order_type", "market") == "limit" and lim is not None:
@@ -468,7 +534,7 @@ class TradingEngine:
                     # 未触及：挂单最多重试 3 根K线（与 backtest _LIMIT_MAX_TRIES 一致），超时取消
                     tries += 1
                     if tries < 3:
-                        self._pending_signal = (sig, tries)
+                        self._pending_signals[symbol] = (sig, tries)
                     else:
                         log.info("[engine] 限价单挂单超时取消（3根K线未触及）: %s %s", sig.side, sig.symbol)
             elif open_ > 0:
@@ -478,7 +544,8 @@ class TradingEngine:
 
         # ---- 当前K线收盘：生成信号 ----
         position, cash_now, pos_value, entry_price = await self._current_state(symbol, price)
-        signal = self.strategy.on_candle({
+        # GAP-06 多标的：用该 symbol 自己的策略实例生成信号
+        signal = strategy.on_candle({
             "symbol": symbol, "price": price, "position": position,
             "cash": cash_now,
             "indicators": indicators, "timeframe": self.timeframe,
@@ -487,7 +554,7 @@ class TradingEngine:
             return
         if self.trade_on_open:
             # 延迟到下一根K线开盘成交（先记信号，不立即下单）
-            self._pending_signal = (signal, 0)
+            self._pending_signals[symbol] = (signal, 0)
             return
         # 默认（向后兼容）：当前收盘即时执行
         await self._execute_signal(signal, price, vol_ratio)
@@ -574,10 +641,12 @@ class TradingEngine:
             return
 
         await self.bus.publish(Event(EventType.SIGNAL, signal.__dict__, source="engine"))
-        fill = await self.order_manager.place(signal, exec_price, self.strategy.name)
+        # GAP-06 多标的：记账用信号自带的策略名（signal.strategy 由生成它的策略实例填写）
+        strat_name = getattr(signal, "strategy", "") or self.strategy.name
+        fill = await self.order_manager.place(signal, exec_price, strat_name)
         if fill:
             # 成交后处理走公共记账方法（即时路径；回灌迟到成交走 _on_order_fill）
-            await self._record_fill(symbol, signal.side, fill, self.strategy.name,
+            await self._record_fill(symbol, signal.side, fill, strat_name,
                                     entry_price, reason=signal.reason, signal_dict=signal.__dict__)
 
     async def _on_order_fill(self, event: Event) -> None:
@@ -670,10 +739,12 @@ class TradingEngine:
     async def _portfolio_loop(self) -> None:
         while self.running:
             try:
-                await self.portfolio.snapshot()
+                snap = await self.portfolio.snapshot()
                 await self._daily_reconcile_if_due()   # T2
                 await self._check_market_stale()        # T5
                 # 统一告警巡检（断链/无保护持仓/风控冷却/总线降级）
+                if len(self.symbols) > 1:
+                    await self._check_portfolio_risk(snap)  # GAP-06 组合层风控
                 await self.monitor.health_check(self)
             except Exception as e:  # noqa: BLE001
                 log.warning("[portfolio] 快照失败: %s", e)
@@ -784,6 +855,43 @@ class TradingEngine:
             from backtest.data_loader import timeframe_seconds
             return timeframe_seconds(self.timeframe) * 2
         return int(cfg)
+
+    async def _check_portfolio_risk(self, snap: Optional[dict] = None) -> None:
+        """GAP-06 组合层风控：总仓位/单标的占比/总权益独立于单标的 RiskManager。
+
+        仅多标的模式启用（单标的由 risk.check 已覆盖）。用 monitor 告警播报，
+        不做强制平仓（组合风控以"人看得见"为前提，强制动作留给单标的风控）。
+        """
+        try:
+            equity = float((snap or {}).get("equity") or 0.0)
+            if equity <= 0:
+                return
+            positions = (snap or {}).get("positions") or []
+            # 只统计我们订阅的 symbols（交易所账户里可能有其它币种）
+            sym_set = set(self.symbols)
+            per_sym: dict[str, float] = {}
+            pos_value = 0.0
+            for p in positions:
+                sym = p.get("symbol") or ""
+                if sym not in sym_set:
+                    continue
+                v = float(p.get("value") or 0.0)
+                per_sym[sym] = per_sym.get(sym, 0.0) + v
+                pos_value += v
+            total_ratio = pos_value / equity
+            worst = max(per_sym.items(), key=lambda kv: kv[1]) if per_sym else ("", 0.0)
+            worst_ratio = worst[1] / equity if equity > 0 else 0.0
+            # 阈值：可调（默认总仓位 95%、单标的 60%，仅播报不阻断）
+            if total_ratio > 0.95:
+                self.monitor.alert("CRITICAL", "portfolio_exposure",
+                                   f"组合总仓位 {total_ratio:.0%} 超限（>95%）",
+                                   key="portfolio", total_ratio=round(total_ratio, 3))
+            if worst_ratio > 0.60:
+                self.monitor.alert("WARNING", "portfolio_concentration",
+                                   f"单标的 {worst[0]} 仓位 {worst_ratio:.0%} 超限（>60%）",
+                                   key=worst[0], ratio=round(worst_ratio, 3))
+        except Exception as e:  # noqa: BLE001
+            log.debug("[engine] 组合风控检查异常: %s", e)
 
     async def _check_market_stale(self) -> None:
         """断链检测：K 线超过阈值未更新 → live 平仓 / 其他告警。
@@ -965,13 +1073,17 @@ class TradingEngine:
         return {"ok": True, "closed_qty": round(position - max(remaining, 0.0), 12),
                 "detail": "已发送市价平仓"}
 
-    def _current_position_qty(self) -> float:
-        """返回当前持仓数量（供断链平仓使用）。"""
+    def _current_position_qty(self, symbol: str = "") -> float:
+        """返回当前持仓数量（供断链平仓/组合风控使用）。
+
+        GAP-06：多标的时按 symbol 取（缺省 = 主标的，向后兼容）。
+        """
+        symbol = symbol or self.symbol
         if self.paper and self.paper_account:
-            return self.paper_account.positions.get(self.symbol, {}).get("qty", 0.0)
+            return self.paper_account.positions.get(symbol, {}).get("qty", 0.0)
         if self.exchange and self.exchange.has_private:
             bal = self._live_balance if hasattr(self, "_live_balance") else {}
-            base = base_currency(self.symbol)
+            base = base_currency(symbol)
             return float(bal.get(base, {}).get("total", 0.0)) if bal else 0.0
         return 0.0
 
@@ -1524,18 +1636,31 @@ class TradingEngine:
 
     async def select_strategy(self, name: str) -> dict:
         async with self._strategy_lock:
-            self.strategy = get_strategy(name)
+            new_strat = get_strategy(name)
+            # GAP-06 多标的：同一策略名应用到所有 symbol 的独立实例
+            #（每实例独立 reset/_entry 状态，K线按 symbol 分发到各自实例）
+            if hasattr(new_strat, "clone"):
+                clones = {s: new_strat.clone() for s in self.symbols}
+            else:
+                clones = {s: get_strategy(name) for s in self.symbols}
+            self.strategies = clones
+            self.strategy = clones[self.symbol]
             # 清空待成交信号：旧策略的信号不得在新策略下成交（否则 on_fill 污染新策略状态）
-            self._pending_signal = None
+            self._pending_signals.clear()
             self._ma_fast_period, self._ma_slow_period = self._strategy_ma_periods()
-            log.info("切换策略: %s", name)
+            log.info("切换策略: %s（symbols=%s）", name, self.symbols)
             # 锁内同步（hub.set_ma_periods 非 async，无提交点）
             self._sync_hub_ma_periods()
-            return {"name": name, "params": self.strategy.params}
+            return {"name": name, "params": self.strategy.params, "symbols": self.symbols}
 
     async def update_strategy_params(self, params: dict) -> dict:
         async with self._strategy_lock:
-            return {"params": self.strategy.update_params(params)}
+            # GAP-06 多标的：参数应用到所有 symbol 的策略实例（主标的返回实际生效值）
+            last = {"params": self.strategy.update_params(params)}
+            for sym in self.symbols:
+                if sym != self.symbol:
+                    self.strategies[sym].update_params(params)
+            return last
 
     async def apply_strategy_params(self, name: str, params: dict) -> dict:
         """带策略锁应用参数——后台 AI worker 线程经 run_coroutine_threadsafe 调回主循环。

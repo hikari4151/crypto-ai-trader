@@ -298,9 +298,12 @@
 2. 组合层风控：总仓位/总每日亏损/单标的占比有独立检查。
 3. `run.py portfolio` 的组合回测结果可作为多标的策略上线前验证输入。
 
-**🚧 执行状态（2026-09-18）**：
-- **P15 跨品种多空研究证据（`.optim/p15_cross_section_report.md`）**：10 个主流币 1h 共同窗口 14176 根，P6 等权多因子做截面多空（low/high × k=1/2，含费用与5x费用），**OOS 净收益全负**（best high_k1 = -5.9e-05/bar，胜率50.8%），累计 -27%~-87%。
-- 结论：**多标的多空组合目前也没有可用的因子 edge**；GAP-06 建多标的引擎的价值需等到有组合级 alpha 证据后再投入，否则是给负期望系统加复杂度。建议先解决代理→testnet 实测与基线提交，再回头找组合级因子。
+**✅ 执行状态（2026-09-18，多标的引擎最小可用版已完成）**：
+- **引擎支持 symbol 列表（验收 1 ✅）**：`live_trading_config.symbols`（逗号分隔或 list，缺省=单标的，完全向后兼容）；`TradingEngine` 增加 `self.symbols` + `self.strategies`（每 symbol 独立策略实例），hub 用 `self.symbols` 列表多订阅（hub 本就按 `(symbol,timeframe)` 键控，零改动）；`_on_candle` 按 symbol 分发到各自策略实例、`_pending_signals` 按 symbol 存（旧单值 `_pending_signal` 以 property 兼容，单标的路径与测试零改动）；`select_strategy`/`update_strategy_params` 同步应用到所有实例。
+- **组合层风控（验收 2 ✅）**：`_check_portfolio_risk()` 每 15s 巡检（复用 portfolio.snapshot 结果，不重复打交易所），总仓位 >95% 与单标的占比 >60% 产生 CRITICAL/WARNING 告警（monitor 出口）。
+- **P15 结论仍成立**：多标的多空组合无 alpha → 该引擎是**能力储备**，不是上线依据；工程上验证「多 symbol 订阅/独立策略/组合风控」可行且单标的完全兼容。
+- 测试：`tests/test_multi_symbol_engine.py`（3 例：独立策略路由/单标的兼容/组合风控告警）；全量 pytest exit 0。
+- 待办：验收 3（`run.py portfolio` 回测作为上线前验证输入）——等有组合级 alpha 证据后再接；`web/api/live.py` 的 LiveConfigIn 暴露 symbols 字段。
 
 ### GAP-07：运维与恢复证据不足
 
@@ -398,6 +401,8 @@
 | `tests/test_monitor_alerts.py` | 5 例：去重/结构化落盘/四类巡检/巡检不抛异常 |
 | `tests/test_fault_injection_drill.py` | 4 例：故障注入演练（断流/下单丢失/对账差异/迟到成交 → 告警 + 安全降级） |
 | `GET /api/trading/alerts` | 告警摘要接口；`status.alerts` 同步暴露（真实运行已验证 CRITICAL 断链告警） |
+| `engine/trading_engine.py`（多标的） | GAP-06：symbols 列表 + 每 symbol 独立策略实例 + 组合风控（总仓位/单标的占比告警） |
+| `tests/test_multi_symbol_engine.py` | 3 例：独立策略路由/单标的向后兼容/组合风控告警 |
 | `strategies/factor_signal.py` | 新增 min_hold_bars 参数（默认0=兼容旧行为）；`tests/test_factor_signal_min_hold.py` 4 例 |
 | `engine/order_manager.py` | live 下单全流程；普通订单带 clientOrderId、create 重试、intent 登记、对账认领（GAP-03 已闭环） |
 | `engine/trading_engine.py` | live/simulated 启动装配、每日对账、断链平仓、`close_all_positions` 一键清仓、单 symbol 引擎 |

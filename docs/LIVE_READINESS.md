@@ -312,7 +312,8 @@
 - **组合层风控（验收 2 ✅）**：`_check_portfolio_risk()` 每 15s 巡检（复用 portfolio.snapshot 结果，不重复打交易所），总仓位 >95% 与单标的占比 >60% 产生 CRITICAL/WARNING 告警（monitor 出口）。
 - **P15 结论仍成立**：多标的多空组合无 alpha → 该引擎是**能力储备**，不是上线依据；工程上验证「多 symbol 订阅/独立策略/组合风控」可行且单标的完全兼容。
 - 测试：`tests/test_multi_symbol_engine.py`（3 例：独立策略路由/单标的兼容/组合风控告警）+ `tests/test_live_config_symbols.py`（3 例：逗号字符串规范化/双形态往返/空=单标的）；全量 pytest exit 0。
-- **API 与前端入口已补（2026-09-18）**：`web/api/live.py` 的 `LiveConfigIn.symbols`（接受逗号分隔字符串或 list，保存规范化为 list）+ GET/PUT 往返 + 前端实盘配置表单「多标的（可选）」输入框（端到端验证：PUT list/字符串 → GET 回读 → 引擎 `_load_live_config` 加载出 symbols 列表与独立策略实例）。
+- **API 与前端入口已补（2026-09-18）**：`web/api/live.py` 的 `LiveConfigIn.symbols`（接受逗号分隔字符串或 list，保存规范化为 list）+ GET/PUT 往返 + 前端实盘配置表单（端到端验证：PUT list/字符串 → GET 回读 → 引擎 `_load_live_config` 加载出 symbols 列表与独立策略实例）。
+- **前端入口已收敛为单一「交易对（可多选）」（2026-09-21）**：原先「交易对」（单值 `symbol`）与「多标的（可选）」（`symbols` 列表）两个字段功能重叠——引擎 `_load_live_config` 会把主标的插到列表首位，两个字段给不同值时语义含糊。现已删除单值输入，改为**沿用「持续进化 · 训练标的池」同构的多选二级菜单**（14 个预设 + 手输，至少保留 1 项）。前端落库时 `symbols` = 池列表、`symbol` = 池首项（主标的），**后端与 KV 契约零改动**，历史单标的配置在加载时回退进池（1 项 = 原单标的语义）。
 - 待办：验收 3（`run.py portfolio` 回测作为上线前验证输入）——等有组合级 alpha 证据后再接。
 
 ### GAP-07：运维与恢复证据不足
@@ -358,6 +359,11 @@
   - **恢复演练 `--verify`**：最新备份恢复到临时库，integrity + 关键表行数与源库对比（实证可恢复：trader kv=25/equity_snapshots=10802、klines=418398 完全一致）；
   - 保留策略 `--keep-days`（默认 7 天）自动清理；`--vacuum` 备份前整理碎片（实测 trader 3344→3264KB、klines 34072→31060KB）；
   - 测试 `tests/test_db_backup.py`（4 例）含 **WAL 未 checkpoint 脏数据一致性验证**（连接保持打开时备份仍含增量行）。
+- ⑨ **进程守护（2026-09-21，P0-2）**：`scripts/service_supervisor.py`——把看门狗从"只报警"升级为"能拉起"：
+  - 职责分工：`watchdog.py` = 只读探针（外部 cron/supervisor 用）；`service_supervisor.py` = 常驻守护（启动子进程 + 周期探活 + 失败自动重启）；
+  - 连续探活失败 ≥ max_fail → 杀子进程并重启；子进程自行崩溃退出 → 自动拉起；事件写 `data/logs/supervisor.log`（JSON 行）；
+  - 复用 watchdog.check_once 的 `/api/ops/overview` 健康判定（含引擎心跳假死检测），不重复实现；
+  - 验证：`tests/test_service_supervisor.py`（4 例：子进程启停/日志 JSON/不可达返回码/重启逻辑）；**真实进程级冒烟**——守护立即退出的子进程，事件序列 `started → probe_fail → restart_due_probe → started` 自动重启闭环。
 
 ---
 
@@ -432,6 +438,8 @@
 | `scripts/watchdog.py` | 独立看门狗探针（exit 0/1/2），供 supervisor/systemd 轮询 |
 | `scripts/db_backup.py` | P0-1 数据库备份：在线备份(含 WAL 增量)+integrity 验证+恢复演练+保留策略+VACUUM |
 | `tests/test_db_backup.py` | 4 例：WAL 一致性/恢复演练行数对比/保留策略/CLI 备份 |
+| `scripts/service_supervisor.py` | P0-2 进程守护：拉起+探活+失败/崩溃自动重启（watchdog 只报警→能拉起） |
+| `tests/test_service_supervisor.py` | 4 例：子进程启停/日志JSON/不可达返回码/重启逻辑 |
 | `tests/test_ops_monitor.py` | 5 例：心跳新鲜/老化假死/停止不误报/overview 聚合/CRITICAL→health=false |
 | `strategies/factor_signal.py` | 新增 min_hold_bars 参数（默认0=兼容旧行为）；`tests/test_factor_signal_min_hold.py` 4 例 |
 | `engine/order_manager.py` | live 下单全流程；普通订单带 clientOrderId、create 重试、intent 登记、对账认领（GAP-03 已闭环） |

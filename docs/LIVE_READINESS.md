@@ -352,6 +352,12 @@
   - **运维总览** `GET /api/ops/overview`（`web/api/ops.py`）：一次拿全引擎活性/告警计数/行情新鲜度/日志与 DB 大小，聚合 `health` 判定（CRITICAL 告警 OR 断流 OR 假死 → false）；
   - **独立探针** `scripts/watchdog.py`：退出码 0=健康 / 1=服务不可达 / 2=引擎假死或断流或 CRITICAL（供 supervisor/systemd/cron 轮询）；
   - 验证：`tests/test_ops_monitor.py`（5 例：心跳新鲜/老化假死/停止不误报/overview 聚合/CRITICAL→health=false）+ 真实运行 watchdog 返回 exit 0 + 假死场景 loop_alive=False 识别正确。
+- ⑧ **数据库备份 + SQLite 运维（2026-09-21，P0-1）**：`scripts/db_backup.py`——解决"库损坏/误删后无备份可恢复"的最坏情况：
+  - **在线备份 API**（`source.backup()`）而非文件复制：WAL 模式下文件复制会丢未 checkpoint 增量，恢复出来是残缺库；
+  - 备份 trader.db + klines.db → `data/backups/`，备份后立即 `PRAGMA integrity_check` 验证，坏备份自动删除；
+  - **恢复演练 `--verify`**：最新备份恢复到临时库，integrity + 关键表行数与源库对比（实证可恢复：trader kv=25/equity_snapshots=10802、klines=418398 完全一致）；
+  - 保留策略 `--keep-days`（默认 7 天）自动清理；`--vacuum` 备份前整理碎片（实测 trader 3344→3264KB、klines 34072→31060KB）；
+  - 测试 `tests/test_db_backup.py`（4 例）含 **WAL 未 checkpoint 脏数据一致性验证**（连接保持打开时备份仍含增量行）。
 
 ---
 
@@ -424,6 +430,8 @@
 | `tests/test_multi_symbol_engine.py` | 3 例：独立策略路由/单标的向后兼容/组合风控告警 |
 | `web/api/ops.py` | 运维总览 `/api/ops/overview`：引擎活性+告警+行情+日志/DB 大小，聚合 health |
 | `scripts/watchdog.py` | 独立看门狗探针（exit 0/1/2），供 supervisor/systemd 轮询 |
+| `scripts/db_backup.py` | P0-1 数据库备份：在线备份(含 WAL 增量)+integrity 验证+恢复演练+保留策略+VACUUM |
+| `tests/test_db_backup.py` | 4 例：WAL 一致性/恢复演练行数对比/保留策略/CLI 备份 |
 | `tests/test_ops_monitor.py` | 5 例：心跳新鲜/老化假死/停止不误报/overview 聚合/CRITICAL→health=false |
 | `strategies/factor_signal.py` | 新增 min_hold_bars 参数（默认0=兼容旧行为）；`tests/test_factor_signal_min_hold.py` 4 例 |
 | `engine/order_manager.py` | live 下单全流程；普通订单带 clientOrderId、create 重试、intent 登记、对账认领（GAP-03 已闭环） |

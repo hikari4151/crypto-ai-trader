@@ -25,6 +25,9 @@ data/logs/
 data/*.log
 data/svc_*.log
 
+# 数据库备份（P0-1：备份目录整体不入库，防仓库随备份增长）
+data/backups/
+
 # 运行时产物
 data/models/
 data/*.png

@@ -1,0 +1,14 @@
+{
+  "name": "crypto-ai-trader-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "前端构建链入口（P2-⑩）：校验 + 清单，不重写源文件",
+  "scripts": {
+    "build": "python scripts/build_frontend.py",
+    "build:check": "python scripts/build_frontend.py --check-only",
+    "check:js": "python scripts/check_js.py"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

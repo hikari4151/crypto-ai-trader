@@ -73,6 +73,18 @@ class AlertMonitor:
         except Exception as e:  # noqa: BLE001  # 目录不可写不影响主流程
             log.warning("[monitor] 告警目录不可写(%s)，仅内存告警: %s", log_dir, e)
 
+    def repoint_log_dir(self, log_dir: str) -> None:
+        """重设告警落盘目录（测试隔离用：防止测试告警污染生产 alerts.log）。
+
+        只影响后续写入；已在内存的 recent/counts 保留。调用方负责创建目录。
+        """
+        new_path = Path(log_dir) / "alerts.log"
+        try:
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            self._path = new_path
+        except Exception as e:  # noqa: BLE001
+            log.warning("[monitor] 重设告警目录失败(%s)，沿用原路径: %s", log_dir, e)
+
     # ---------------- 上报 ----------------
     def alert(self, level: str, kind: str, message: str, key: str = "", **detail: Any) -> Optional[AlertRecord]:
         """上报一条告警。同 (kind,key) 在去重窗口内只落盘/发布一次。

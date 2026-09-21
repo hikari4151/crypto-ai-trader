@@ -65,9 +65,11 @@ class _Hub:
         self.stopped = True
 
 
-async def _make_engine(symbols, db, monkeypatch=None):
+async def _make_engine(symbols, db, monkeypatch=None, tmp_path=None):
     import engine.trading_engine as te
     eng = TradingEngine(db, EventBus())
+    if tmp_path is not None:
+        eng.monitor.repoint_log_dir(str(tmp_path / "alerts"))  # 测试隔离：不污染生产 alerts.log
     eng.symbols = list(symbols)
     eng.symbol = symbols[0]
     # 每 symbol 独立策略实例（qty 不同以便断言路由正确）
@@ -96,7 +98,7 @@ async def test_multi_symbol_signals_use_independent_strategies(tmp_path):
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'multi.db'}")
     await db.init()
     try:
-        eng = await _make_engine(["BTC/USDT", "ETH/USDT"], db)
+        eng = await _make_engine(["BTC/USDT", "ETH/USDT"], db, tmp_path=tmp_path)
         # BTC（主，qty=0.1）
         await eng._on_candle(_candle("BTC/USDT"))
         # ETH（副，qty=0.2）—— 若错误路由到主策略，会是 0.1
@@ -132,7 +134,7 @@ async def test_portfolio_risk_alerts_on_exposure(tmp_path):
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'risk.db'}")
     await db.init()
     try:
-        eng = await _make_engine(["BTC/USDT", "ETH/USDT"], db)
+        eng = await _make_engine(["BTC/USDT", "ETH/USDT"], db, tmp_path=tmp_path)
         # 构造高仓位快照（假设 equities 来自 snapshot）
         snap = {"equity": 10000.0,
                 "positions": [

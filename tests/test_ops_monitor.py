@@ -17,6 +17,8 @@ from engine.trading_engine import TradingEngine
 def _engine(tmp_path, heartbeat_age=0.0, running=False):
     db = Database(f"sqlite+aiosqlite:///{tmp_path / 'ops.db'}")
     eng = TradingEngine(db, EventBus())
+    # 隔离告警落盘：引擎默认写 data/logs/alerts.log，测试不得污染生产日志
+    eng.monitor.repoint_log_dir(str(tmp_path / "alerts"))
     eng._heartbeat_ts = time.time() - heartbeat_age
     eng.running = running  # 测"假死"须 running=True（未运行不算假死）
     return eng, db
@@ -67,6 +69,7 @@ async def test_ops_overview_aggregates_and_health(tmp_path):
     await db.init()
     try:
         eng = TradingEngine(db, EventBus())
+        eng.monitor.repoint_log_dir(str(tmp_path / "alerts2"))
         eng._heartbeat_ts = time.time() - 10  # 心跳新鲜
         eng.running = True
         out = await ops_overview(engine=eng, db=db)
@@ -89,6 +92,7 @@ async def test_ops_overview_health_false_on_critical(tmp_path):
     await db.init()
     try:
         eng = TradingEngine(db, EventBus())
+        eng.monitor.repoint_log_dir(str(tmp_path / "alerts3"))  # 测试隔离
         eng.running = True
         # 注入一条 CRITICAL 告警
         eng.monitor.alert("CRITICAL", "test_critical", "注入测试告警", key="t")

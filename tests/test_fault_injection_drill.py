@@ -64,6 +64,8 @@ async def test_s1_market_stale_alert(tmp_path, monkeypatch):
         import engine.trading_engine as te
         monkeypatch.setattr(te, "MarketDataHub", _StaleHub)
         eng = TradingEngine(db, EventBus())
+        # 测试隔离：引擎 monitor 默认写生产 data/logs/alerts.log，必须重定向到 tmp
+        eng.monitor.repoint_log_dir(str(tmp_path / "alerts"))
         await eng.start()
         try:
             # 注入断流行情（inf = 从未收到K线）

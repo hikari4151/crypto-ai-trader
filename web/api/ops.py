@@ -7,8 +7,9 @@
 - market：行情新鲜度（断流秒数）
 - logs：trader/trading/alerts 日志文件大小（磁盘观测）
 - db：SQLite 文件大小
+- frontend：前端构建版本（build_manifest.json 的 sha256 前 8 位）
 """
-import os
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
@@ -20,6 +21,21 @@ router = APIRouter(prefix="/api/ops", tags=["ops"])
 
 _DATA_DIR = Path("data")
 _LOGS_DIR = _DATA_DIR / "logs"
+_MANIFEST = Path("web") / "static" / "build_manifest.json"
+
+
+def _frontend_version() -> dict:
+    """读取前端构建清单版本（sha256 前 8 位 + 构建时间）。清单缺失返回空。"""
+    try:
+        m = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+        sha = str(m.get("sha256") or "")
+        return {"version": sha[:8] if sha else None,
+                "built_at": m.get("built_at"),
+                "manifest_exists": True}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"version": None, "built_at": None, "manifest_exists": False}
+    except OSError:
+        return {"version": None, "built_at": None, "manifest_exists": False}
 
 
 def _file_kb(p: Path) -> int:
@@ -73,6 +89,8 @@ async def ops_overview(engine=Depends(get_engine), db: Database = Depends(get_db
         "db": {
             "trader_db_kb": _file_kb(_DATA_DIR / "trader.db"),
         },
+        # 前端构建版本：build_manifest.json 的 sha256 前 8 位（运维确认部署版本）
+        "frontend": _frontend_version(),
     }
     # 汇总判定：CRITICAL 告警 OR 断流 OR 引擎假死 → health=false
     out["health"] = bool(

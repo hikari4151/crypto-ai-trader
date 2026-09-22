@@ -163,4 +163,20 @@ async def index():
                         headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/static/vendor/{filename}")
+async def vendor_file(filename: str):
+    """vendor/ 第三方库（echarts/tailwind/vue）内容不可变：immutable 长缓存。
+
+    与 /static mount 的路由优先级：本路由先于 app.mount 注册，FastAPI 按
+    注册顺序匹配，vendor 请求命中此处、其余静态资源落到 mount。
+    内容变更时改文件名或升级库版本即可（文件路径变 → 新缓存键）。
+    """
+    path = (STATIC_DIR / "vendor" / filename).resolve()
+    if not str(path).startswith(str((STATIC_DIR / "vendor").resolve())) or not path.is_file():
+        raise HTTPException(status_code=404, detail="vendor 文件不存在")
+    return FileResponse(path, headers={
+        "Cache-Control": "public, max-age=31536000, immutable",
+    })
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

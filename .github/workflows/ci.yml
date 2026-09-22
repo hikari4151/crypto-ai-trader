@@ -30,6 +30,9 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements-lock.txt
 
+      - name: 0) 依赖一致性校验（requirements vs lock）
+        run: python scripts/check_lock.py
+
       - name: 1) ruff 门禁（E9+F）
         run: python -m ruff check core/ engine/ ai/ web/ scripts/ backtest/ strategies/ indicators/ config/ drl/
 

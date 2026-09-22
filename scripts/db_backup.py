@@ -95,6 +95,38 @@ def clean_old(keep_days: int) -> list[str]:
     return removed
 
 
+def prune_equity_snapshots(db_path: Path, keep_days: int = 90) -> dict:
+    """删除 trader.db 中超过 keep_days 的 EquitySnapshot 行（保留策略，防无限增长）。
+
+    引擎每 15s 落一条资金快照 → 日增约 5760 行，长期运行表会无限膨胀。
+    默认保留 90 天（约 52 万行，足够资金曲线展示与复盘），更早的删除。
+    返回 {"deleted": n, "remaining": m}；表不存在/库不存在时返回空结果。
+    """
+    if not db_path.exists():
+        return {}
+    import time as _t
+    try:
+        con = sqlite3.connect(str(db_path))
+        try:
+            # 校验表存在，避免旧版 schema 报错
+            row = con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='equity_snapshots'"
+            ).fetchone()
+            if not row:
+                return {"table_exists": False}
+            cutoff = _t.time() - keep_days * 86400
+            cur = con.execute("SELECT COUNT(*) FROM equity_snapshots").fetchone()[0]
+            con.execute("DELETE FROM equity_snapshots WHERE ts < ?", (cutoff,))
+            con.commit()
+            after = con.execute("SELECT COUNT(*) FROM equity_snapshots").fetchone()[0]
+            return {"table_exists": True, "deleted": int(cur - after),
+                    "remaining": int(after), "keep_days": keep_days}
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        return {"error": str(e)}
+
+
 def vacuum_main() -> dict:
     """对主库/行情库 VACUUM（整理碎片，缩库）。仅在库空闲时建议定期执行。"""
     out = {}
@@ -118,6 +150,8 @@ def main() -> int:
     ap.add_argument("--keep-days", type=int, default=7)
     ap.add_argument("--verify", action="store_true", help="恢复演练：验证最新备份可恢复")
     ap.add_argument("--vacuum", action="store_true", help="备份前先 VACUUM")
+    ap.add_argument("--prune-equity-days", type=int, default=0,
+                    help="删除 trader.db 中超过 N 天的 EquitySnapshot（0=跳过；建议 90）")
     args = ap.parse_args()
 
     if args.verify:
@@ -126,6 +160,10 @@ def main() -> int:
     if args.vacuum:
         v = vacuum_main()
         print(f"[backup] VACUUM: {v}")
+
+    if args.prune_equity_days > 0:
+        p = prune_equity_snapshots(DATA_DIR / "trader.db", keep_days=args.prune_equity_days)
+        print(f"[backup] 资金快照保留策略: {p}")
 
     print(f"[backup] 开始备份 -> {BACKUP_DIR}")
     all_ok = True

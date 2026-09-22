@@ -121,3 +121,31 @@ def test_backup_cli_end_to_end(tmp_path, monkeypatch):
         assert ok
         ok_all = ok_all and ok
     assert ok_all
+
+
+def test_prune_equity_snapshots_keeps_recent(tmp_path, monkeypatch):
+    """资金快照保留策略：超 keep_days 的旧行删除，近期行保留（防表无限增长）。"""
+    import time
+    import scripts.db_backup as bb
+
+    src = tmp_path / "trader.db"
+    con = sqlite3.connect(str(src))
+    try:
+        con.execute("CREATE TABLE equity_snapshots (equity REAL, cash REAL, "
+                    "positions_value REAL, ts REAL)")
+        old = time.time() - 200 * 86400  # 200 天前
+        for i in range(3):
+            con.execute("INSERT INTO equity_snapshots VALUES (100,50,50,?)", (old + i,))
+        con.execute("INSERT INTO equity_snapshots VALUES (110,60,50,?)", (time.time(),))
+        con.commit()
+    finally:
+        con.close()
+
+    monkeypatch.setattr(bb, "DATA_DIR", tmp_path)
+    r = bb.prune_equity_snapshots(src, keep_days=90)
+    assert r["deleted"] == 3, f"应删 3 条旧数据，实际 {r}"
+    assert r["remaining"] == 1
+
+    # 再跑一次应幂等（无可删）
+    r2 = bb.prune_equity_snapshots(src, keep_days=90)
+    assert r2["deleted"] == 0 and r2["remaining"] == 1

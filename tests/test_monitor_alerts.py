@@ -139,3 +139,30 @@ async def test_health_check_never_raises(tmp_path):
             raise RuntimeError("boom")
 
     await m.health_check(_Broken())  # 不应抛异常
+
+
+def test_alert_log_rotation_when_oversized(tmp_path):
+    """alerts.log 超 max_bytes → 滚动为 .1，新告警写入新文件（防无限增长）。"""
+    m = AlertMonitor(None, log_dir=str(tmp_path), dedup_sec=10.0,
+                     max_bytes=200, backup_count=3)
+    # 写多条告警直到超过 200B 触发轮转
+    for i in range(20):
+        m.alert(WARNING, f"k{i}", "x" * 50, key=f"key{i}")
+    # 轮转后应有主文件 + 至少一个 .1 备份
+    main = tmp_path / "alerts.log"
+    assert main.exists() and main.stat().st_size < 2000, "主文件应保持小（已轮转）"
+    backups = sorted(tmp_path.glob("alerts.log.*"))
+    assert backups, "应存在轮转备份 alerts.log.1"
+    # 备份是可解析的 JSON 行（旧记录没丢）
+    txt = backups[0].read_text(encoding="utf-8")
+    assert txt.strip() and "kind" in txt
+
+
+def test_alert_log_rotation_max_backup_count(tmp_path):
+    """轮转保留份数受 backup_count 限制：超过的旧备份被清理。"""
+    m = AlertMonitor(None, log_dir=str(tmp_path), dedup_sec=5.0,
+                     max_bytes=150, backup_count=2)
+    for i in range(40):
+        m.alert(WARNING, f"k{i}", "y" * 60, key=f"key{i}")
+    backups = sorted(tmp_path.glob("alerts.log.*"))
+    assert len(backups) <= 2, f"备份份数应 ≤2（backup_count），实际 {len(backups)}"

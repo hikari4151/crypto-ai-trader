@@ -60,13 +60,17 @@ class AlertMonitor:
     """告警收集/去重/落盘/发布。线程与协程内均可调用 alert()（落盘是同步小写入）。"""
 
     def __init__(self, bus=None, log_dir: str = "./data/logs",
-                 dedup_sec: float = 300.0, max_recent: int = 200) -> None:
+                 dedup_sec: float = 300.0, max_recent: int = 200,
+                 max_bytes: int = 5 * 1024 * 1024, backup_count: int = 5) -> None:
         self._bus = bus
         self._dedup_sec = float(dedup_sec)
         self._recent: list[AlertRecord] = []
         self._max_recent = max_recent
         self._last: dict[tuple[str, str], AlertRecord] = {}
         self._counts: dict[str, int] = {}
+        # P1-ops：alerts.log 按大小轮转（默认 5MB × 5 份），防长期运行无限增长
+        self._max_bytes = int(max_bytes)
+        self._backup_count = int(backup_count)
         self._path = Path(log_dir) / "alerts.log"
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,8 +117,27 @@ class AlertMonitor:
         self._publish(rec)
         return rec
 
+    def _rotate_if_needed(self) -> None:
+        """alerts.log 超过 max_bytes 时滚动：.1 最新 → .N 最旧，保留 backup_count 份。"""
+        try:
+            if not self._path.exists() or self._path.stat().st_size < self._max_bytes:
+                return
+            for i in range(self._backup_count - 1, 0, -1):
+                src = self._path.with_suffix(f".log.{i}")
+                dst = self._path.with_suffix(f".log.{i + 1}")
+                if src.exists():
+                    dst.unlink(missing_ok=True)
+                    src.rename(dst)
+            if self._path.exists():
+                dst = self._path.with_suffix(".log.1")
+                dst.unlink(missing_ok=True)
+                self._path.rename(dst)
+        except Exception as e:  # noqa: BLE001  # 轮转失败不阻塞告警
+            log.debug("[monitor] 告警日志轮转失败: %s", e)
+
     def _write(self, rec: AlertRecord) -> None:
         try:
+            self._rotate_if_needed()
             with self._path.open("a", encoding="utf-8") as f:
                 f.write(rec.to_line() + "\n")
         except Exception as e:  # noqa: BLE001

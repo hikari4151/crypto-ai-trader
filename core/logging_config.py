@@ -52,6 +52,41 @@ class TradingEventFilter(logging.Filter):
                 or name in _TRADING_LOGGER_EXACT)
 
 
+def uvicorn_log_config(log_dir: str = "./data/logs") -> dict:
+    """uvicorn 日志配置：access/error 写入 server.log（RotatingFileHandler 轮转）。
+
+    解决：run.py 直跑 uvicorn 时 access 日志默认只进 stdout（被 supervisor
+    重定向成 server.log 直写、无轮转）；这里接管为带轮转的 file handler。
+    disable_existing_loggers=False：不重置应用已配置的 root handlers
+    （trader.log/trading.log 保持 setup_logging 的配置）。
+    """
+    server_log = str(Path(log_dir) / "server.log")
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {"format": "%(asctime)s | %(levelname)-7s | %(name)-22s | %(message)s",
+                        "datefmt": "%Y-%m-%d %H:%M:%S"},
+        },
+        "handlers": {
+            "console": {"class": "logging.StreamHandler", "formatter": "default"},
+            "server_file": {
+                "class": "logging.handlers.RotatingFileHandler",
+                "filename": server_log, "maxBytes": 5 * 1024 * 1024, "backupCount": 5,
+                "encoding": "utf-8", "formatter": "default",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["console", "server_file"], "level": "INFO",
+                        "propagate": False},
+            "uvicorn.error": {"handlers": ["console", "server_file"], "level": "INFO",
+                              "propagate": False},
+            "uvicorn.access": {"handlers": ["server_file"], "level": "INFO",
+                               "propagate": False},
+        },
+    }
+
+
 def setup_logging(level: str = "INFO", log_dir: str = "./data/logs") -> None:
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter(

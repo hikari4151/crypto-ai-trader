@@ -364,6 +364,11 @@
   - 连续探活失败 ≥ max_fail → 杀子进程并重启；子进程自行崩溃退出 → 自动拉起；事件写 `data/logs/supervisor.log`（JSON 行）；
   - 复用 watchdog.check_once 的 `/api/ops/overview` 健康判定（含引擎心跳假死检测），不重复实现；
   - 验证：`tests/test_service_supervisor.py`（4 例：子进程启停/日志 JSON/不可达返回码/重启逻辑）；**真实进程级冒烟**——守护立即退出的子进程，事件序列 `started → probe_fail → restart_due_probe → started` 自动重启闭环。
+- ⑩ **日志轮转（2026-09-22，P0-3）**：`core/logging_config.py` 新增 `uvicorn_log_config()`——server.log 从"stdout 直写"改为 RotatingFileHandler（5MB×5）：
+  - 此前 trader.log/trading.log 已有轮转，但 uvicorn 的 access/error 日志默认只进 stdout（被 supervisor 重定向成 server.log 直写、无轮转、还可能双写）；
+  - `run.py` 的 uvicorn.run 传 `log_config=uvicorn_log_config()`；supervisor 的 stdout 改 DEVNULL（uvicorn 日志已由 file handler 接管，避免双写同一文件）；
+  - `disable_existing_loggers=False`：不重置应用 root handlers（trader.log/trading.log 保持 setup_logging 配置）；
+  - 验证：`tests/test_log_rotation.py`（3 例：配置结构/RotatingFileHandler/不动 root handler/run.py 接入）；**真实启动**——web 服务 200 后 server.log 含 `uvicorn.access` 行且由 file handler 写入。
 
 ---
 
@@ -439,6 +444,8 @@
 | `scripts/db_backup.py` | P0-1 数据库备份：在线备份(含 WAL 增量)+integrity 验证+恢复演练+保留策略+VACUUM |
 | `tests/test_db_backup.py` | 4 例：WAL 一致性/恢复演练行数对比/保留策略/CLI 备份 |
 | `scripts/service_supervisor.py` | P0-2 进程守护：拉起+探活+失败/崩溃自动重启（watchdog 只报警→能拉起） |
+| `core/logging_config.py`（uvicorn_log_config） | P0-3 日志轮转：server.log 走 RotatingFileHandler（5MB×5），不再 stdout 直写 |
+| `tests/test_log_rotation.py` | 3 例：配置结构/不动 root handler/run.py 接入 log_config |
 | `tests/test_service_supervisor.py` | 4 例：子进程启停/日志JSON/不可达返回码/重启逻辑 |
 | `tests/test_ops_monitor.py` | 5 例：心跳新鲜/老化假死/停止不误报/overview 聚合/CRITICAL→health=false |
 | `strategies/factor_signal.py` | 新增 min_hold_bars 参数（默认0=兼容旧行为）；`tests/test_factor_signal_min_hold.py` 4 例 |

@@ -209,13 +209,15 @@ def main() -> None:
     elif args.cmd == "backfill":
         cmd_backfill(args)
     else:
-        from core.logging_config import setup_logging
+        from core.logging_config import setup_logging, uvicorn_log_config
         setup_logging()
         from config.settings import settings
         import uvicorn
         host = args.host or settings.web_host
         port = args.port or settings.web_port
-        uvicorn.run("web.main:app", host=host, port=port, reload=False)
+        # P0-3：uvicorn access/error 日志走 server.log（带轮转），不再 stdout 直写
+        uvicorn.run("web.main:app", host=host, port=port, reload=False,
+                    log_config=uvicorn_log_config(settings.log_dir))
 
 
 if __name__ == "__main__":

@@ -49,9 +49,11 @@ def _start_proc(host: str, port: int, extra: list[str],
                 cmd: list[str] | None = None) -> subprocess.Popen:
     cmd = cmd or [str(PYTHON), str(ROOT / "run.py"), "web",
                   "--host", host, "--port", str(port), *extra]
-    # 输出重定向到运行日志（避免子进程 stdout 混入守护进程）
-    log_f = (ROOT / "data" / "logs" / "server.log").open("a", encoding="utf-8", errors="replace")
-    return subprocess.Popen(cmd, cwd=ROOT, stdout=log_f, stderr=subprocess.STDOUT)
+    # P0-3：uvicorn 日志已由 core.logging_config.uvicorn_log_config 写入
+    # server.log（带轮转），这里 stdout 丢弃即可——若仍重定向到 server.log
+    # 会和 file handler 双写同一文件（且绕过轮转）。
+    return subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
 
 
 def main() -> int:

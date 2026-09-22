@@ -33,6 +33,9 @@ jobs:
       - name: 1) ruff 门禁（E9+F）
         run: python -m ruff check core/ engine/ ai/ web/ scripts/ backtest/ strategies/ indicators/ config/ drl/
 
+      - name: 1b) 配置 schema 校验（config.yaml 快速失败门禁）
+        run: python scripts/validate_config.py
+
       - name: 2) JS 语法检查
         run: python scripts/check_js.py
 

@@ -30,7 +30,7 @@ PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 
 # 复用 watchdog 探活逻辑（避免重复实现健康判定）
 sys.path.insert(0, str(ROOT / "scripts"))
-from watchdog import check_once, _load_token  # noqa: E402
+from watchdog import check_once  # noqa: E402
 
 
 def _log(event: str, pid: int, restarts: int, reason: str = "") -> None:

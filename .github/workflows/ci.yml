@@ -1,0 +1,46 @@
+# P1 CI 流水线：push/PR 自动跑全部质量门禁。
+# 门禁：
+#   1. ruff check（E9+F：语法级 + 正确性，ruff.toml）
+#   2. JS 语法检查（node --check 优先，esprima 回退）
+#   3. 前端构建链（check-only：JS/CSS/静态引用）
+#   4. compileall（全包字节码编译）
+#   5. 全量 pytest
+# 依赖：requirements-lock.txt（完整锁定，可复现环境）
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: 安装依赖（锁定文件）
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-lock.txt
+
+      - name: 1) ruff 门禁（E9+F）
+        run: python -m ruff check core/ engine/ ai/ web/ scripts/ backtest/ strategies/ indicators/ config/ drl/
+
+      - name: 2) JS 语法检查
+        run: python scripts/check_js.py
+
+      - name: 3) 前端构建链（只读校验）
+        run: python scripts/build_frontend.py --check-only
+
+      - name: 4) 全包字节码编译
+        run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl
+
+      - name: 5) 全量 pytest
+        run: python -m pytest -q

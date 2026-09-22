@@ -101,7 +101,7 @@ def check_js_source(name: str, source: str) -> list[str]:
         return _check_with_node(source)
     # 回退路径：esprima 4.x 兼容层较脆弱（词法按字符扫描，正则含裸引号会失同步），
     # 结果仅供参考——若触发此分支，输出明确警告以便 CI 干预升级环境
-    print(f"[WARN] 未找到 node 可执行文件，JS 语法检查降级为 esprima 兼容层（结果仅供参考）")
+    print("[WARN] 未找到 node 可执行文件，JS 语法检查降级为 esprima 兼容层（结果仅供参考）")
     try:
         esprima.parseScript(es2020_compat(source))
         return []

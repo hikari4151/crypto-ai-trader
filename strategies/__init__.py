@@ -1,6 +1,6 @@
 """策略注册表：内置策略 + AI 动态设计策略。"""
 from typing import Optional
-from .base import Signal, Strategy
+from .base import Strategy
 from .dual_ma import DualMAStrategy
 from .factor_signal import FactorSignalStrategy
 from .grid import GridStrategy

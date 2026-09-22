@@ -63,7 +63,6 @@ class PortfolioConfig:
 
 
 def _resolve_weights(cfg: PortfolioConfig, closes_by_symbol: dict[str, np.ndarray]) -> dict[str, float]:
-    n = len(cfg.symbols)
     if isinstance(cfg.weights, dict):
         w = {s: float(cfg.weights.get(s, 0.0)) for s in cfg.symbols}
     elif cfg.weights == "vol_inv":

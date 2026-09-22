@@ -276,7 +276,7 @@ def _run_on_loop(engine, coro_factory, timeout=30.0):
 
 
 async def _schedule_backtest(body: BacktestRequest, db: Database, engine) -> int:
-    from backtest.data_loader import generate_demo, load_csv, load_klines_cached
+    from backtest.data_loader import generate_demo, load_klines_cached
     from backtest.engine import BacktestConfig
     from backtest.fast_engine import run_backtest_fast
 
@@ -391,7 +391,7 @@ async def _schedule_backtest(body: BacktestRequest, db: Database, engine) -> int
                 from core.database import BacktestResult
                 from sqlalchemy import select
 
-                def _save_err():
+                def _save_err(err_msg: str):
                     # 失败标记落库同样调度回主循环执行
                     async def _inner():
                         async with db.session() as s:
@@ -400,12 +400,14 @@ async def _schedule_backtest(body: BacktestRequest, db: Database, engine) -> int
                                 row = BacktestResult(id=task_id)
                                 s.add(row)
                             row.config_json = json.dumps(body.model_dump(), ensure_ascii=False)
-                            row.metrics_json = json.dumps({"error": str(e)})
+                            row.metrics_json = json.dumps({"error": err_msg})
                             await s.commit()
                     _run_on_loop(engine, _inner)
 
                 try:
-                    _save_err()
+                    # P1-lint(F821)：错误消息作为参数传入，避免闭包捕获
+                    # except 临时变量 e（except 块结束时 e 被 Python 删除）
+                    _save_err(str(e))
                 except TimeoutError:
                     log.warning("[backtest] 错误落库超时（可能迟到落库，进度已在内存完成）")
                 except Exception as e2:  # noqa: BLE001
@@ -474,7 +476,7 @@ async def detect_overfit_api(body: BacktestRequest):
 
     在运行后自动追加到回测结果，或独立调用。
     """
-    from backtest.data_loader import generate_demo, load_csv, load_klines_cached
+    from backtest.data_loader import generate_demo, load_klines_cached
     from backtest.overfit import OverfitConfig, detect_overfit
 
     if body.data_source == "demo":
@@ -540,7 +542,7 @@ async def grid_scan(body: GridScanIn):
     用线程池并发加速；结果仅返回指标，不入库。
     """
     import itertools
-    from backtest.data_loader import generate_demo, load_csv, load_klines_cached
+    from backtest.data_loader import generate_demo, load_klines_cached
     from backtest.engine import BacktestConfig
     from backtest.fast_engine import run_backtest_fast
 
@@ -641,7 +643,7 @@ async def grid_scan(body: GridScanIn):
 @router.post("/compare")
 async def compare_strategies(body: BacktestRequest):
     """策略对比：同一数据上并列跑所有内置策略，输出绩效对比表（辅助选型）。"""
-    from backtest.data_loader import generate_demo, load_csv, load_klines_cached
+    from backtest.data_loader import generate_demo, load_klines_cached
     from backtest.engine import BacktestConfig
     from backtest.fast_engine import run_backtest_fast
     from strategies import list_strategies
@@ -711,7 +713,7 @@ async def cost_scan_api(body: CostScanRequest):
     返回逐组合的收益/夏普/回撤与基准对照表。
     """
     from backtest.cost_scan import CostScanConfig, run_cost_scan
-    from backtest.data_loader import generate_demo, load_csv, load_klines_cached
+    from backtest.data_loader import generate_demo, load_klines_cached
 
     if body.data_source == "demo":
         df = await asyncio.to_thread(generate_demo, timeframe=body.timeframe)
@@ -768,7 +770,7 @@ async def portfolio_api(body: PortfolioRequest):
     支持 equal / vol_inv 权重。demo 源对每标的生成相同演示序列
     （相关矩阵≈1 属预期，用于验证口径）；exchange/csv 按标的加载真实数据。
     """
-    from backtest.data_loader import generate_demo, load_csv, load_klines_cached
+    from backtest.data_loader import generate_demo, load_klines_cached
     from backtest.portfolio import PortfolioConfig, run_portfolio_backtest
 
     symbols = [s for s in body.symbols if s and s.strip()]

@@ -261,8 +261,7 @@ def _math_analysis(snap: dict) -> dict:
             tp = support if (support and support < entry) else entry - 2.5 * atr
         else:
             # 震荡：区间策略——贴近下沿做多 / 上沿做空（同时给两个方案）
-            lo = support or last - 2.0 * atr
-            hi = resistance or last + 2.0 * atr
+            pass  # 区间边界由前端基于 S/R 呈现，这里不强制给单点方案
         if direction in ("long", "short") and entry and stop and tp:
             risk = abs(entry - stop)
             reward = abs(tp - entry)

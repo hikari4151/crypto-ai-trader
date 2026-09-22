@@ -234,11 +234,9 @@ def compute_direction(candles: list, lookback: int = 80) -> dict[str, Any]:
 
     # 置信度：|score| 映射 + 无反对票加成
     magnitude = abs(score)
-    n_signals = max(1, len(signals))
     if direction == "neutral":
         confidence = round(min(0.5, 0.3 + magnitude * 0.05), 3)
     else:
-        agrees = sum(1 for s in signals if s["sign"] == (1 if direction == "long" else -1))
         opposing = sum(1 for s in signals if s["sign"] == (-1 if direction == "long" else 1))
         base = min(0.9, 0.45 + magnitude * 0.1)
         if opposing == 0:

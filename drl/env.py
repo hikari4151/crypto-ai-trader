@@ -229,7 +229,6 @@ class TradingEnv:
         # ---- 1. 按目标仓位在【当前收盘】调仓（下一根K线才产生收益，无前视） ----
         target_ratio = ACTION_BUCKETS[action]
         equity = self._equity(price_now)
-        target_value = equity * target_ratio
         cur_value = self._qty * price_now
         cur_ratio = cur_value / max(equity, 1e-9)
         diff = target_ratio - cur_ratio
@@ -488,7 +487,6 @@ def _precompute_features_cupy(closes: np.ndarray, volumes: np.ndarray, xp) -> np
     # 首元素 NaN 填 0（避免 cumsum 传播），warmup 区不影响训练
     ret0 = fill_nan0(ret)
     vol5 = roll_std(ret0, 5)
-    vol20 = roll_std(ret0, 20)
     # 风险 regime：与 numpy 版完全一致用原始 ret（保留首元素 NaN）做
     # rolling(20).std().rolling(40).rank(pct=True)。rank 难 GPU 化，此列
     # 量小走 numpy，保证训练/部署特征严格一致。

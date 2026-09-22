@@ -20,7 +20,7 @@ import shutil
 import sqlite3
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,7 +68,6 @@ def verify_backup(path: Path, name: str) -> tuple[bool, dict]:
         try:
             row = con.execute("PRAGMA integrity_check").fetchone()
             info["integrity"] = row[0] if row else "unknown"
-            ok = info["integrity"] == "ok"
             for t in KEY_TABLES.get(name, set()):
                 try:
                     n = con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]

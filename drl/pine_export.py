@@ -256,7 +256,7 @@ def build_drl_pine(agent, model_name: str = "rl_agent",
     if train_metrics:
         push(f"//  训练收益 {train_metrics.get('train_ret', '-')} · "
              f"OOS收益 {train_metrics.get('oos_ret', '-')} · 夏普 {train_metrics.get('sharpe', '-')}")
-    push(f"//  特征口径与训练环境 drl/env.py 逐项一致（tanh 有界 + clip + 滚动分位）")
+    push("//  特征口径与训练环境 drl/env.py 逐项一致（tanh 有界 + clip + 滚动分位）")
     push("// ╚════════════════════════════════════════════════════════════════╝")
     push('strategy("DRL · ' + model_name + '", overlay=true,')
     push('     initial_capital=10000,')

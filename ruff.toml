@@ -1,0 +1,25 @@
+# P1 lint 门禁配置：只开"致命 + 正确性"规则，不一次性开启全量风格规则。
+# E9 = 语法级错误（SyntaxError 等价）；F = pyflakes（未定义/未使用/重复键等正确性问题）。
+# 目标：CI 能稳定通过且真实拦截 bug（P1 实测已拦截 2 个真 bug：
+#   web/api/backtest.py F821 闭包捕获 except 临时变量；
+#   scripts/slippage_sensitivity_drl.py F601 字典重复键）。
+# 风格类（E/W）后续按模块渐进开启，避免一次性 400+ 错误淹没门禁。
+line-length = 110
+target-version = "py310"
+
+[lint]
+select = ["E9", "F"]
+ignore = ["E902"]
+
+[lint.per-file-ignores]
+# 脚本/研究代码允许较宽松（一次性脚本不强制全部正确性规则）
+"scripts/slippage_sensitivity_drl.py" = ["F401", "F841"]
+".optim/*" = ["E9", "F"]
+# ⚠️ 并行工作流文件（持续进化/GAP-01 方向，本会话另一任务正在改）：
+# 暂不纳入 lint 门禁，待其合入后移除本段
+"config/settings.py" = ["E9", "F"]
+"drl/evolve_engine.py" = ["E9", "F"]
+"drl/model_zoo.py" = ["E9", "F"]
+"drl/walkforward.py" = ["E9", "F"]
+"strategies/meta.py" = ["E9", "F"]
+"drl/factor_miner.py" = ["E9", "F"]  # 历史遗留：noqa 指令后带中文注释导致无效，暂豁免

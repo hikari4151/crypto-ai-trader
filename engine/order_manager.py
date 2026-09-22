@@ -447,7 +447,7 @@ class OrderManager:
             # （事件被 bus 吞掉，后续止损止盈信号全部丢失）
             log.warning("[order] 纸面成交被拒（%s %s）: %s", signal.side, signal.symbol, e)
             return None
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.exception("[order] 纸面成交异常: %s", signal)
             return None
         trade_id = await self._record_trade(signal, price, qty, fee, strategy_name)
@@ -564,7 +564,6 @@ class OrderManager:
                 return None
             client_oid = self._new_client_oid()
             order = None
-            last_err: Optional[Exception] = None
             for attempt in range(_CREATE_RETRIES + 1):
                 try:
                     order = await self.exchange.create_order(
@@ -574,7 +573,6 @@ class OrderManager:
                     )
                     break
                 except (ccxt.NetworkError, ccxt.RequestTimeout, asyncio.TimeoutError) as e:
-                    last_err = e
                     log.warning("[order] create 网络异常（第 %d/%d 次），复用 clientOrderId=%s: %s",
                                 attempt + 1, _CREATE_RETRIES + 1, client_oid, e)
                     if attempt < _CREATE_RETRIES:
@@ -661,7 +659,7 @@ class OrderManager:
                 "fee": fee, "cost_price": cost_price, "strategy_name": strategy_name,
             }, source="order_manager"))
             return {"price": price, "qty": filled, "fee": fee, "trade_id": trade_id, "cost_price": cost_price}
-        except Exception as e:  # noqa: BLE001  # 实盘下单整体 guard：含 DB 落库（_record_trade）、交易所交互、FIFO 记账等多环节，保留宽泛以防单点异常导致引擎无响应
+        except Exception:  # noqa: BLE001  # 实盘下单整体 guard：含 DB 落库（_record_trade）、交易所交互、FIFO 记账等多环节，保留宽泛以防单点异常导致引擎无响应
             log.exception("[order] 实盘下单失败: %s", signal)
             return None
 

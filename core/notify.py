@@ -60,7 +60,6 @@ async def _send_all(db, title: str, message: str) -> None:
         _send_email(cfg.get("email") or {}, title, message),
         return_exceptions=True,
     )
-    sent = sum(1 for r in results if r is True)
     for r in results:
         if isinstance(r, Exception):
             log.warning("[notify] 渠道发送失败: %s", r)

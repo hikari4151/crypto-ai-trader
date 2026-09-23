@@ -17,4 +17,10 @@ def test_context_bar_is_transparent_and_menu_bar_is_untouched():
     assert "border:0" in ctx_rule
     assert "backdrop-filter:none" in ctx_rule
     assert ".ctx-chip{background:color-mix" in HTML
-    assert ".menubar{height:46px" in HTML
+    # 2026-09-23 并行 UI 重构（1292b5a）：menubar 改为毛玻璃自适应
+    # （backdrop-filter blur + color-mix 背景），不再有固定 height:46px。
+    # 契约更新为断言新设计特征——menubar 仍是"顶部栏"（毛玻璃分隔条），
+    # 而非误回归成无样式旧版。
+    assert ".menubar{backdrop-filter:blur" in HTML
+    assert "background:color-mix" in HTML
+    assert "var(--glass-edge)" in HTML

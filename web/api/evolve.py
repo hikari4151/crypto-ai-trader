@@ -13,10 +13,27 @@ _CONFIG_KEYS = {
     "rolling_window", "rollback_threshold", "factor_miner_episodes",
     "strategy_drl_episodes", "meta_episodes", "vol_penalty", "oos_min_bars",
     "cross_symbol_oos", "min_new_bars",
+    # E-EXP：元策略「持仓参与塑形」系数（0=关闭）
+    "meta_participation_scale",
+    # walk-forward 多折观测（同品种，不改接受逻辑）
+    "strategy_drl_walkforward_obs", "strategy_drl_walkforward_folds",
+    "strategy_drl_walkforward_bars", "walkforward_min_trades",
+    # 连续拒绝 from-scratch 重置（0=关闭）
+    "strategy_drl_reset_after_rejects", "meta_reset_after_rejects",
+    # GAP-01 实盘验收观测（同品种，两档成本）
+    "gap01_obs", "gap01_folds", "gap01_bars", "gap01_min_trades",
+    "gap01_cost_multiplier", "gap01_fail_reset_after", "gap01_stable_pass_required",
+    # 长窗回放观测（30/90 天）
+    "strategy_drl_longwindow_obs", "strategy_drl_longwindow_30d_bars",
+    "strategy_drl_longwindow_90d_bars", "strategy_drl_longwindow_every_n",
     # P0/P1：续训控成本 + 锚点量级闸 + 故障期暂停
     "train_time_budget", "min_train_gap_sec", "train_on_demo", "anchor_max_fitness",
     # P0-族群：策略 DRL 冠军/挑战者 K=2 族群开关
     "strategy_drl_population",
+    # 训练能力参数（n_episodes/ppo_epochs，4→8 实验）
+    "strategy_drl_n_episodes", "strategy_drl_ppo_epochs",
+    # 训练环境最小交易区（降换手实验，0.05→0.10）
+    "strategy_drl_min_trade_zone",
     # 第2项完善：连续 OOS 被拒自动降频阈值
     "reject_downshift_after",
 }
@@ -207,11 +224,12 @@ async def rounds(model: str = "strategy_drl",
                     "position_ratio": r.position_ratio,
                     "selected_factors": _parse_json_value(r.selected_factors, []),
                     "status": r.status,
+                    "lineage": getattr(r, "lineage", "") or "",
                     "audit": _parse_json_value(getattr(r, "audit_json", None), {}),
                 })
     except HTTPException:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         import logging
         logging.getLogger("evolve").exception("[evolve] 读取训练轮次失败")
         raise HTTPException(status_code=500, detail="读取训练轮次失败，请稍后重试")

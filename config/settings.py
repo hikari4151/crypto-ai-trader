@@ -153,6 +153,10 @@ class Settings(BaseSettings):
     # 旧配置 state_window=20 + hidden=[64,64] = 21184 权重 ≈700KB 脚本 → 进化产物
     # 永远没有可运行的自动交易代码（图上买卖点无从谈起）。改回大网络即放弃 Pine 导出。
     evolve_strategy_drl_state_window: int = 4
+    # 训练环境最小交易区（TradingEnv.min_trade_zone）：目标仓位差异小于该比例不开仓。
+    # 0.05（旧默认）→ 0.10：让模型学会少动、降换手/成本（v44/v47 长窗亏损主因之一
+    # 是高换手成本侵蚀；buy_zone 部署侧扫描无效，须在训练侧解决）。
+    evolve_strategy_drl_min_trade_zone: float = 0.10
     evolve_strategy_drl_hidden: list[int] = [16, 16]
     evolve_meta_episodes: int = 16                 # 每轮元策略训练轮数（连续训练取小值；
                                              # 8→16 实验提升：.optim/exp_training/verify_meta_rounds.py
@@ -162,6 +166,10 @@ class Settings(BaseSettings):
     # 让 PPO 学会在信号高置信时持仓（元控制器本职），逃出"空仓=0"懒惰最优解；
     # 0=关闭保持旧行为。塑形只进训练梯度，best_ret/OOS 仍按真实收益。
     evolve_meta_signal_align: float = 12.0
+    # E-EXP（2026-09-19 落地）：元策略「持仓参与塑形」系数。奖励 += 系数×当前仓位比，
+    # 直接惩罚"空仓=0"的懒惰最优解（生产归档：meta_controller 489/501 轮被拒、fitness=0）。
+    # 只进训练梯度，选模/OOS 的 total_ret 仍按权益复利计算。0=关闭保持旧行为。
+    evolve_meta_participation_scale: float = 0.5
     evolve_rollback_threshold: float = 0.95       # 新模型低于最佳模型此比例时回退（仅旧 fitness 为正时生效）
     evolve_max_versions: int = 10                 # 保留的历史版本数
     evolve_symbols: list[str] = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # 训练标的池（留单个=固定品种训练）
@@ -202,11 +210,69 @@ class Settings(BaseSettings):
     # 挑战者谱系独立槽位（strategy_drl_alt）提供多样性，须显著优于冠军才晋升，
     # 防"运气好"的模型靠噪音上位（选择只看 OOS，不看训练段）。
     evolve_strategy_drl_population: bool = True
+    # 训练能力参数（2026-09-21，诊断 §15 剩余杠杆）：批量收集轨迹数（n_episodes）
+    # 与 PPO 更新轮数（ppo_epochs）。4→8 提升样本效率/去方差，观察模型是否从
+    # "只在训练段交易"变成 val/OOS 段也交易。两参数不进 _training_identity，
+    # 改动不触发锚点身份不可比。0=回退引擎默认（4/4）。
+    evolve_strategy_drl_n_episodes: int = 8
+    evolve_strategy_drl_ppo_epochs: int = 8
+    # walk-forward 同品种多折观测（2026-09-19，用户选"1"）：每轮 strategy DRL
+    # 真实训练后，用部署中的最佳模型在最近 N 根K线上做多折评估（不改接受逻辑），
+    # 结果写 models/walkforward_obs.json + 日志摘要，作为"换一段历史也赚"的常规可见指标。
+    evolve_strategy_drl_walkforward_obs: bool = True
+    evolve_strategy_drl_walkforward_folds: int = 2
+    evolve_strategy_drl_walkforward_bars: int = 6000
+    evolve_walkforward_min_trades: int = 8
+    # 连续拒绝 from-scratch 重置（对齐 factor_miner 先例，诊断报告 §7 建议第2条）：
+    # 策略 DRL（仅冠军轮）/ meta_controller 连续 OOS 被拒达阈值后，下一轮强制
+    # 从零重训（base_agent=None），打破"永久连拒"困在老基线上的死循环。0=关闭。
+    evolve_strategy_drl_reset_after_rejects: int = 5
+    evolve_meta_reset_after_rejects: int = 5
+    # GAP-01 实盘验收观测（2026-09-19，诊断报告建议第6条(b)）：每轮 strategy DRL
+    # 真实训练后，对部署中的最佳模型跑同品种多折 walk-forward × 两档成本（基准/翻倍），
+    # 输出 PASS/FAIL（单标的部署豁免跨品种，见 docs/LIVE_READINESS.md E7）。
+    # 结果写 models/gap01_obs.json + 日志；不改接受逻辑。
+    # 2026-09-21：口径固定为 4 折 × 15000 根（与 scripts/walkforward_rl_evolve.py
+    # 一致）——原 2 折 × 6000 根是"最近窗口红利"，v36 假过考试（4 折 FAIL）。
+    evolve_gap01_obs: bool = True
+    evolve_gap01_folds: int = 4
+    evolve_gap01_bars: int = 15000
+    evolve_gap01_min_trades: int = 8
+    evolve_gap01_cost_multiplier: float = 2.0
+    # GAP-01 FAIL 软信号（2026-09-20）：连续 N 轮 GAP-01 未通过（FAIL/INCONCLUSIVE）
+    # 触发策略 DRL 冠军轮 from-scratch 重学（补考不过→重学）；PASS 清零、触发清零。0=关闭。
+    evolve_gap01_fail_reset_after: int = 3
+    # 多窗口连续 PASS 判定（2026-09-21，§16.5 遗留1）：同一部署模型连续 N 次
+    # GAP-01 观测全部 PASS 才算"稳定 PASS"（gap01_stable=True，实盘候选依据）；
+    # 非 PASS（FAIL/INCONCLUSIVE）或部署版本变化即清零。0=关闭。
+    evolve_gap01_stable_pass_required: int = 3
+    # 长窗回放观测（2026-09-21，§16.5 升级）：每轮训练后对部署模型跑 30/90 天
+    # 真实数据引擎撮合回放，两窗收益均正才 longwindow_verdict=PASS（防"近期
+    # 窗口效应"冒充实盘候选——v44 短窗 PASS 但 30 天 -26.6% / 90 天 -67.8%）。
+    evolve_strategy_drl_longwindow_obs: bool = True
+    evolve_strategy_drl_longwindow_30d_bars: int = 8640
+    evolve_strategy_drl_longwindow_90d_bars: int = 25920
+    # 长窗观测频率（2026-09-22，训练速度研究）：实测训练仅 ~9.5s/轮，瓶颈在
+    # 30/90 天回放（每轮 +数分钟）——默认每 5 轮跑一次长窗观测，进化节奏大幅回升；
+    # 1=每轮（旧行为，观察密集但循环极慢）。
+    evolve_strategy_drl_longwindow_every_n: int = 5
+    # 部署长窗门槛（2026-09-22，§20 落地）：候选模型部署前须过 30 天长窗回放
+    #（30d>0 才允许部署；FAIL 仅存档不部署，防高换手短窗模型顶替长窗稳健模型——
+    # v50/52/53/55 类长窗 -10%~-56% 却因 OOS 门正被部署的教训）。False=逃生关闭。
+    evolve_strategy_drl_deploy_requires_longwindow: bool = True
+    # 部署长窗门是否要求 90 天档（2026-09-22，§20.3 升级）：True=候选须 30d 与
+    # 90d 均正才部署（与观测口径一致）；False=仅 30d 门槛（默认，控制冠军轮成本）。
+    evolve_strategy_drl_deploy_longwindow_90d: bool = False
     # 优化（自测实验，实测数据）：进化组合因子"回测摘要"的窗口上限（根K线）。
     # 摘要属纯展示用途，耗时随窗口线性增长（5m：1000 根 1.9s / 3000 根 5.9s /
     # 5000 根 10s，热点在 combo 因子每根全量重算），训练间隔 60s 时全窗口
     # 回测会显著占 CPU。>0 = 只回测最近 N 根；0（默认）= 全窗口（语义不变）。
     evolve_factor_summary_bars: int = 0
+    # AI 数学期望信号门（2026-09-22，§19 落地）：buy 信号在风控通过后，若
+    # ai.math_analysis 的期望收益 < signal_math_ev_min 则拦截新开多（负期望
+    # 抑制买入，sell/止损/减仓不受影响）。True=默认生效；False=逃生关闭。
+    signal_math_ev_gate: bool = True
+    signal_math_ev_min: float = 0.0
 
     @property
     def data_dir(self) -> Path:

@@ -741,7 +741,16 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     best_train_ret = -1e9
     best_val_ret = -1e9
     best_agent: Optional[ACAgent] = None
-    val_eval_interval = max(1, int(cfg.get("val_eval_interval", 10)))
+    # 验证评估间隔：默认10轮。2026-09-20（诊断 §15）：持续进化 episodes=8 时
+    # 默认10会导致 val 只在最后一轮（ep==episodes 兜底）评估一次，"周期性按
+    # val 选最优"失效。钳到 episodes//3（至少1），保证训练期间≥3次 val 评估。
+    _val_interval_cfg = max(1, int(cfg.get("val_eval_interval", 10)))
+    val_eval_interval = max(1, min(_val_interval_cfg, max(1, episodes // 3)))
+    # 2026-09-20（diagnosis §15 / regime 诊断）：val 段单一时序可能只有单一
+    # regime（如下行震荡），选出的"保守模型"对上行的 OOS 段不交易（position_ratio=0）。
+    # val_segments>1 时把 val 段切成多段，选模收益取各段中位数（与 oos_segments 同构），
+    # 让模型必须在多个子段都表现好才被选，不偏向单一 regime。默认 1 保持兼容。
+    val_segments = max(1, int(cfg.get("val_segments", 1)))
     # 早停保护：验证收益连续无改善次数达到阈值则提前停止（借鉴 SB3 EvalCallback）
     no_improve_streak = 0
     early_stop_patience = int(cfg.get("early_stop_patience", 0))  # 0=禁用，>0 启用
@@ -877,11 +886,42 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
             val_ret = None
             if (ep % val_eval_interval == 0 or ep == episodes) and not val_skipped:
                 try:
-                    vtraj = run_episode(val_env, lambda s: agent.greedy_action(s))
-                    val_ret = float(vtraj["total_ret"])
+                    vtraj = None
+                    v_equities: list = []
+                    # 多段 val（val_segments>1）：val 段切成多个子段逐段确定性 greedy，
+                    # 取收益中位数作为本轮 val_ret——避免单一 regime 选出"只在某段行情
+                    # 表现好"的模型（regime 诊断：val 下行震荡 → OOS 上行不交易）。
+                    if val_segments > 1 and len(val_df) >= val_segments * 80:
+                        _vseg = len(val_df) // val_segments
+                        _vrets: list[float] = []
+                        for _j in range(val_segments):
+                            _s = val_df.iloc[_j * _vseg:(len(val_df) if _j == val_segments - 1 else (_j + 1) * _vseg)]
+                            _se_extra = None
+                            if extra_factors_val is not None:
+                                _se_extra = extra_factors_val[_j * _vseg:(len(val_df) if _j == val_segments - 1 else (_j + 1) * _vseg)]
+                            _venv = TradingEnv(_s, start_cash=float(cfg.get("start_cash", 10000.0)),
+                                               fee_rate=float(cfg.get("fee_rate", 0.001)),
+                                               vol_penalty=vol_penalty, cost_scale=1.0,
+                                               slippage=slippage,
+                                               min_trade_zone=float(cfg.get("min_trade_zone", 0.05)),
+                                               extra_factors=_se_extra,
+                                               state_window=state_window,
+                                               tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
+                                               participation_rate=float(cfg.get("participation_rate", 0.0)),
+                                               funding_rate=float(cfg.get("funding_rate", 0.0)))
+                            _vt = run_episode(_venv, lambda s: agent.greedy_action(s))
+                            _vrets.append(float(_vt["total_ret"]))
+                            v_equities += [i.get("equity") for i in _vt.get("infos", [])
+                                           if i.get("equity") is not None]
+                        val_ret = float(np.median(_vrets))
+                    else:
+                        vtraj = run_episode(val_env, lambda s: agent.greedy_action(s))
+                        val_ret = float(vtraj["total_ret"])
+                        v_equities = [info.get("equity") for info in vtraj.get("infos", [])
+                                      if info.get("equity") is not None]
                     row["val_ret"] = round(val_ret, 6)
+                    row["val_segments"] = val_segments
                     # ---- 验证评估指标增强 ----
-                    v_equities = [info.get("equity") for info in vtraj.get("infos", []) if info.get("equity") is not None]
                     val_sharpe = _equity_sharpe(v_equities) if len(v_equities) > 2 else 0.0
                     val_max_dd = _equity_drawdown(v_equities) if len(v_equities) > 2 else 0.0
                     row["val_sharpe"] = round(val_sharpe, 4)
@@ -1099,6 +1139,7 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         "history": history,
         "best_ret": round(max(best_train_ret, best_val_ret), 6),
         "best_val_ret": round(best_val_ret, 6),
+        "val_segments": val_segments,
         "final_ret": round(total_ret, 6),
         "episodes": episodes,
         "state_dim": env.state_dim,

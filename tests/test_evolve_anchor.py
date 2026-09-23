@@ -18,6 +18,14 @@ from backtest.data_loader import generate_demo
 from config.settings import settings
 from drl.agent import ACAgent
 from drl.evolve_engine import EvolveEngine
+
+
+@pytest.fixture(autouse=True)
+def _disable_deploy_longwindow(monkeypatch):
+    """2026-09-23：部署长窗门（§20.3 新机制）会拦截 fake 回放 total_return<=0 的
+    测试模型；anchor 测试聚焦锚点可比性逻辑，与本门无关——显式关闭。"""
+    monkeypatch.setattr(settings, "evolve_strategy_drl_deploy_requires_longwindow",
+                        False, raising=False)
 from drl.model_zoo import ModelZoo
 from tests.test_drl_optimizations import _MetaDB
 

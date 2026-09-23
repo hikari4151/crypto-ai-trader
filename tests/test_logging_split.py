@@ -14,11 +14,31 @@ from core.logging_config import setup_logging
 
 @pytest.fixture
 def log_dir(tmp_path):
-    """隔离日志目录；测试后移除本次安装的 handler（防污染其他测试）。"""
+    """隔离日志目录；测试后移除本次安装的 handler（防污染其他测试）。
+
+    也保存/恢复 uvicorn.* logger：uvicorn_log_config 会给这些 logger 装
+    独立 handler 且 propagate=False，setup_logging 不清除它们——若前面
+    测试先 dictConfig(uvicorn_log_config)，本测试的 uvicorn.access 日志
+    会只进自带 handler 不进 trader.log，导致隔离断言失败。
+    """
     root = logging.getLogger()
     saved = list(root.handlers)
     level = root.level
+    # 保存 uvicorn 体系 logger 状态（handlers + propagate）
+    uvi_names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    saved_uvi = {n: (list(logging.getLogger(n).handlers),
+                     logging.getLogger(n).propagate,
+                     logging.getLogger(n).level) for n in uvi_names}
     setup_logging("INFO", str(tmp_path))
+    # 测试期间把 uvicorn.* 清干净：若更早的测试 dictConfig(uvicorn_log_config)
+    # 给它们装了独立 handler 且 propagate=False，本测试的 uvicorn.access 日志
+    # 会只进自带 handler 不进 trader.log，隔离断言失败。这里强制恢复传播，
+    # 结束后再还原保存的状态。
+    for n in uvi_names:
+        lg = logging.getLogger(n)
+        for h in list(lg.handlers):
+            lg.removeHandler(h)
+        lg.propagate = True
     try:
         yield tmp_path
     finally:
@@ -32,6 +52,20 @@ def log_dir(tmp_path):
         for h in saved:
             root.addHandler(h)
         root.setLevel(level)
+        # 恢复 uvicorn.* logger（清掉 uvicorn_log_config 可能装的 handler）
+        for n in uvi_names:
+            lg = logging.getLogger(n)
+            for h in list(lg.handlers):
+                lg.removeHandler(h)
+                try:
+                    h.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            hs, prop, lvl = saved_uvi[n]
+            for h in hs:
+                lg.addHandler(h)
+            lg.propagate = prop
+            lg.setLevel(lvl)
 
 
 def _flush():

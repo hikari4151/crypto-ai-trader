@@ -148,3 +148,24 @@ def run_backtest(df: pd.DataFrame, cfg: BacktestConfig,
             "trades": trades, "symbol": cfg.symbol, "timeframe": cfg.timeframe,
             "strategy": cfg.strategy_name, "params": strategy.params,
             "benchmark": metrics["benchmark"]}
+
+
+def run_multi_window(df: pd.DataFrame, cfg: BacktestConfig,
+                     windows: list[tuple[int, int]],
+                     bootstrap: bool = False) -> list[dict]:
+    """F-03（2026-09-23）：多历史窗口回测对比（窗口敏感性检查，防 v44 式
+    近期窗口效应冒充实盘候选）。每个 [start, end] 索引窗口独立回测，返回
+    {window, rows, metrics}；窗口过短（<60 根）跳过；空 windows 返回 []。
+    """
+    out: list[dict] = []
+    for s, e in windows or []:
+        part = df.iloc[int(s):int(e)]
+        if len(part) < 60:
+            continue
+        r = run_backtest(part, cfg, bootstrap=bootstrap)
+        out.append({
+            "window": [int(s), int(e)],
+            "rows": int(len(part)),
+            "metrics": (r or {}).get("metrics", {}),
+        })
+    return out

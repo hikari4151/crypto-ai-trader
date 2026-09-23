@@ -100,6 +100,7 @@ class BacktestRequest(BaseModel):
     participation_rate: float = Field(default=0.0, ge=0, le=1.0, allow_inf_nan=False)
     intrabar_stops: bool = True              # intrabar 止损/止盈触价建模
     cleaning_mode: str = "mark"              # 数据清洗：mark（默认标记）| replace
+    windows: list[list[int]] = []           # F-03 多历史窗口对比 [[start,end],...]
 
 
 class GridScanIn(BaseModel):
@@ -822,3 +823,30 @@ async def portfolio_api(body: PortfolioRequest):
             "per_symbol": [{"symbol": ps["symbol"], "strategy": ps["strategy"],
                             "weight": ps["weight"], "metrics": ps["metrics"]}
                            for ps in report["per_symbol"]]}
+
+
+@router.post("/multi-window")
+async def run_multi_window_api(body: BacktestRequest, db: Database = Depends(get_db)):
+    """F-03: multi-window backtest compare (window sensitivity check)."""
+    from backtest.data_loader import generate_demo, load_klines_cached
+    from backtest.engine import BacktestConfig, run_multi_window
+
+    wins = [tuple(w) for w in (body.windows or [[0, body.limit // 2], [body.limit // 2, body.limit]])]
+    need = max((e for _, e in wins), default=body.limit)
+    if body.data_source == "demo":
+        df = generate_demo(n=max(need, 2000), timeframe=body.timeframe)
+    else:
+        df = await load_klines_cached(body.exchange, body.symbol, body.timeframe,
+                                      limit=need, max_candles=need)
+    if df is None or len(df) < 60:
+        return {"ok": False, "error": "data insufficient"}
+    cfg = BacktestConfig(symbol=body.symbol, timeframe=body.timeframe,
+                         strategy_name=body.strategy_name,
+                         strategy_params=body.strategy_params,
+                         start_cash=body.start_cash, fee_rate=body.fee_rate,
+                         slippage=body.slippage,
+                         limit_order_model=body.limit_order_model,
+                         funding_rate=body.funding_rate,
+                         participation_rate=body.participation_rate,
+                         cleaning_mode=body.cleaning_mode)
+    return {"ok": True, "windows": run_multi_window(df, cfg, wins, bootstrap=False)}

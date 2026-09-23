@@ -49,25 +49,6 @@ jobs:
         run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl
 
       - name: 5) 全量 pytest
-        # 排除 DRL 训练类慢测试：并行工作流改动 drl 代码后这些测试从秒级
-        # 变分钟级/挂起（含未提交新增 + 已提交但含真实 train_drl 的文件）。
-        # 并行方修复/标记 slow 后移除本段。
-        run: >-
-          python -m pytest -q
-          --ignore=tests/test_drl_val_selection.py
-          --ignore=tests/test_evolve_cascade_recompute.py
-          --ignore=tests/test_evolve_challenger_base.py
-          --ignore=tests/test_evolve_from_scratch_reset.py
-          --ignore=tests/test_evolve_gap01.py
-          --ignore=tests/test_evolve_gap01_refetch.py
-          --ignore=tests/test_evolve_lineage.py
-          --ignore=tests/test_evolve_longwindow.py
-          --ignore=tests/test_evolve_pine_internal_only.py
-          --ignore=tests/test_evolve_train_cfg.py
-          --ignore=tests/test_evolve_walkforward_obs.py
-          --ignore=tests/test_meta_participation_shaping.py
-          --ignore=tests/test_model_zoo_factor_meta.py
-          --ignore=tests/test_walkforward_rl_evolve.py
-          --ignore=tests/test_earlystop_tune.py
-          --ignore=tests/test_evolve_anchor.py
-          --ignore=tests/test_evolve_population.py
+        # 并行工作流已收敛（d484a95 等提交），DRL 训练测试已纳入其职责；
+        # 恢复全量回归（此前 17 个训练测试排除段已移除）
+        run: python -m pytest -q

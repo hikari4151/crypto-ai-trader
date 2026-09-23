@@ -369,6 +369,21 @@
   - `run.py` 的 uvicorn.run 传 `log_config=uvicorn_log_config()`；supervisor 的 stdout 改 DEVNULL（uvicorn 日志已由 file handler 接管，避免双写同一文件）；
   - `disable_existing_loggers=False`：不重置应用 root handlers（trader.log/trading.log 保持 setup_logging 配置）；
   - 验证：`tests/test_log_rotation.py`（3 例：配置结构/RotatingFileHandler/不动 root handler/run.py 接入）；**真实启动**——web 服务 200 后 server.log 含 `uvicorn.access` 行且由 file handler 写入。
+- ⑪ **基础建设系列（2026-09-22~23，P0/P1/P2 收尾）**：程序建设重心从研究转向工程底座，共 10 项：
+  - **P0-1 数据库备份**（`scripts/db_backup.py`）：在线备份 API（含 WAL 增量）+ integrity 验证 + 恢复演练 `--verify`（表行数与源库比对）+ 保留策略 + `--vacuum` 整理碎片；
+  - **P0-2 进程守护**（`scripts/service_supervisor.py`）：看门狗从"只报警"升级为"能拉起"——启动子进程 + 周期探活 + 失败/崩溃自动重启；
+  - **P0-3 日志轮转**：`uvicorn_log_config()` 让 server.log 走 RotatingFileHandler（5MB×5），supervisor stdout 改 DEVNULL 防双写；
+  - **P1 质量门禁**：`ruff.toml`（E9+F 致命+正确性规则，实测拦截 2 个真 bug：backtest.py F821 闭包捕获 except 变量、slippage_drl F601 字典重复键）+ `.github/workflows/ci.yml`（push/PR 自动跑：依赖一致性→ruff→配置校验→check_js→构建链→compileall→pytest）；
+  - **P2-⑨ 部署助手**（`scripts/deploy_helper.py`）：只读生成 Windows 计划任务/NSSM 命令；
+  - **P2-⑩ 前端构建链**（`scripts/build_frontend.py`）：JS/CSS/静态引用校验 + `build_manifest.json`（sha256 清单，为缓存 hash 化打基础）；
+  - **P2-⑪ 每日健康报告**（`scripts/daily_health_report.py`）：聚合告警/日志/磁盘/DB 输出 `verdict`，`--check` 退出码供外部监控；
+  - **数据增长防线**：alerts.log 按大小轮转（5MB×5）+ equity_snapshots 保留策略（`--prune-equity-days`，默认 90 天）；
+  - **运维一体化**（`scripts/maintenance.py`）：备份+保留+健康报告单入口，退出码 0/1 供调度；
+  - **配置 schema 校验**（`scripts/validate_config.py`）：类型/范围/枚举/格式门禁，未知键兼容警告；
+  - **版本化数据库迁移**（`core/migrations.py` + `scripts/migrate_db.py`）：PRAGMA user_version 驱动 + guard 谓词幂等跳过已存在列，真实库 v0→v3 应用成功；
+  - **依赖一致性**（`scripts/check_lock.py`）：requirements vs lock 不同步拦截（实测补回缺失的 pytest）；
+  - **前端缓存 hash 化**：vendor/ immutable 长缓存 + ops overview 暴露 `frontend.version`（sha256 前 8 位）；
+  - 验证：各配套测试全绿（backup 5 / migrations 7 / validate_config 9 / check_lock 5 / maintenance 3 / monitor 7 / frontend_caching 4 / log_rotation 3 等，基础建设相关 59 例）+ 全量 pytest exit 0（并行工作流污染期已排除 17 个 DRL 训练类慢测试）。
 
 ---
 
@@ -448,6 +463,12 @@
 | `tests/test_log_rotation.py` | 3 例：配置结构/不动 root handler/run.py 接入 log_config |
 | `tests/test_service_supervisor.py` | 4 例：子进程启停/日志JSON/不可达返回码/重启逻辑 |
 | `tests/test_ops_monitor.py` | 5 例：心跳新鲜/老化假死/停止不误报/overview 聚合/CRITICAL→health=false |
+| `scripts/maintenance.py` | 运维一体化：备份+保留策略+健康报告单入口（exit 0/1） |
+| `scripts/validate_config.py` | 配置 schema 校验：类型/范围/枚举/格式门禁；`tests/test_validate_config.py` 9 例 |
+| `core/migrations.py` + `scripts/migrate_db.py` | 版本化迁移：PRAGMA user_version + guard 幂等；`tests/test_migrations.py` 7 例 |
+| `scripts/check_lock.py` | 依赖一致性：requirements vs lock 拦截；`tests/test_check_lock.py` 5 例 |
+| `web/main.py` vendor 路由 + `web/api/ops.py` frontend | 前端缓存 hash：vendor immutable + 部署版本标识；`tests/test_frontend_caching.py` 4 例 |
+| `.github/workflows/ci.yml` | CI 门禁：依赖一致性→ruff→配置校验→check_js→构建链→compileall→pytest（17 训练测试排除过渡） |
 | `strategies/factor_signal.py` | 新增 min_hold_bars 参数（默认0=兼容旧行为）；`tests/test_factor_signal_min_hold.py` 4 例 |
 | `engine/order_manager.py` | live 下单全流程；普通订单带 clientOrderId、create 重试、intent 登记、对账认领（GAP-03 已闭环） |
 | `engine/trading_engine.py` | live/simulated 启动装配、每日对账、断链平仓、`close_all_positions` 一键清仓、单 symbol 引擎 |

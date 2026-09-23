@@ -76,7 +76,8 @@ def _execute_fill(cfg, sig: Signal, fill_price: float, symbol: str,
                   trades: list[dict], strategy: Strategy,
                   record_buy_trade: bool, bar_volume: float = 0.0,
                   entry_i: int = -1, exit_i: int = -1,
-                  stats: Optional[dict] = None) -> tuple[bool, float, float, Optional[dict]]:
+                  stats: Optional[dict] = None,
+                  ref_price: Optional[float] = None) -> tuple[bool, float, float, Optional[dict]]:
     """执行一笔成交（买入/卖出）。返回 (filled, cash, position, trade_for_progress)。
 
     - filled: 是否实际成交（供 on_fill 回调与进度展示）
@@ -119,6 +120,9 @@ def _execute_fill(cfg, sig: Signal, fill_price: float, symbol: str,
                     "price": round(fill_price, 6), "qty": round(qty, 8),
                     "fee": round(fee, 6), "pnl": 0.0, "reason": sig.reason,
                     "entry_i": max(entry_i, 0),
+                    # C-① 滑点统计：不利幅度（正=不利）：买入太贵
+                    "slippage": round((fill_price - ref_price) / ref_price, 6)
+                    if ref_price else None,
                 }
     elif sig.side == "sell" and position > 0:
         qty = sig.qty if sig.qty else position
@@ -152,6 +156,9 @@ def _execute_fill(cfg, sig: Signal, fill_price: float, symbol: str,
             "fee": round(fee, 6), "pnl": round(pnl, 6), "reason": sig.reason,
             "entry_i": first_entry_i if first_entry_i >= 0 else max(entry_i, 0),
             "exit_i": max(exit_i, 0),
+            # C-① 滑点统计：不利幅度（正=不利）：卖出太便宜
+            "slippage": round((ref_price - fill_price) / ref_price, 6)
+            if ref_price else None,
         }
         trades.append(trade_for_progress)
         filled = True
@@ -215,7 +222,7 @@ def run_matching_loop(
             cfg, sig, fill_price, symbol, data.index[i].isoformat(),
             cash, position, lots, trades, strategy,
             record_buy_trade=record_buy_trades, bar_volume=bar_volume,
-            entry_i=i, exit_i=i, stats=stats)
+            entry_i=i, exit_i=i, stats=stats, ref_price=trigger_price)
         if filled:
             strategy.on_fill(symbol, "sell", fill_price)
             return trade
@@ -267,11 +274,17 @@ def run_matching_loop(
                     sig.qty = qty_total * fill_ratio
             # ---- 限价单结束 ----
             if not skip_fill:
+                # C-① 滑点参考价：限价触及成交以 limit_price 为参考（成交偏离限价
+                # 即滑点），市价口径以信号触发后下一根开盘价为参考。
+                _is_limit_fill = (cfg.limit_order_model in ("partial", "probabilistic")
+                                  and getattr(sig, "order_type", None) == "limit"
+                                  and getattr(sig, "limit_price", None) is not None)
+                ref_price = sig.limit_price if _is_limit_fill else price_open
                 filled, cash, position, trade_for_progress = _execute_fill(
                     cfg, sig, fill_price, symbol, data.index[i].isoformat(),
                     cash, position, lots, trades, strategy,
                     record_buy_trade=record_buy_trades, bar_volume=bar_volume,
-                    entry_i=i, exit_i=i, stats=stats)
+                    entry_i=i, exit_i=i, stats=stats, ref_price=ref_price)
                 # 只有实际成交才回调，避免"假成交"污染策略状态
                 if filled:
                     strategy.on_fill(symbol, sig.side, fill_price)

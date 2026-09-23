@@ -96,6 +96,10 @@ def compute_metrics(equity: list[float], trades: list[dict], timeframe: str = "1
     avg_loss = gross_loss / len(losses) if losses else 0.0
     payoff_ratio = avg_win / avg_loss if avg_loss > 0 else 0.0
 
+    # C-①（2026-09-23）：滑点分布统计——不利滑点均值（正=不利，buy 太贵/sell 太便宜）
+    slips = [t.get("slippage") for t in trades if t.get("slippage") is not None]
+    avg_slippage = float(np.mean(slips)) if slips else 0.0
+
     # ---- P1-6 换手 / 持仓时长 / 成本拖累 ----
     sells = [t for t in trades if t.get("side") == "sell"]
     # 平均持仓时长（根K线）：卖单带 entry_i/exit_i（撮合内核写入）
@@ -131,6 +135,8 @@ def compute_metrics(equity: list[float], trades: list[dict], timeframe: str = "1
         "turnover": round(turnover, 4),
         "total_costs": round(total_costs, 4),
         "cost_drag": round(cost_drag, 6),
+        # C-①（2026-09-23）：滑点分布统计（不利滑点均值，正=不利）
+        "avg_slippage": round(avg_slippage, 6),
     }
     # 可选基准计算：传入 closes 时自动计算并填入 benchmark 键
     if closes is not None:

@@ -23,8 +23,9 @@ _METRICS_SNAPSHOT = {
     "win_rate": 0.1429,
     "calmar_ratio": -22.3731,
     "sortino": -7.3086,
+    "avg_slippage": 0.0005,
 }
-_TRADES_MD5 = "fb1c76ff5330784f1fa53af4ac32d547"
+_TRADES_MD5 = "bacc5e36840cffd64d98783b295eacb2"
 
 
 def _fixed_df(n: int = 512) -> pd.DataFrame:
@@ -73,6 +74,7 @@ _PARTIAL_SNAPSHOT = {
     "total_return": -0.000185,
     "total_trades": 7,
     "total_costs": 1.8757,
+    "avg_slippage": 0.0005,
 }
 
 

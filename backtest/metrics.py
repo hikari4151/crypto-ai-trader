@@ -78,6 +78,12 @@ def compute_metrics(equity: list[float], trades: list[dict], timeframe: str = "1
     rets = np.diff(eq) / (eq[:-1] + 1e-9)
     std = rets.std(ddof=0)
     sharpe = float(rets.mean() / std * math.sqrt(periods)) if std > 1e-12 else 0.0
+    # F-①（2026-09-23）：Calmar（年化/最大回撤）+ Sortino（年化/下行偏差，与夏普同口径）
+    calmar = (annual_return / max_drawdown if max_drawdown > 1e-12
+              else (0.0 if annual_return <= 0 else 999999.0))
+    downside = rets[rets < 0]
+    ds_std = downside.std(ddof=0) if downside.size > 1 else 0.0
+    sortino = float(rets.mean() / ds_std * math.sqrt(periods)) if ds_std > 1e-12 else 0.0
 
     # 交易统计
     pnls = [t.get("pnl", 0.0) for t in trades if t.get("side") == "sell"]
@@ -109,6 +115,9 @@ def compute_metrics(equity: list[float], trades: list[dict], timeframe: str = "1
         "annual_return": round(annual_return, 6),
         "max_drawdown": round(max_drawdown, 6),
         "sharpe": round(sharpe, 4),
+        # F-①（2026-09-23）：Calmar / Sortino
+        "calmar_ratio": round(calmar, 4),
+        "sortino": round(sortino, 4),
         "win_rate": round(win_rate, 4),
         # profit_factor 为 inf（全额盈利）时用大数哨兵，保证下游 JSON/类型一致
         "profit_factor": round(profit_factor, 4) if math.isfinite(profit_factor) else 999999.0,

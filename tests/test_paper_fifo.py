@@ -10,7 +10,6 @@
 import sys
 sys.path.insert(0, r"C:\Users\sbxg\Desktop\crypto_ai_trader")
 
-import asyncio
 import pytest
 
 from exchange.paper import PaperAccount
@@ -484,7 +483,6 @@ class TestLiveFIFODBFailure:
     async def test_place_live_db_failure_no_mutate(self):
         """_place_live 中 DB 失败 → _live_lots 不变。"""
         from core.bus import EventBus
-        from exchange.manager import ExchangeManager
         from unittest.mock import AsyncMock, MagicMock
 
         class FailingDB:
@@ -681,7 +679,7 @@ def test_manual_verification_fifo_vs_avg():
     qty_remaining = acc.positions["BTC/USDT"]["qty"]
     cost_remaining = acc.avg_price("BTC/USDT")
 
-    print(f"\n=== FIFO 验证 ===")
+    print("\n=== FIFO 验证 ===")
     print(f"FIFO 卖出成本价: {fifo_cost}")  # 应为 100
     print(f"加权平均成本: {(1.0 * 100 + 1.0 * 200) / 2}")  # 150
     print(f"剩余持仓: {qty_remaining} @ {cost_remaining}")  # 1@200

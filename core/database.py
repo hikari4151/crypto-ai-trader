@@ -128,6 +128,9 @@ class EvolveRound(Base):
     position_ratio: Mapped[float] = mapped_column(Float, default=0.0)
     selected_factors: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(32), default="ok")
+    # 族群谱系（strategy_drl 冠军/挑战者）：main / challenger / 空（非族群模型）。
+    # 前端曲线据此把两条谱系分开，避免"冠军有数据、挑战者恒0"交替污染同一条 fitness 线。
+    lineage: Mapped[str] = mapped_column(String(16), default="")
     # Task 5：人工回退等操作审计明细（目标/源版本、原因、运行时结果）JSON
     audit_json: Mapped[str] = mapped_column(Text, default="{}")
 
@@ -209,6 +212,9 @@ class Database:
                 if cols and "audit_json" not in {c[1] for c in cols}:
                     await conn.execute(text(
                         "ALTER TABLE evolve_rounds ADD COLUMN audit_json TEXT NOT NULL DEFAULT '{}'"))
+                if cols and "lineage" not in {c[1] for c in cols}:
+                    await conn.execute(text(
+                        "ALTER TABLE evolve_rounds ADD COLUMN lineage VARCHAR(16) NOT NULL DEFAULT ''"))
         log.info("数据库初始化完成: %s", self.engine.url.render_as_string(hide_password=True))
 
     async def close(self) -> None:

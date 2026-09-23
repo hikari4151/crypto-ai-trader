@@ -11,7 +11,6 @@ import math
 from types import SimpleNamespace
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from backtest.data_loader import generate_demo

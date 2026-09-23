@@ -118,9 +118,6 @@ async def list_custom_factors(db: Database = Depends(get_db)):
 @router.post("/compute")
 async def compute_factors(body: FactorComputeIn):
     """计算因子矩阵 + IC/分组收益/相关性分析。"""
-    from factors.analysis import (factor_correlation, factor_group_returns,
-                                  factor_ic_table, find_redundant)
-    from factors.engine import compute_factor_matrix
     df = await _load_df(body)
     try:
         # CPU 密集的因子矩阵/IC/分组/相关性全部放后台线程，避免冻结事件循环
@@ -364,7 +361,7 @@ async def mine_factors(body: FactorMineIn, engine=Depends(get_engine),
 @router.post("/synthesize")
 async def synthesize(body: FactorSynthIn, db: Database = Depends(get_db)):
     """因子合成：IC 加权 / 动态滚动权重合成组合因子，返回权重与暴露度。"""
-    from factors.analysis import factor_exposure, factor_ic_table
+    from factors.analysis import factor_exposure
     from factors.engine import compute_factor_matrix
     from factors.mining import composite_factor, dynamic_composite, ic_weighted_composite
     df = await _load_df(body)

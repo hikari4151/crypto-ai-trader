@@ -6,7 +6,6 @@
 熔断触发后跨日不解封（次日仍被昨日亏损拦住，再也开不了仓）。
 """
 import asyncio
-import math
 import time as _time
 
 import pytest

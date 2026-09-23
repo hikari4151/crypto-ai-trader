@@ -6,7 +6,6 @@
 ③ 撤单失败（cancel_order 抛异常）：注册表保留（防双卖），对账兜底
 ④ simulated 引擎级：_current_state 实盘分支读 SimulatedExchange 余额（双向结构）
 """
-import asyncio
 
 import pytest
 

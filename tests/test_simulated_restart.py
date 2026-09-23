@@ -11,7 +11,6 @@ import pytest
 import engine.trading_engine as te
 from core.bus import EventBus
 from core.database import Database, Trade
-from core.events import Event, EventType
 from exchange.simulated import SimulatedExchange
 from sqlalchemy import select, func
 

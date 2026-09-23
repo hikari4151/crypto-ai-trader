@@ -39,10 +39,11 @@ def test_maintenance_run_backup_uses_submodules(tmp_path, monkeypatch):
 def test_maintenance_health_uses_health_report(tmp_path, monkeypatch):
     """run_health 复用 daily_health_report 的判定（含 verdict 结构）。"""
     import scripts.maintenance as mt
-    import scripts.daily_health_report as h
 
-    monkeypatch.setattr(h, "LOGS_DIR", tmp_path)
-    monkeypatch.setattr(h, "DATA_DIR", tmp_path)
+    # maintenance 内部 import 的是顶层 daily_health_report（mt.health），
+    # patch 同一对象（曾误 patch scripts.daily_health_report 导致失效）
+    monkeypatch.setattr(mt.health, "LOGS_DIR", tmp_path)
+    monkeypatch.setattr(mt.health, "DATA_DIR", tmp_path)
     report = mt.run_health()
     assert "verdict" in report
     assert "health" in report["verdict"] and "reasons" in report["verdict"]

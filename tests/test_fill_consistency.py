@@ -7,7 +7,6 @@
 - T4 AI 参数热更新验证门：数据足够且建议==当前 → 通过
 - T5 AI 参数热更新验证门：数据不足 → 保守不应用
 """
-import asyncio
 import sys
 
 import numpy as np

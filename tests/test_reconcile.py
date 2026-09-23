@@ -7,16 +7,12 @@
 - simulated 模式跳过对账
 - 密钥缺失跳过对账
 """
-import asyncio
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from engine.portfolio import PortfolioManager
 from engine.trading_engine import TradingEngine
 from core.bus import EventBus
-from core.database import Database
 from core.events import Event, EventType
 
 

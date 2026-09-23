@@ -75,7 +75,6 @@ def test_main_returns_zero_on_valid(tmp_path, monkeypatch):
 
 def test_show_schema_prints_json(tmp_path, monkeypatch, capsys):
     import scripts.validate_config as vc
-    import argparse
     monkeypatch.setattr(vc, "CONFIG", tmp_path / "config.yaml")
     # 直接验证 show-schema 输出可 JSON 解析
     schema = {k: [t.__name__, r] for k, (t, r) in vc.SCHEMA.items()}

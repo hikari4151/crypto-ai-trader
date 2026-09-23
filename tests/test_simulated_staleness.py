@@ -5,7 +5,6 @@
 策略误判持续开仓直到余额耗尽。修复：SimulatedExchange 标记 is_local_matching，
 引擎对本地撮合跳过缓存实时取余额。
 """
-import asyncio
 
 import pytest
 

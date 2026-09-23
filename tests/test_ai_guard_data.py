@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 
 import strategies
-from ai import strategy_designer as sd
 from engine.trading_engine import TradingEngine
 
 

@@ -66,7 +66,6 @@ class _Hub:
 
 
 async def _make_engine(symbols, db, monkeypatch=None, tmp_path=None):
-    import engine.trading_engine as te
     eng = TradingEngine(db, EventBus())
     if tmp_path is not None:
         eng.monitor.repoint_log_dir(str(tmp_path / "alerts"))  # 测试隔离：不污染生产 alerts.log

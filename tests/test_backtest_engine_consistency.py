@@ -88,8 +88,6 @@ def test_sr_constant_alignment():
     任何改动此常量或引擎调用参数都会导致本测试失败，防止口径漂移。"""
     from indicators.technical import SR_LOOKBACK, SR_WINDOW, SR_MIN_TOUCHES, \
         support_resistance_series, price_action_features_series
-    from backtest.engine import BacktestConfig
-    from backtest._matching import needs_sr
 
     # 常量值保证
     assert SR_LOOKBACK == 120, "SR_LOOKBACK 必须为 120（与回测引擎滑动窗口口径一致）"

@@ -29,7 +29,7 @@ class ModelZooError(RuntimeError):
 _DEPLOYMENT_META_KEYS = (
     "train_meta", "factor_expression", "factor_mu", "factor_sd",
     "min_trade_zone", "pine_code", "pine_note", "cascade_factor",
-    "cascade_factor_path", "cascade_weights_path",
+    "cascade_factor_path", "cascade_weights_path", "factor_composite",
 )
 
 
@@ -379,6 +379,36 @@ class ModelZoo:
                  name, path.name,
                  {k: v for k, v in meta.items() if isinstance(v, (int, float, str, bool))})
         return 0
+
+    def _base_path(self, name: str) -> Path:
+        """独立「训练基线」槽位（不部署、不占版本名额）。"""
+        return self._model_dir(name) / "base.json.gz"
+
+    def save_agent_base(self, agent: ACAgent, name: str) -> None:
+        """保存训练基线：仅供下一轮续训起点，不参与部署/版本历史。
+
+        2026-09-19 族群根因修复：挑战者谱系此前因 OOS 门失败从不更新 best，
+        每轮从零训练 → fitness 恒 0 → 曲线"0/有数据"交替的死循环来源。
+        训练基线把"上一轮候选"持续传给下一轮，让谱系真正累积；
+        被 OOS 拦截的模型仍不进 best/flat（部署保护不变）。
+        """
+        path = self._base_path(name)
+        self._write_json_gz(path, agent.to_dict())
+        log.info("[model_zoo] 模型 %s 训练基线已保存: %s", name, path.name)
+
+    def load_agent_base(self, name: str) -> Optional[ACAgent]:
+        """加载训练基线（无则返回 None）。"""
+        path = self._base_path(name)
+        if not path.exists():
+            return None
+        try:
+            data = self._read_json_gz(path)
+            data.pop("_meta", None)
+            data.pop("_version", None)
+            return ACAgent.from_dict(data)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[model_zoo] 加载训练基线 %s 失败: %s", name, e)
+            return None
 
     # ---- 加载 ----
 

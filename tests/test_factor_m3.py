@@ -20,7 +20,6 @@ import math
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from backtest.data_loader import generate_demo
 from factors.analysis import (DEFAULT_GATES, _newey_west_std, _rolling_ic,

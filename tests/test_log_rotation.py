@@ -1,8 +1,4 @@
 """P0-3 日志轮转回归：uvicorn server.log 走 RotatingFileHandler。"""
-import json
-import logging
-import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

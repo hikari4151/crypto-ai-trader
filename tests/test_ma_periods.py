@@ -9,7 +9,6 @@ import sys
 
 import numpy as np
 import pandas as pd
-import pytest
 
 sys.path.insert(0, r"C:\Users\sbxg\Desktop\crypto_ai_trader")
 

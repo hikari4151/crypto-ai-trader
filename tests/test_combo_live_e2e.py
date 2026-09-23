@@ -5,7 +5,6 @@ Trade 落库 + balance 变化 + strategy.on_fill 记录入场价（止损/止盈
 此前实时行情链路 bug（watch_ohlcv async for 误用）正是因为没有这类"行情→
 策略→下单→账本"的连通性测试才在日志里刷了几百行才被人工发现。
 """
-import asyncio
 
 import pytest
 

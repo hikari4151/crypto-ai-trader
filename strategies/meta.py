@@ -640,6 +640,7 @@ class MetaControllerEnv:
                  symbol: str = "META",
                  timeframe: str = "",
                  reward_signal_align: float = 0.0,
+                 reward_participation_scale: float = 0.0,
                  random_start: bool = False,
                  min_ep_len: int = 0,
                  seed: Optional[int] = None,
@@ -671,6 +672,13 @@ class MetaControllerEnv:
         # 而不是停在"空仓=0"的懒惰最优解上。塑形只进训练梯度，
         # 选模/OOS 的 best_ret 仍按真实收益计算，不改变验证口径。
         self.reward_signal_align = float(reward_signal_align or 0.0)
+        # E-EXP：持仓参与塑形（>0 开启，0=关闭保持旧行为）。奖励里追加
+        # "scale × 当前仓位比"项，直接惩罚"空仓=0"的懒惰最优解：恒空仓轨迹
+        # 拿不到任何参与奖励，持仓（哪怕小幅）每根K线都能获得正塑形，逼 PPO
+        # 在信号出现时真正建仓（元控制器本职）。与 trade_penalty 相反——
+        # trade_penalty 已被实验证伪会诱发空仓退化（见 __init__ 注释）。
+        # 只进训练梯度；选模/OOS 的 total_ret 按权益复利计算，验证口径不变。
+        self.reward_participation_scale = float(reward_participation_scale or 0.0)
         # E-EXP：成交惩罚（>0 开启）。每次实际成交（开仓/平仓）从奖励扣固定值：
         # 手续费真实损耗已进 equity（验证/OOS 口径），但逐根收益信号弱、惩罚薄，
         # 控制器学到高频进出（OOS 段 300~900 笔、换手吞噬收益）；显式成交惩罚
@@ -999,6 +1007,11 @@ class MetaControllerEnv:
                     # 罚 _align，与入场奖励对称（换手循环塑形净收益归零）
                     if aligned_old > 0 and _held_after <= 0:
                         reward -= _align
+        # 持仓参与塑形（reward_participation_scale>0 时开启）：奖励 += scale × 仓位比。
+        # 直接让"空仓=0"的懒惰最优解在梯度层面失去优势——持仓（哪怕小幅）每根K线
+        # 都获得正塑形。只影响训练梯度；选模/OOS 的 total_ret 按权益复利计算，验证口径不变。
+        if self.reward_participation_scale > 0:
+            reward += self.reward_participation_scale * self._final_position_ratio
         self._prev_equity = equity_next
 
         info = {
@@ -1007,6 +1020,32 @@ class MetaControllerEnv:
             "fills": self._fills,
         }
         return self._build_state(self._t), reward, self._done, info
+
+
+def _meta_env_kwargs(cfg: dict, seed: int) -> dict:
+    """把 train_meta_controller 的 cfg 翻译为 MetaControllerEnv 构造参数（单一来源）。
+
+    训练/验证/OOS 环境共用同一组 kwargs（验证/OOS 覆盖 random_start=False），
+    新增环境塑形参数在这里统一收口，避免训练 cfg 与 env 构造脱节。
+    """
+    return dict(
+        warmup=int(cfg.get("warmup", 60)),
+        start_cash=float(cfg.get("start_cash", 10000.0)),
+        fee_rate=float(cfg.get("fee_rate", 0.001)),
+        meta_window=max(5, int(cfg.get("meta_window", _DEFAULT_META_WINDOW))),
+        symbol=str(cfg.get("symbol", "META")),
+        timeframe=str(cfg.get("timeframe", "") or ""),
+        reward_signal_align=float(cfg.get("reward_signal_align", 0.0) or 0.0),
+        reward_participation_scale=float(cfg.get("reward_participation_scale", 0.0) or 0.0),
+        random_start=bool(cfg.get("random_start", False)),
+        seed=seed,
+        trade_penalty=float(cfg.get("trade_penalty", 0.0) or 0.0),
+        per_strategy_trades=bool(cfg.get("per_strategy_trades", False)),
+        align_maintain_scale=float(cfg.get("align_maintain_scale", 0.15)),
+        align_novelty_gate=bool(cfg.get("align_novelty_gate", False)),
+        align_exit_penalty=bool(cfg.get("align_exit_penalty", False)),
+        signal_novelty_filter=bool(cfg.get("signal_novelty_filter", False)),
+    )
 
 
 def train_meta_controller(df, cfg: dict,
@@ -1075,18 +1114,7 @@ def train_meta_controller(df, cfg: dict,
         log.warning("[meta_train] 数据不足（%d 根），三段切分退化为整段训练，"
                     "模型将因缺少样本外证据被部署硬门拦截", n_total)
 
-    env_kwargs = dict(warmup=warmup, start_cash=start_cash, fee_rate=fee_rate,
-                      meta_window=meta_window, symbol=str(cfg.get("symbol", "META")),
-                      timeframe=str(cfg.get("timeframe", "") or ""),
-                      reward_signal_align=float(cfg.get("reward_signal_align", 0.0) or 0.0),
-                      random_start=bool(cfg.get("random_start", False)),
-                      seed=seed,
-                      trade_penalty=float(cfg.get("trade_penalty", 0.0) or 0.0),
-                      per_strategy_trades=bool(cfg.get("per_strategy_trades", False)),
-                      align_maintain_scale=float(cfg.get("align_maintain_scale", 0.15)),
-                      align_novelty_gate=bool(cfg.get("align_novelty_gate", False)),
-                      align_exit_penalty=bool(cfg.get("align_exit_penalty", False)),
-                      signal_novelty_filter=bool(cfg.get("signal_novelty_filter", False)))
+    env_kwargs = _meta_env_kwargs(cfg, seed)
     # E-EXP：学习率退火（与 train_drl 同口径）；默认关
     lr_anneal = bool(cfg.get("lr_anneal", False))
     lr_final_ratio = float(cfg.get("lr_final_ratio", 0.2))

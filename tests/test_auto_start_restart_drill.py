@@ -17,7 +17,6 @@ import pytest
 import engine.trading_engine as te
 from config.settings import settings
 from core.database import Database, Trade
-from core.events import Event
 from strategies.base import Signal
 from sqlalchemy import select
 

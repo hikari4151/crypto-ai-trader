@@ -1,8 +1,6 @@
 """验证训练/验证/OOS 三区切分 + OOS 独立评估。"""
 import sys
 sys.path.insert(0, r"C:\Users\sbxg\Desktop\crypto_ai_trader")
-import numpy as np
-import pandas as pd
 
 from backtest.data_loader import generate_demo
 from drl import train_drl

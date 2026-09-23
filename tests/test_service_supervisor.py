@@ -1,6 +1,5 @@
 """P0-进程守护回归：子进程管理 / 事件日志 / 探活与重启逻辑。"""
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path

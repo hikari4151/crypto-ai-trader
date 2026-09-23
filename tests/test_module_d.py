@@ -8,9 +8,7 @@ T4: web/api/ai.py auto-optimize triggers _run_nearby_grid_scan when grid_center 
 import asyncio
 import logging
 import threading
-import time
-from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pandas as pd
@@ -341,7 +339,6 @@ async def test_run_nearby_grid_scan_respects_bt_sem(monkeypatch):
 async def test_auto_optimize_with_grid_scan(monkeypatch):
     """T4: auto-optimize runs grid scan when optimizer returns grid_center."""
     import web.api.ai as aimod
-    from web.deps import get_engine, get_db
 
     # Mock optimizer to return grid_center
     mock_optimizer = AsyncMock()

@@ -84,7 +84,7 @@ async def test_trading_engine_reload_refreshes_active_rl_instance(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_trading_engine_reload_skips_unrelated_strategy():
-    from strategies.base import Strategy, Signal
+    from strategies.base import Strategy
 
     class _Stub(Strategy):
         name = "dual_ma"

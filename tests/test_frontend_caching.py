@@ -1,6 +1,5 @@
 """前端缓存 hash 化回归：vendor immutable 头 + ops 版本字段。"""
 import json
-import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

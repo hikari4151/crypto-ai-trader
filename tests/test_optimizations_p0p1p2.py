@@ -294,8 +294,7 @@ def test_trades_carry_entry_exit_index():
 
 def test_block_bootstrap_sharpe_ci():
     """P1-7：stationary block bootstrap 返回结构与 iid 一致且保留自相关。"""
-    from backtest.metrics import (bootstrap_sharpe_ci, block_bootstrap_sharpe_ci,
-                                  equity_returns)
+    from backtest.metrics import (bootstrap_sharpe_ci, block_bootstrap_sharpe_ci)
 
     rng = np.random.default_rng(3)
     # 带自相关的收益序列（AR(1) 趋势）
@@ -367,7 +366,7 @@ class _PassOverfitReport:
     n_folds = 5
 
 
-def _oos_fake_run(df, cfg: "BacktestConfig", on_progress=None, backend="numpy", use_numba=False,
+def _oos_fake_run(df, cfg: "BacktestConfig", on_progress=None, backend="numpy", use_numba=False,  # noqa: F821  # 字符串注解 forward ref（函数内 import BacktestConfig）
                   bootstrap=True):
     """模拟回测：整段 suggested 更优、纯 OOS 段 suggested 更差。
 
@@ -530,7 +529,7 @@ def test_drl_env_participation_caps_qty():
 
 def test_drl_env_funding_charged():
     """P2-12：DRL 环境资金费率按持仓收取（有持仓时权益被侵蚀）。"""
-    from drl.env import ACTION_BUCKETS, TradingEnv
+    from drl.env import TradingEnv
 
     n = 200
     close = np.full(n, 100.0)

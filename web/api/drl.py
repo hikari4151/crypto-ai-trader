@@ -647,7 +647,7 @@ async def evaluate_oos(name: str, body: OosEvalIn):
             csv_resolved = resolve_data_path(body.csv_path)
             df = await asyncio.to_thread(load_csv, str(csv_resolved))
         else:
-            from datetime import datetime, timezone
+            from datetime import datetime
             since = None
             if body.since:
                 since = datetime.fromisoformat(body.since.replace("Z", "+00:00"))

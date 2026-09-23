@@ -3,9 +3,7 @@
 覆盖 bug：/api/factors/mine 在数据 <21 根时 market_desc 直接 `close.iloc[-21]`
 → IndexError → HTTP 500。修复：数据不足时降级跳过 20 期动量。
 """
-import asyncio
 
-import pytest
 
 
 def build_short_market_desc():

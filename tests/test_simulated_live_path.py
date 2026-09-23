@@ -9,7 +9,6 @@
 - 行为等价：成交价按 last_price±slippage，与纸面同向
 - 纸面模式不受影响（仍走 _place_paper）
 """
-import asyncio
 
 import pytest
 

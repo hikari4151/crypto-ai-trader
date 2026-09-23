@@ -480,7 +480,6 @@ def test_evaluate_endpoint_corrupt_model_400(api_app, model_cleanup):
 
 def test_train_endpoint_worker_finally_close_loop(api_app, model_cleanup):
     """端到端：/train 后台 worker 完成训练后 finally 调用 close_loop 关闭专属 client。"""
-    import web.api.drl as drlmod
     from web.deps import get_db, get_engine
 
     closed_loops: list = []

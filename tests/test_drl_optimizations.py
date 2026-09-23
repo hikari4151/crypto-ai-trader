@@ -1,7 +1,5 @@
 """DRL 引擎优化（M4 统一 + 元策略 + 经验回放 + 风控）专项测试。"""
 import numpy as np
-import pandas as pd
-import pytest
 
 from backtest.engine import BacktestConfig, run_backtest
 from backtest.data_loader import generate_demo
@@ -103,7 +101,7 @@ def test_rl_adaptive_confidence_output():
     """RLAdaptiveStrategy 的 on_candle 返回带置信度的 Signal。"""
     from strategies.rl_adaptive import RLAdaptiveStrategy
     from drl.agent import ACAgent
-    from drl.env import ACTION_BUCKETS, TradingEnv, run_episode
+    from drl.env import ACTION_BUCKETS, TradingEnv
     df = generate_demo(timeframe="1h", n=300, seed=42)
     # 训练一个极简模型
     env = TradingEnv(df, vol_penalty=0.0)

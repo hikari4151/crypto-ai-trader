@@ -3,7 +3,6 @@
 P8 成本感知执行优化需求：止损永远放行，止盈/因子离场必须等到持仓满
 min_hold_bars 根 K 线（默认 0 = 旧行为不限）。
 """
-import pytest
 
 from strategies.factor_signal import FactorSignalStrategy
 

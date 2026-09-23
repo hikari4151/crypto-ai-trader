@@ -97,7 +97,6 @@ _HOST_MAP = {
 
 async def _socket_probe(exchange_id: str) -> bool:
     """用 socket 快速探测交易所 host:443 连通性（1s 超时）。"""
-    import socket
     host, port = _HOST_MAP.get(exchange_id, (f"api.{exchange_id}.com", 443))
     loop = asyncio.get_event_loop()
     try:

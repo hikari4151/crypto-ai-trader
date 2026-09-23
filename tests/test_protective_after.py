@@ -6,7 +6,6 @@
 ③ protective._stops 本地记录随 forget 清理
 ④ 普通卖出（策略主动）release→成交→resync 对口：清仓后不重挂
 """
-import asyncio
 
 import pytest
 

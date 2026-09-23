@@ -1,8 +1,6 @@
 """P0-1 数据库备份回归测试：一致性备份 / 校验 / 恢复演练 / 保留策略 / VACUUM。"""
 import shutil
 import sqlite3
-import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

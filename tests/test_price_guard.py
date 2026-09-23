@@ -4,7 +4,6 @@
 NaN 价格曾把纸面账户现金/持仓污染成 NaN 且 _record_trade 抛 IntegrityError；
 0 价格曾导致 _resolve_qty 除零被宽泛 except 静默吞掉（信号丢单无告警）。
 """
-import asyncio
 import math
 
 import pytest

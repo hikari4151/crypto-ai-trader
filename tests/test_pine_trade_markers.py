@@ -14,7 +14,6 @@
 import json
 import re
 
-import numpy as np
 import pytest
 
 from drl.agent import ACAgent

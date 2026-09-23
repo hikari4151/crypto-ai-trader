@@ -2,7 +2,7 @@
 import logging
 import math
 
-from typing import Optional, Union
+from typing import Union
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field

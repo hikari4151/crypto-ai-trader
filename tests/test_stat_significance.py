@@ -147,7 +147,7 @@ class TestOverfitLowEvidenceVerdict:
     """
 
     def _report(self, avg_oos_trades: float, oos_ret: float = -0.01,
-                pbo: float = 0.6, dsr: float = 0.3, n_folds: int = 3) -> "OverfitReport":
+                pbo: float = 0.6, dsr: float = 0.3, n_folds: int = 3) -> "OverfitReport":  # noqa: F821  # 字符串注解 forward ref（函数内 import OverfitReport）
         from backtest.overfit import FoldResult, OverfitReport
         # 构造 n_folds 折，每折 oos_trades 平均后 ≈ avg_oos_trades
         # （此前用 int(round(avg/n_folds)) 每折取整，avg=8/n_folds=3 → 每折3笔，
@@ -175,7 +175,7 @@ class TestOverfitLowEvidenceVerdict:
         """OOS 完全无交易 → 应判“无法判定”，绝不判“严重过拟合”。
         （旧逻辑仅在 oos_ret==0.0 且无交易时放行；本轮回归曾因单折产生一两笔
         微小负收益使 oos_ret 略非 0，落入“严重过拟合”被硬拒。）"""
-        from backtest.overfit import OverfitReport, _score_and_verdict
+        from backtest.overfit import _score_and_verdict
         rep = self._report(avg_oos_trades=0.0, oos_ret=-1e-4)
         _score_and_verdict(rep)
         assert rep.verdict == "无法判定", f"got {rep.verdict}"
@@ -200,7 +200,7 @@ class TestOverfitLowEvidenceVerdict:
 
     def test_enough_trades_negative_still_severe_overfit(self):
         """OOS 交易充分且收益转负、PBO 高 → 保留“严重过拟合”拦截。"""
-        from backtest.overfit import OverfitReport, _score_and_verdict
+        from backtest.overfit import _score_and_verdict
         rep = self._report(avg_oos_trades=8.0, oos_ret=-0.04, pbo=0.8, dsr=0.1)
         _score_and_verdict(rep)
         assert rep.verdict == "严重过拟合", f"got {rep.verdict}"

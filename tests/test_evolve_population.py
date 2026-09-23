@@ -6,7 +6,6 @@
 3. 挑战者显著优于冠军（> 冠军×(1/threshold)）→ 晋升接管冠军槽位并注册；
 4. force 手动触发恒走冠军谱系，不受交替节奏影响。
 """
-import json
 
 import pytest
 

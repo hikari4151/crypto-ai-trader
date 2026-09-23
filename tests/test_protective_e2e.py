@@ -7,7 +7,6 @@
    Trade 行（strategy=protective_stop）+ 清理注册表
 4. 引擎 _on_order_fill(late) → 卖出公共记账（_trade_times、FIFO 摊销、风控盈亏）
 """
-import asyncio
 
 import pytest
 

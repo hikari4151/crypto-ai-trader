@@ -7,10 +7,8 @@
 - clear_cooldown 后 check 放行
 - 默认配置（risk_manual_recovery=0）冷却到期自动恢复（现有行为不变）
 """
-import asyncio
 import time
 
-import pytest
 
 from engine.risk import DEFAULT_RULES, RiskManager
 from strategies.base import Signal

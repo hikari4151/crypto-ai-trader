@@ -47,7 +47,7 @@ def test_apply_is_idempotent(tmp_path):
 
 def test_pending_reports_only_new(tmp_path):
     """pending 只返回版本 > 当前的迁移。"""
-    from core.migrations import MIGRATIONS, apply, current_version, pending
+    from core.migrations import MIGRATIONS, apply, pending
 
     db = tmp_path / "t.db"
     _mkdb(db)
@@ -63,7 +63,7 @@ def test_pending_reports_only_new(tmp_path):
 
 def test_dry_run_does_not_write(tmp_path):
     """dry_run 不写库：版本不变、无列添加。"""
-    from core.migrations import MIGRATIONS, apply, current_version
+    from core.migrations import apply, current_version
 
     db = tmp_path / "t.db"
     _mkdb(db)

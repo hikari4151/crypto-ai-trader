@@ -201,6 +201,8 @@ async def repo_all(db=Depends(get_db)):
             "has_pine": bool(full.get("pine_code")) or executor in PINE_TEMPLATE_EXECUTORS,
             "pine_note": "" if full.get("pine_code") or executor in PINE_TEMPLATE_EXECUTORS
                          else full.get("pine_note", ""),
+            # 仅软件内运行（无 Pine）：级联因子模型无法导出 Pine，前端据此显示徽标
+            "internal_only": bool(s.get("internal_only") or full.get("pine_note")) and not full.get("pine_code"),
         })
     return {"strategies": builtin + dynamic, "count": len(builtin) + len(dynamic)}
 
@@ -352,7 +354,7 @@ async def repo_delete(body: DeleteIn, db=Depends(get_db), engine=Depends(get_eng
     try:
         remove_dynamic(name)
         from core.database import AiStrategy
-        from sqlalchemy import select, delete
+        from sqlalchemy import delete
         async with db.session() as s:
             await s.execute(delete(AiStrategy).where(AiStrategy.name == name))
             await s.commit()

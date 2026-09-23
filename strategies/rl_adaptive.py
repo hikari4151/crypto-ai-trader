@@ -25,7 +25,7 @@ from .base import Signal, Strategy
 log = logging.getLogger(__name__)
 
 try:
-    from drl.env import ACTION_BUCKETS, _precompute_features
+    from drl.env import ACTION_BUCKETS
     from drl.agent import ACAgent
     _DRL_AVAILABLE = True
 except Exception:  # noqa: BLE001
@@ -59,6 +59,10 @@ class RLAdaptiveStrategy(Strategy):
         self._lows: list[float] = []
         self._entry = None
         self._agent = None
+        # P1-②（2026-09-23）：流式特征引擎（与 _precompute_features 逐位等价）
+        self._sf = None
+        self._feat_rows: list = []
+        self._factor_ev = None  # 组合因子 evaluator 缓存（reset 重建）
         self._factor_mu: Optional[float] = None   # 模型文件内的因子标准化统计量
         self._factor_sd: Optional[float] = None
         self._factor_expr_from_model: str = ""    # 模型文件内记录的训练表达式
@@ -131,15 +135,18 @@ class RLAdaptiveStrategy(Strategy):
         返回原始值（保持旧行为）。表达式优先取模型内记录的（部署一致性）。
         """
         if self._factor_composite:
-            from factors.mining import CompositeFactorEvaluator
-            ev = CompositeFactorEvaluator(
-                self._factor_composite.get("weights") or {},
-                mu=self._factor_mu, sd=self._factor_sd)
+            # 2026-09-23（性能）：缓存 evaluator 实例（每根 new 有构造开销），
+            # reset() 清空重建（模型/配方可能热更新）。
+            if self._factor_ev is None:
+                from factors.mining import CompositeFactorEvaluator
+                self._factor_ev = CompositeFactorEvaluator(
+                    self._factor_composite.get("weights") or {},
+                    mu=self._factor_mu, sd=self._factor_sd)
             df = pd.DataFrame({
                 "open": self._opens, "high": self._highs, "low": self._lows,
                 "close": self._closes, "volume": self._volumes,
             })
-            return ev.eval(df)
+            return self._factor_ev.eval(df)
         expr = str(self.params.get("factor_expression", "") or "").strip() or self._factor_expr_from_model
         if not expr:
             return None
@@ -192,19 +199,31 @@ class RLAdaptiveStrategy(Strategy):
             self._highs = self._highs[-400:]
             self._lows = self._lows[-400:]
 
+        # P1-②（2026-09-23）：流式特征从第 1 根起累积（与 _closes 同步行数，
+        # 保证状态堆叠 seg=feats[-w:] 与全量口径一致——只从第 60 根起累积会
+        # 让早期堆叠变成零填充，行为漂移，回放对照曾不一致）。
+        if self._sf is None:
+            from drl.streaming_features import StreamingFeatureEngine
+            self._sf = StreamingFeatureEngine()
+        try:
+            feat_row = self._sf.update(close, volume)
+            self._feat_rows.append(feat_row)
+            if len(self._feat_rows) > 8:
+                self._feat_rows = self._feat_rows[-8:]
+        except Exception as e:  # noqa: BLE001
+            log.warning("[rl] 流式特征更新失败: %s", e)
+            return None
+
         if not _DRL_AVAILABLE or len(self._closes) < 60:
             return None
 
         if self._agent is None and not self._load_agent():
             return None
 
-        # 构造与训练一致的 DataFrame → 特征（open 为真实数据，与 drl.env 口径一致）
-        df = pd.DataFrame({
-            "open": self._opens, "high": self._highs, "low": self._lows,
-            "close": self._closes, "volume": self._volumes,
-        })
+        # P1-②（2026-09-23）：流式特征缓存——update 已在上方每根执行
+        #（行数与 _closes 同步，保证堆叠口径），此处只取最近特征行。
         try:
-            feats = _precompute_features(df)
+            feats = np.array(self._feat_rows)
         except Exception as e:  # noqa: BLE001
             log.warning("[rl] 特征计算失败: %s", e)
             return None

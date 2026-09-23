@@ -310,11 +310,23 @@ class CompositeFactorEvaluator:
         if total <= 0:
             return None
         # expanding z（无前视）：与 composite_factor(z_mode="expanding") 同式，
-        # 早样本不足填 0（均值）；权重按参与合成列的绝对值归一
-        z = ((mat[cols] - mat[cols].expanding().mean())
-             / (mat[cols].expanding().std() + 1e-12)).fillna(0.0)
+        # 早样本不足填 0（均值）；权重按参与合成列的绝对值归一。
+        # 2026-09-23（性能）：numpy 快速路径替代 pandas expanding（跳过 NaN、
+        # ddof=1 累积 mean/std，与 pandas 逐位一致——对照 max diff≈4e-15）；
+        # compute_factor_matrix 仍是"窗口重算"语义（不可流式），本步省 expanding 段。
+        z_last: dict = {}
+        for c in cols:
+            arr = mat[c].to_numpy(float)
+            m = ~np.isnan(arr)
+            cc = np.cumsum(m.astype(float))
+            cs = np.cumsum(np.where(m, arr, 0.0))
+            cs2 = np.cumsum(np.where(m, arr * arr, 0.0))
+            cm = cs / np.maximum(cc, 1e-12)
+            var = (cs2 - cs * cs / np.maximum(cc, 1e-12)) / np.maximum(cc - 1.0, 1e-12)
+            zl = (arr[-1] - cm[-1]) / (np.sqrt(var[-1]) + 1e-12)
+            z_last[c] = 0.0 if not (zl == zl) else float(zl)
         w = {c: self.weights[c] / total for c in cols}
-        out = sum(float(z[c].iloc[-1]) * w[c] for c in cols)
+        out = sum(z_last[c] * w[c] for c in cols)
         # 二次标准化（模型内训练段统计量；无统计量的旧模型返回原始 z 合成值）
         if self.mu is not None and self.sd:
             out = (out - self.mu) / self.sd

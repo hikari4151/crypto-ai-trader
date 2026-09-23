@@ -174,7 +174,6 @@ def _rolling_ic(factor_series: pd.Series, close: pd.Series, h: int = 1,
     if fwd is None:
         fwd = forward_returns(close, h)
     fwds = fwd.to_numpy(dtype=float) if hasattr(fwd, "to_numpy") else np.asarray(fwd, dtype=float)
-    out = pd.Series(np.nan, index=factor_series.index)
     vals = f.to_numpy(dtype=float)
     idx = factor_series.index
     # E3（run4）：预分配 numpy 数组承接窗口结果，最后一次性构造 Series——

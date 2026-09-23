@@ -80,6 +80,9 @@ class TradingEngine:
         # 每符号待成交信号（trade_on_open 时按 symbol 存）；旧单值 _pending_signal
         # 以 property 形式只读写主标的，兼容既有测试与单标的路径
         self._pending_signals: dict[str, tuple] = {}
+        # 信号门数学期望缓存（2026-09-22，P1-①）：同一根 K 线内多个 buy 信号
+        # 复用一次 math_analysis（key=最新K线时间戳），新 K 线自动失效。
+        self._math_ev_cache: dict = {}
         # 当前策略的 MA 快/慢线周期（dual_ma 的 fast_period/slow_period 生效，
         # 回测与实时关键路径同一来源 strategies.base.strategy_ma_periods）
         self._ma_fast_period, self._ma_slow_period = self._strategy_ma_periods()
@@ -655,6 +658,32 @@ class TradingEngine:
             log.warning("[risk] 拦截信号 %s: %s", signal.side, reason)
             return
 
+        # AI 数学期望信号门（2026-09-22，§19 落地）：风控通过后，buy 信号若
+        # 数学期望 < signal_math_ev_min 则拦截新开多（负期望抑制买入；sell/
+        # 止损/减仓不拦、数据缺失放行）。异常自吞（不影响交易路径）。
+        if not bypass_risk:
+            try:
+                from config.settings import settings as _s
+                if getattr(_s, "signal_math_ev_gate", False) and getattr(signal, "side", "") == "buy":
+                    from ai.math_gate import math_ev_gate_decision as _gate
+                    from ai.math_gate import math_ev_cached as _ev_cache
+                    from ai.math_analysis import math_analysis as _math
+                    _snap = await self._current_snapshot()
+                    # P1-①：同一根 K 线内多个 buy 信号复用一次 math_analysis（缓存）
+                    _ev, _hit = (_ev_cache(_snap, _math, self._math_ev_cache)
+                                 if _snap else (None, False))
+                    _allow, _reason = _gate(
+                        "buy", _ev, True,
+                        float(getattr(_s, "signal_math_ev_min", 0.0) or 0.0))
+                    if not _allow:
+                        await self.bus.publish(Event(EventType.RISK_BLOCKED,
+                                                     {"signal": signal.__dict__, "reason": _reason},
+                                                     source="risk"))
+                        log.warning("[risk] 拦截买入信号（数学期望门）: %s", _reason)
+                        return
+            except Exception as e:  # noqa: BLE001
+                log.warning("[engine] 数学期望信号门计算失败（放行）: %s", e)
+
         await self.bus.publish(Event(EventType.SIGNAL, signal.__dict__, source="engine"))
         # GAP-06 多标的：记账用信号自带的策略名（signal.strategy 由生成它的策略实例填写）
         strat_name = getattr(signal, "strategy", "") or self.strategy.name
@@ -1219,9 +1248,7 @@ class TradingEngine:
 
         symbol/timeframe 可选：默认用引擎当前配置；传参时用指定品种/周期。
         """
-        import time as _time
         import httpx
-        from config.settings import settings
         sym = (symbol or self.symbol).replace("/", "").upper()
         tf = timeframe or self.timeframe
         url = "https://data-api.binance.vision/api/v3/klines"
@@ -1505,7 +1532,7 @@ class TradingEngine:
                            "applied": False, "draft": True}
         df = await self._validation_df(settings.ai_optimize_validation_bars)
         if df is None or len(df) < 200:
-            return False, {"reason": f"验证数据不足（<200 根），跳过应用", "applied": False}
+            return False, {"reason": "验证数据不足（<200 根），跳过应用", "applied": False}
 
         def _compute() -> tuple[bool, dict]:
             from backtest.engine import BacktestConfig

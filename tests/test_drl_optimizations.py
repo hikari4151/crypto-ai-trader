@@ -344,6 +344,16 @@ class _MetaRow:
     def __init__(self):
         self.spec_json = "{}"
 
+    # 并行新逻辑 _log_round 用 scalar_one() 查 func.max(round_no)，
+    # mock 行对象需支持 int()/float()——模拟"无历史行"（返回 0），
+    # 否则 int(_MetaRow) 抛 TypeError（_MetaRow 无数值语义）。
+    # spec_json 路径（scalar_one_or_none → .spec_json）不受影响。
+    def __int__(self) -> int:
+        return 0
+
+    def __float__(self) -> float:
+        return 0.0
+
 
 class _MetaResult:
     def __init__(self, row):

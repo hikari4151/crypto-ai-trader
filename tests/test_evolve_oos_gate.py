@@ -144,6 +144,11 @@ def engine(tmp_path, monkeypatch):
         return None
     monkeypatch.setattr(eng, "_cross_symbol_oos", _no_cross_oos)
     monkeypatch.setattr(eng, "_register_rl_evolve", _no_register_rl)
+    # 2026-09-22 并行新增部署长窗门（默认开）：本测试专注 OOS 硬门行为，
+    # 长窗门会跑真实 K 线回放 stub agent（收益<=0 → FAIL → 不注册），
+    # 干扰断言。显式关闭，长窗门由专门测试覆盖。
+    from config.settings import settings
+    monkeypatch.setattr(settings, "evolve_strategy_drl_deploy_requires_longwindow", False)
     return eng, registered, holder
 
 

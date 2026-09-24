@@ -12,6 +12,23 @@ if str(ROOT) not in sys.path:
 # 脚本式验证文件（顶层直接执行并 sys.exit），仅手动运行，禁止被 pytest 收集
 collect_ignore = ["test_ai_guards.py"]
 
+# E-③（2026-09-24）：DRL 训练/长耗时测试统一标记 slow——
+# 本地快速回归用 `pytest -m "not slow"`；CI 不加排除，仍全量回归。
+_SLOW_FILES = (
+    "test_drl_val_selection.py",       # 真实训练多 seed/段评估
+    "test_evolve_challenger_base.py",  # 挑战者谱系训练
+    "test_drl_optimizations.py",       # 训练优化实测
+    "test_drl_fixes.py",
+    "test_earlystop_fix.py",
+    "test_earlystop_tune.py",
+)
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if any(f in item.nodeid for f in _SLOW_FILES):
+            item.add_marker(pytest.mark.slow)
+
 
 @pytest.fixture(autouse=True)
 def _close_leaked_databases():

@@ -5560,7 +5560,7 @@ const app = createApp({
         toast('网络加速已保存');
       } catch (e) { toast('保存失败 ' + e); }
     }
-    if (location.search.includes('tab=proxy')) loadProxy();
+    loadProxy();  // 页面加载即读代理配置（面板显示当前状态；保存后即时更新）
     function saveWsSettings() {
       localStorage.setItem('cat_ws_sym', designSymbol.value);
       localStorage.setItem('cat_ws_tf', designTimeframe.value);

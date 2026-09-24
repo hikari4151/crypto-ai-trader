@@ -63,6 +63,27 @@ SCHEMA: dict[str, tuple[type, dict]] = {
     "evolve_strategy_drl_walkforward_bars": (int, {"min": 100}),
     "evolve_walkforward_min_trades": (int, {"min": 1}),
     "evolve_meta_participation_scale": (float, {"min": 0.0, "max": 1.0}),
+    # ---- 2026-09-21~24 本会话新增键 ----
+    "evolve_strategy_drl_longwindow_obs": (bool, {}),
+    "evolve_strategy_drl_longwindow_30d_bars": (int, {"min": 100}),
+    "evolve_strategy_drl_longwindow_90d_bars": (int, {"min": 100}),
+    "evolve_strategy_drl_longwindow_every_n": (int, {"min": 1}),
+    "evolve_strategy_drl_deploy_requires_longwindow": (bool, {}),
+    "evolve_strategy_drl_deploy_longwindow_90d": (bool, {}),
+    "evolve_strategy_drl_min_trade_zone": (float, {"min": 0.0, "max": 1.0}),
+    "evolve_strategy_drl_state_window": (int, {"min": 1, "max": 16}),
+    "signal_math_ev_gate": (bool, {}),
+    "signal_math_ev_min": (float, {}),
+    # ---- 既有键补录（消除 WARN）----
+    "evolve_symbols": (list, {}),
+    "evolve_timeframe": (str, {"enum": ["1m", "5m", "15m", "1h", "4h", "1d"]}),
+    "evolve_max_versions": (int, {"min": 1}),
+    "evolve_gap01_obs": (bool, {}),
+    "evolve_meta_reset_after_rejects": (int, {"min": 1}),
+    "evolve_rollback_threshold": (float, {}),
+    "evolve_strategy_drl_hidden": (list, {}),
+    "evolve_strategy_drl_reset_after_rejects": (int, {"min": 1}),
+    "evolve_strategy_drl_walkforward_obs": (bool, {}),
 }
 
 

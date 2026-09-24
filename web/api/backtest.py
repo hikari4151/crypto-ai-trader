@@ -461,13 +461,32 @@ async def get_result(result_id: int, db: Database = Depends(get_db)):
         row = (await s.execute(select(BacktestResult).where(BacktestResult.id == result_id))).scalar_one_or_none()
         if not row:
             raise HTTPException(status_code=404, detail="回测结果不存在")
+        cfg = _loads(row.config_json or "{}")
+        metrics = _loads(row.metrics_json or "{}")
+        equity = _loads(row.equity_curve_json or "[]")
+        trades = _loads(row.trades_json or "[]")
+        # E-②（2026-09-24）：schema 校验（防 NaN/inf 脏数据 500；字段版本化）
+        schema_valid, schema_err = True, ""
+        try:
+            from backtest.schema import SCHEMA_VERSION, validate_backtest_result
+            validate_backtest_result({
+                "symbol": cfg.get("symbol", ""), "timeframe": cfg.get("timeframe", ""),
+                "strategy": cfg.get("strategy_name", ""),
+                "metrics": metrics, "trades": trades, "equity_curve": equity,
+            })
+        except Exception as e:  # noqa: BLE001
+            schema_valid, schema_err = False, str(e).splitlines()[0][:200]
+            log.warning("[backtest] 结果 %d schema 校验失败: %s", result_id, schema_err)
         return {
             "id": row.id,
-            "config": _loads(row.config_json or "{}"),
-            "metrics": _loads(row.metrics_json or "{}"),
-            "equity_curve": _loads(row.equity_curve_json or "[]"),
-            "trades": _loads(row.trades_json or "[]"),
+            "config": cfg,
+            "metrics": metrics,
+            "equity_curve": equity,
+            "trades": trades,
             "created_at": row.created_at.isoformat(),
+            "schema_valid": schema_valid,
+            "schema_error": schema_err,
+            "schema_version": 3 if schema_valid else None,
         }
 
 
@@ -850,3 +869,4 @@ async def run_multi_window_api(body: BacktestRequest, db: Database = Depends(get
                          participation_rate=body.participation_rate,
                          cleaning_mode=body.cleaning_mode)
     return {"ok": True, "windows": run_multi_window(df, cfg, wins, bootstrap=False)}
+

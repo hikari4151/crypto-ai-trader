@@ -112,7 +112,8 @@ def _strategy_drl_train_cfg(episodes: int) -> dict:
 from drl.evolve_observations import EvolveObservationsMixin
 from drl.evolve_rules import (
     _should_rollback, _should_from_scratch_reset,
-    _oos_gate_passed, _longwindow_verdict,
+    _longwindow_verdict,  # noqa: F401  # 兼容导出（实际使用在 evolve_observations）
+    _oos_gate_passed,
 )
 
 
@@ -2758,7 +2759,6 @@ class EvolveEngine(EvolveObservationsMixin):
                     import json
 
                     def _write_flat_meta() -> None:
-                        import json
                         with open(flat_path, "r", encoding="utf-8") as f:
                             _md = json.load(f)
                         _md["train_meta"] = {

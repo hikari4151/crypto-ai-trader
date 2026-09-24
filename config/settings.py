@@ -2,6 +2,7 @@
 
 非敏感默认值可被 Web 界面覆盖。优先级：环境变量 > .env > config.yaml > 代码默认。
 """
+import json
 import logging
 import socket
 import threading
@@ -10,7 +11,6 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import YamlConfigSettingsSource
 
@@ -308,6 +308,13 @@ class Settings(BaseSettings):
                 _PROXY_READY = True
             return _PROXY_CACHE or ""
 
+    def reset_proxy_cache(self) -> None:
+        """运行时更新 proxy_url 后重置探测缓存（resolved_proxy 下次重新探测生效）。"""
+        global _PROXY_CACHE, _PROXY_READY
+        with _PROXY_LOCK:
+            _PROXY_CACHE = ""
+            _PROXY_READY = False
+
     @property
     def resolved_proxy(self) -> str:
         """实际生效的代理地址（探测结果进程级缓存，仅首次可能阻塞）：
@@ -330,3 +337,22 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _load_proxy_override() -> None:
+    """启动时恢复网页端设置的代理覆盖（data/proxy_config.json，运行时生效）。"""
+    p = ROOT / "data" / "proxy_config.json"
+    if not p.exists():
+        return
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        v = str(d.get("proxy_url") or "").strip()
+        if v:
+            settings.proxy_url = v
+            settings.reset_proxy_cache()
+            log.info("[settings] 已恢复网页端代理覆盖: %s", v)
+    except Exception as e:  # noqa: BLE001
+        log.warning("[settings] 代理覆盖加载失败: %s", e)
+
+
+_load_proxy_override()

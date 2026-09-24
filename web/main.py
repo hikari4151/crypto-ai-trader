@@ -139,14 +139,15 @@ app.add_middleware(GZipMiddleware, minimum_size=100_000, compresslevel=6)
 
 from web.api import (  # noqa: E402
     ai_router, backtest_router, data_router, drl_router, evolve_router, exchanges_router,
-    factors_router, live_router, market_router, notify_router, ops_router,
-    performance_router, portfolio_router, risk_router, strategy_repo_router, trading_router,
+    factors_router, live_router, logs_router, market_router, notify_router, ops_router,
+    performance_router, portfolio_router, proxy_router, risk_router,
+    strategy_repo_router, trading_router,
 )
 
 for r in (ai_router, exchanges_router, trading_router, backtest_router,
           portfolio_router, performance_router, risk_router, market_router, live_router,
           strategy_repo_router, factors_router, drl_router, evolve_router, data_router,
-          notify_router, ops_router):
+          notify_router, ops_router, logs_router, proxy_router):
     app.include_router(r)
 
 

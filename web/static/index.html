@@ -5551,11 +5551,11 @@ const app = createApp({
     const wsLast = ref(null), wsChange = ref(null), wsVol = ref(null), wsFlash = ref('');
     // 持久化工坊行情设置（品种/周期）
     async function loadProxy() {
-      try { const r = await api('/api/proxy'); proxyUrl.value = r.proxy_url || ''; proxyResolved.value = r.resolved_proxy || ''; proxyAuto.value = !!r.auto_detected; } catch (e) {}
+      try { const r = await api('/proxy'); proxyUrl.value = r.proxy_url || ''; proxyResolved.value = r.resolved_proxy || ''; proxyAuto.value = !!r.auto_detected; } catch (e) {}
     }
     async function saveProxy() {
       try {
-        const r = await api('/api/proxy', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proxy_url: proxyUrl.value }) });
+        const r = await api('/proxy', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proxy_url: proxyUrl.value }) });
         proxyUrl.value = r.proxy_url || ''; proxyResolved.value = r.resolved_proxy || ''; proxyAuto.value = !!r.auto_detected;
         toast('网络加速已保存');
       } catch (e) { toast('保存失败 ' + e); }

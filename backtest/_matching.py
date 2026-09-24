@@ -156,6 +156,10 @@ def _execute_fill(cfg, sig: Signal, fill_price: float, symbol: str,
             "fee": round(fee, 6), "pnl": round(pnl, 6), "reason": sig.reason,
             "entry_i": first_entry_i if first_entry_i >= 0 else max(entry_i, 0),
             "exit_i": max(exit_i, 0),
+            # F-⑤（2026-09-24）：成交明细增强——平均建仓价（FIFO 摊销）+ 持仓周期（根K线）
+            "entry_price": round(cost_basis / qty, 6) if qty > 0 else None,
+            "hold_bars": (max(exit_i, 0) - first_entry_i)
+            if (first_entry_i >= 0 and max(exit_i, 0) >= first_entry_i) else None,
             # C-① 滑点统计：不利幅度（正=不利）：卖出太便宜
             "slippage": round((ref_price - fill_price) / ref_price, 6)
             if ref_price else None,

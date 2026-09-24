@@ -25,7 +25,7 @@ _METRICS_SNAPSHOT = {
     "sortino": -7.3086,
     "avg_slippage": 0.0005,
 }
-_TRADES_MD5 = "bacc5e36840cffd64d98783b295eacb2"
+_TRADES_MD5 = "0f4db7b439b9dae55ea5318ae4805345"
 
 
 def _fixed_df(n: int = 512) -> pd.DataFrame:
@@ -89,3 +89,15 @@ def test_backtest_partial_limit_mode_snapshot():
     got = {k: round(float(m.get(k)), 6 if k != "total_trades" else 0)
            for k in _PARTIAL_SNAPSHOT}
     assert got == _PARTIAL_SNAPSHOT, f"partial 口径漂移: {got} != {_PARTIAL_SNAPSHOT}"
+
+
+# F-⑤（2026-09-24）：成交明细增强——卖出含平均建仓价 + 持仓周期
+def test_backtest_trade_detail_fields():
+    r = _run()
+    sells = [t for t in r.get("trades", []) if t.get("side") == "sell"]
+    assert sells, "应存在卖出成交"
+    for t in sells:
+        ep = t.get("entry_price")
+        hb = t.get("hold_bars")
+        assert ep is not None and float(ep) > 0, f"entry_price 缺失/非法: {t}"
+        assert hb is not None and int(hb) >= 0, f"hold_bars 缺失/非法: {t}"

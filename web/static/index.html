@@ -2275,6 +2275,23 @@
               <span v-else>当前：{{proxyUrl}}<span v-if="proxyResolved">（生效 {{proxyResolved}}）</span></span>
             </div>
           </div>
+          <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="font-weight:600;margin-bottom:6px">扫描全部节点</div>
+            <textarea class="mac-input" v-model="proxySource" rows="3" placeholder="订阅 URL 或粘贴节点文本（Clash YAML / 每行 socks5:// http:// ss://）" style="width:100%;box-sizing:border-box"></textarea>
+            <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+              <button class="mac-btn" @click="scanProxy()">{{proxyScanning?'扫描中…':'扫描节点'}}</button>
+              <span class="text-[length:var(--fs-caption)] text-slate-500">{{proxyScanMsg}}</span>
+            </div>
+            <div v-if="proxyNodes.length" style="margin-top:10px;max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:6px">
+              <div v-for="nd in proxyNodes" :key="nd.name+nd.url+nd.server" style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border)">
+                <span style="flex:1">{{nd.name}} <span class="text-slate-500">{{nd.type}} · {{nd.server||'-'}}:{{nd.port||'-'}}</span></span>
+                <span v-if="nd.reachable" class="text-green-600">可连 {{nd.delay_ms}}ms</span>
+                <span v-else-if="!nd.supported" class="text-slate-500">需客户端</span>
+                <span v-else class="text-slate-500">不可达</span>
+                <button class="mac-btn" :disabled="!nd.supported || !nd.reachable" @click="chooseProxy(nd)">选择</button>
+              </div>
+            </div>
+          </div>
           <div class="settings-panel" v-if="settingsTab==='about'">
             <div class="text-center py-10">
               <div class="e-ico mx-auto mb-3" style="opacity:.8"><svg style="width:48px;height:48px"><use href="#i-robot"/></svg></div>
@@ -4143,6 +4160,10 @@ const app = createApp({
     const proxyUrl = ref('');
     const proxyResolved = ref('');
     const proxyAuto = ref(true);
+    const proxySource = ref('');
+    const proxyNodes = ref([]);
+    const proxyScanMsg = ref('');
+    const proxyScanning = ref(false);
 
     const clock = ref('');
     const toasts = ref([]);
@@ -5561,6 +5582,22 @@ const app = createApp({
       } catch (e) { toast('保存失败 ' + e); }
     }
     loadProxy();  // 页面加载即读代理配置（面板显示当前状态；保存后即时更新）
+    async function scanProxy() {
+      if (!proxySource.value.trim()) { toast('请先输入订阅 URL 或节点文本', 'error'); return; }
+      proxyScanning.value = true; proxyScanMsg.value = '扫描中…';
+      try {
+        const r = await api('/proxy/nodes/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source: proxySource.value})});
+        proxyNodes.value = r.nodes || [];
+        proxyScanMsg.value = r.count ? '共 ' + r.count + ' 个节点' : (r.error || '未解析到节点');
+      } catch(e){ proxyScanMsg.value = '扫描失败 ' + e; }
+      finally { proxyScanning.value = false; }
+    }
+    async function chooseProxy(nd) {
+      if (!nd.url) { toast('该节点类型需本地客户端转换，暂不可直用', 'error'); return; }
+      proxyUrl.value = nd.url;
+      await saveProxy();
+      toast('已切换至节点 ' + nd.name);
+    }
     function saveWsSettings() {
       localStorage.setItem('cat_ws_sym', designSymbol.value);
       localStorage.setItem('cat_ws_tf', designTimeframe.value);
@@ -7679,6 +7716,7 @@ const app = createApp({
       loadWorkshopChart, wsLoading, wsUpdated, wsOverlay, openMenu, viewInGroup, toggleMenu, menuDropStyle,
       wsLast, wsChange, wsVol, wsFlash, getWsSymbol, wsSymbolText, wsTimeframe, wsTimeframeText,
       proxyUrl, proxyResolved, proxyAuto, saveProxy, loadProxy,
+      proxySource, proxyNodes, proxyScanMsg, proxyScanning, scanProxy, chooseProxy,
       wsCtx, wsSignalRows, iterCompareRows, scrollToIterCard,
       pineImportOpen, pineImportCode, pineImportName, pineImportAiCheck, pineImportLoading, pineImportWarnings, importPine, drlPineOpen, copyDrlPine,
       liveCfg, liveStatus, liveModeMsg, liveModeMsgOk, loadLiveConfig, saveLiveConfig, setLiveMode,

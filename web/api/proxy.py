@@ -58,3 +58,27 @@ async def set_proxy(body: ProxyConfigIn) -> dict:
         "auto_detected": not bool(url),
         "note": "仅作用于本软件出站请求（交易所/K线/通知/AI）；不影响系统其他程序",
     }
+
+
+class ProxyNodesIn(BaseModel):
+    source: str = Field(default="", max_length=20000)  # 订阅 URL 或节点文本（Clash YAML/每行 URL）
+
+
+@router.post("/nodes/scan")
+async def scan_proxy_nodes(body: ProxyNodesIn) -> dict:
+    """扫描节点：订阅 URL 或粘贴文本 → 解析全部节点（名称/类型/地址/可达性）。
+
+    supported=True 的节点可直接选作当前代理（http/socks5）；
+    ss/vmess/trojan 列出但标记不支持直用（需本地客户端转换）。
+    """
+    from net.proxy_nodes import parse_nodes_text, probe_node, resolve_subscription
+
+    src = body.source.strip()
+    if not src:
+        return {"ok": False, "error": "source 为空"}
+    low = src.lower()
+    nodes = (await resolve_subscription(src) if low.startswith(("http://", "https://"))
+             else parse_nodes_text(src))
+    for n in nodes:
+        n["reachable"], n["delay_ms"] = probe_node(n.get("url", ""))
+    return {"ok": True, "nodes": nodes, "count": len(nodes)}

@@ -12,7 +12,7 @@ import re
 import socket
 import time
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import yaml  # type: ignore
 
@@ -32,7 +32,7 @@ def _parse_ss_link(line: str) -> dict:
     name = ""
     m = re.search(r"#([^#\s]+)$", line)
     if m:
-        name = m.group(1).strip()
+        name = unquote(m.group(1).strip())
     server = port = ""
     userinfo = raw
     if "@" in raw:
@@ -62,6 +62,7 @@ def _parse_ss_link(line: str) -> dict:
 
 
 _NODE_MARKERS = ("ss://", "vmess://", "trojan://", "ssr://",
+                 "hysteria2://", "hysteria://", "tuic://", "wireguard://",
                  "socks5://", "socks4://", "http://", "https://", "proxies:")
 
 
@@ -88,7 +89,7 @@ def _parse_vmess_link(line: str) -> dict:
     try:
         pad = "=" * (-len(raw) % 4)
         payload = json.loads(base64.urlsafe_b64decode(raw + pad).decode(errors="ignore"))
-        name = str(payload.get("ps") or "")
+        name = unquote(str(payload.get("ps") or ""))
         server = str(payload.get("add") or "")
         port = int(payload.get("port")) if str(payload.get("port", "")).isdigit() else None
     except Exception:  # noqa: BLE001
@@ -104,7 +105,7 @@ def _parse_trojan_link(line: str) -> dict:
     name = ""
     m = re.search(r"#([^#\s]+)$", body)
     if m:
-        name = m.group(1).strip()
+        name = unquote(m.group(1).strip())
     server = port = ""
     m2 = re.search(r"@([^:/#]+):(\d+)", body)
     if m2:
@@ -121,7 +122,7 @@ def _parse_ssr_link(line: str) -> dict:
     name = ""
     m = re.search(r"#([^#\s]+)$", line)
     if m:
-        name = m.group(1).strip()
+        name = unquote(m.group(1).strip())
     try:
         pad = "=" * (-len(raw) % 4)
         decoded = base64.urlsafe_b64decode(raw + pad).decode(errors="ignore")
@@ -141,6 +142,32 @@ def _parse_ssr_link(line: str) -> dict:
 _QX_TYPES = {"socks5", "socks4", "http", "https", "ss", "vmess", "trojan", "ssr"}
 
 
+
+
+_NEW_PROTO_TYPES = {"hysteria2", "hysteria", "tuic", "wireguard"}
+
+
+def _parse_generic_link(line: str, scheme: str) -> dict:
+    """新协议行：scheme://(user@)host:port(/?params)#名称（需本地客户端转换）。"""
+    body = line.split("#", 1)[0]
+    name = ""
+    m = re.search(r"#([^#\s]+)$", line)
+    if m:
+        name = unquote(m.group(1).strip())
+    server, port = "", None
+    if "@" in body:
+        hostpart = body.rsplit("@", 1)[1]
+    else:
+        hostpart = body.split("://", 1)[-1] if "://" in body else body
+    hostpart = hostpart.split("?")[0].split("/")[0]
+    hp = hostpart.split(":")
+    if hp and hp[0]:
+        server = hp[0]
+        if len(hp) > 1 and hp[1].isdigit():
+            port = int(hp[1])
+    return {"name": name or f"{server or scheme}:{port or ''}",
+            "type": scheme, "server": server, "port": port,
+            "url": "", "supported": False}
 def _parse_qx_line(line: str):
     """Quantumult X / Loon 风格行：`协议 = host:port, 节点名`（机场常见导出）。
     socks5/http 可直接用作代理 URL；trojan/vmess/ss 仅提取展示（需本地转换）。
@@ -158,12 +185,12 @@ def _parse_qx_line(line: str):
     name = ""
     nm_field = re.search(r"\bname\s*=\s*([^,]+)", rest)
     if nm_field:
-        name = nm_field.group(1).strip()
+        name = unquote(nm_field.group(1).strip())
     else:
         # host:port 后第一个逗号字段即节点名（避免把 password= 等尾段当名字）
         m2 = re.search(r":\d+\s*,\s*(.*?)(?:,|\s*$)", rest)
         if m2:
-            name = m2.group(1).strip()
+            name = unquote(m2.group(1).strip())
     supported = typ in _DIRECT_TYPES
     url = f"{typ}://{server}:{port}" if supported else ""
     return {"name": name or f"{server}:{port}", "type": typ,
@@ -221,6 +248,9 @@ def parse_nodes_text(text: str, _json_depth: int = 0) -> list[dict]:
             nodes.append(_parse_trojan_link(line))
         elif low.startswith("ssr://"):
             nodes.append(_parse_ssr_link(line))
+        elif low.startswith(("hysteria2://", "hysteria://", "tuic://", "wireguard://")):
+            scheme = line.split("://", 1)[0].lower()
+            nodes.append(_parse_generic_link(line, scheme))
         else:
             qx = _parse_qx_line(line)
             if qx is not None:

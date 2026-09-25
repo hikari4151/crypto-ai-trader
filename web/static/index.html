@@ -2275,7 +2275,7 @@
               <span v-else>当前：{{proxyUrl}}<span v-if="proxyResolved">（生效 {{proxyResolved}}）</span></span>
             </div>
           </div>
-          <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+          <div v-if="settingsTab==='proxy'" style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
             <div style="font-weight:600;margin-bottom:6px">扫描全部节点</div>
             <textarea class="mac-input" v-model="proxySource" rows="3" placeholder="订阅 URL 或粘贴节点文本（Clash YAML / 每行 socks5:// http:// ss://）" style="width:100%;box-sizing:border-box"></textarea>
             <div style="display:flex;gap:8px;margin-top:8px;align-items:center">

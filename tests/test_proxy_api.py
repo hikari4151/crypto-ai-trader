@@ -70,3 +70,26 @@ def test_validate_proxy_url_rejects_bad_scheme():
     assert ok is True
     ok, _ = _validate_proxy_url("")
     assert ok is True
+
+
+# 2026-09-25：扫描端点拉取失败应返回具体 error（前端可显示，而非"未解析到节点"）
+@pytest.mark.asyncio
+async def test_scan_returns_error_on_fetch_failure(monkeypatch):
+    from web.api import proxy as proxy_api
+    async def _bad(url):  # noqa: A002
+        raise ValueError("订阅拉取失败: Read timed out")
+    monkeypatch.setattr("net.proxy_nodes.resolve_subscription", _bad)
+    r = await proxy_api.scan_proxy_nodes(proxy_api.ProxyNodesIn(source="https://x.example/sub"))
+    assert r["ok"] is False
+    assert "Read timed out" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_scan_returns_format_hint_when_empty(monkeypatch):
+    from web.api import proxy as proxy_api
+    async def _empty(url):  # noqa: A002
+        return []
+    monkeypatch.setattr("net.proxy_nodes.resolve_subscription", _empty)
+    r = await proxy_api.scan_proxy_nodes(proxy_api.ProxyNodesIn(source="https://x.example/sub"))
+    assert r["count"] == 0
+    assert "未解析到节点" in r.get("error", "")

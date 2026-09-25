@@ -98,8 +98,17 @@ async def scan_proxy_nodes(body: ProxyNodesIn) -> dict:
     if not src:
         return {"ok": False, "error": "source 为空"}
     low = src.lower()
-    nodes = (await resolve_subscription(src) if low.startswith(("http://", "https://"))
-             else parse_nodes_text(src))
+    try:
+        if low.startswith(("http://", "https://")):
+            nodes = await resolve_subscription(src)
+        else:
+            nodes = parse_nodes_text(src)
+    except Exception as e:  # noqa: BLE001  # 订阅拉取失败（超时/网络）→ 具体原因可见
+        log.warning("[proxy] 扫描失败 %s: %s", src[:80], e)
+        return {"ok": False, "error": str(e), "nodes": [], "count": 0}
+    if not nodes:
+        return {"ok": True, "nodes": [], "count": 0,
+                "error": "未解析到节点：请确认是 Clash YAML / 每行 socks5:// http:// ss:// 格式；若订阅内容为 base64 编码，请先解码后粘贴"}
     for n in nodes:
         n["reachable"], n["delay_ms"] = probe_node(n.get("url", ""))
     return {"ok": True, "nodes": nodes, "count": len(nodes)}

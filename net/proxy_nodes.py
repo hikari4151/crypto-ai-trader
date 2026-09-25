@@ -155,10 +155,15 @@ async def resolve_subscription(url: str, fetcher: Any = None) -> list[dict]:
         return parse_nodes_text(text)
     import asyncio
     import requests
-    try:
-        resp = await asyncio.to_thread(requests.get, url, timeout=10)
-        resp.raise_for_status()
-        return parse_nodes_text(resp.text)
-    except Exception as e:  # noqa: BLE001
-        log.warning("[proxy] 订阅拉取失败 %s: %s", url, e)
-        return []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) cat-trading/1.0"}
+    last_err: Optional[Exception] = None
+    for attempt in range(2):  # 一次重试（部分订阅服务器首连慢/校验 UA）
+        try:
+            resp = await asyncio.to_thread(requests.get, url, timeout=15, headers=headers)
+            resp.raise_for_status()
+            return parse_nodes_text(resp.text)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            log.warning("[proxy] 订阅拉取失败(第%d次) %s: %s", attempt + 1, url, e)
+    # 失败：向上抛具体原因（scan 端点转为用户可见 error，而非静默空列表）
+    raise ValueError(f"订阅拉取失败: {last_err}" if last_err else "订阅拉取失败")

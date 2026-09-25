@@ -237,6 +237,8 @@ async def resolve_subscription(url: str, fetcher: Any = None) -> list[dict]:
     """
     if fetcher is not None:
         text = await fetcher.fetch(url)
+        if not (text or "").strip():
+            raise ValueError("订阅返回空内容")
         return parse_nodes_text(text)
     import asyncio
     import requests
@@ -246,6 +248,8 @@ async def resolve_subscription(url: str, fetcher: Any = None) -> list[dict]:
         try:
             resp = await asyncio.to_thread(requests.get, url, timeout=15, headers=headers)
             resp.raise_for_status()
+            if not (resp.text or "").strip():
+                raise ValueError("订阅返回空内容")
             return parse_nodes_text(resp.text)
         except Exception as e:  # noqa: BLE001
             last_err = e

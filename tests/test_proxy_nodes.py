@@ -124,7 +124,8 @@ def test_parse_trojan_and_ssr_lines():
 
 # 2026-09-25：更多订阅格式（JSON 包装 base64 / 行首序号引号）
 def test_parse_json_wrapped_base64():
-    import base64, json
+    import base64
+    import json
     inner = "socks5://1.2.3.4:7890\nvmess://eyJ2IjogIjIiLCAicHMiOiAiSEstVk0iLCAiYWRkIjogIjEuMi4zLjQiLCAicG9ydCI6ICI0NDMiLCAiaWQiOiAieCJ9"
     data = json.dumps({"status": "success", "data": base64.b64encode(inner.encode()).decode()})
     nodes = parse_nodes_text(data)
@@ -147,3 +148,4 @@ def test_extract_server_error():
     assert extract_server_error('{"message": "token is error"}') == "token is error"
     assert extract_server_error('{"error": "sub expired"}') == "sub expired"
     assert extract_server_error("socks5://1.2.3.4:7890") == ""
+

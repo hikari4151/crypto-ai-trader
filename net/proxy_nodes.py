@@ -136,6 +136,38 @@ def _parse_ssr_link(line: str) -> dict:
 
 
 
+
+
+_QX_TYPES = {"socks5", "socks4", "http", "https", "ss", "vmess", "trojan", "ssr"}
+
+
+def _parse_qx_line(line: str):
+    """Quantumult X / Loon 风格行：`协议 = host:port, 节点名`（机场常见导出）。
+    socks5/http 可直接用作代理 URL；trojan/vmess/ss 仅提取展示（需本地转换）。
+    """
+    if "=" not in line:
+        return None
+    typ, rest = line.split("=", 1)
+    typ = typ.strip().lower()
+    if typ not in _QX_TYPES:
+        return None
+    m = re.match(r"\s*([^:\s]+):(\d+)", rest)
+    if not m:
+        return None
+    server, port = m.group(1), int(m.group(2))
+    name = ""
+    nm_field = re.search(r"\bname\s*=\s*([^,]+)", rest)
+    if nm_field:
+        name = nm_field.group(1).strip()
+    else:
+        # host:port 后第一个逗号字段即节点名（避免把 password= 等尾段当名字）
+        m2 = re.search(r":\d+\s*,\s*(.*?)(?:,|\s*$)", rest)
+        if m2:
+            name = m2.group(1).strip()
+    supported = typ in _DIRECT_TYPES
+    url = f"{typ}://{server}:{port}" if supported else ""
+    return {"name": name or f"{server}:{port}", "type": typ,
+            "server": server, "port": port, "url": url, "supported": supported}
 def extract_server_error(text: str) -> str:
     """订阅内容若为服务器错误响应（如 {"message":"token is error"}）→ 提取可读信息。"""
     if not (text or "").strip():
@@ -189,6 +221,10 @@ def parse_nodes_text(text: str, _json_depth: int = 0) -> list[dict]:
             nodes.append(_parse_trojan_link(line))
         elif low.startswith("ssr://"):
             nodes.append(_parse_ssr_link(line))
+        else:
+            qx = _parse_qx_line(line)
+            if qx is not None:
+                nodes.append(qx)
     if not nodes and _json_depth <= 2:
         # JSON 包装的订阅（如 {"status":"success","data":"base64..."}）——递归提取字符串值
         nodes = _extract_from_json(text, _json_depth)

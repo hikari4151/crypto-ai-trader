@@ -107,6 +107,11 @@ async def scan_proxy_nodes(body: ProxyNodesIn) -> dict:
         log.warning("[proxy] 扫描失败 %s: %s", src[:80], e)
         return {"ok": False, "error": str(e), "nodes": [], "count": 0}
     if not nodes:
+        from net.proxy_nodes import extract_server_error
+        server_err = extract_server_error(src)
+        if server_err:
+            return {"ok": True, "nodes": [], "count": 0,
+                    "error": f"订阅服务器返回错误：{server_err}——订阅链接 token 可能无效/过期，请到机场面板重新复制订阅链接"}
         return {"ok": True, "nodes": [], "count": 0,
                 "error": "未解析到节点：请确认是 Clash YAML / 每行 socks5:// http:// ss:// 格式；若订阅内容为 base64 编码，请先解码后粘贴"}
     for n in nodes:

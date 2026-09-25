@@ -134,6 +134,23 @@ def _parse_ssr_link(line: str) -> dict:
             "type": "ssr", "server": server, "port": port or None,
             "url": "", "supported": False}
 
+
+
+def extract_server_error(text: str) -> str:
+    """订阅内容若为服务器错误响应（如 {"message":"token is error"}）→ 提取可读信息。"""
+    if not (text or "").strip():
+        return ""
+    try:
+        data = yaml.safe_load(text)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    for k in ("message", "msg", "error", "detail"):
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
 def parse_nodes_text(text: str, _json_depth: int = 0) -> list[dict]:
     """解析节点文本（Clash YAML 或每行 URL），返回节点列表。"""
     text = (text or "").strip()

@@ -139,3 +139,11 @@ def test_parse_numbered_and_quoted_lines():
     assert len(nodes) == 2
     assert any(n["type"] == "socks5" for n in nodes)
     assert any(n["type"] == "trojan" for n in nodes)
+
+
+# 2026-09-25：订阅服务器错误响应识别（token is error 等）
+def test_extract_server_error():
+    from net.proxy_nodes import extract_server_error
+    assert extract_server_error('{"message": "token is error"}') == "token is error"
+    assert extract_server_error('{"error": "sub expired"}') == "sub expired"
+    assert extract_server_error("socks5://1.2.3.4:7890") == ""

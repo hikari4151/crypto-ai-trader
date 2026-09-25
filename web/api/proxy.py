@@ -41,10 +41,31 @@ async def get_proxy() -> dict:
     }
 
 
+_SUBSCRIPTION_HINTS = ("subscribe", "token=", "sub?")
+_PROXY_SCHEMES = {"http", "https", "socks5", "socks4"}
+
+
+def _validate_proxy_url(url: str) -> tuple[bool, str]:
+    """校验手动代理 URL：拒绝订阅链接（应走扫描节点）与不支持的协议。"""
+    if not url:
+        return True, ""
+    low = url.lower()
+    if any(h in low for h in _SUBSCRIPTION_HINTS):
+        return False, "这是订阅链接（节点列表），请使用「扫描全部节点」选择节点，而非手动代理 URL"
+    scheme = url.split("://", 1)[0].lower() if "://" in url else ""
+    if scheme not in _PROXY_SCHEMES:
+        return False, "不支持的代理格式（支持 http/https/socks5/socks4）"
+    return True, ""
+
+
 @router.put("")
 async def set_proxy(body: ProxyConfigIn) -> dict:
     """设置代理/VPN URL（仅本软件生效）；空=清空回退自动探测。"""
     url = body.proxy_url.strip()
+    ok, reason = _validate_proxy_url(url)
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=reason)
     settings.proxy_url = url
     settings.reset_proxy_cache()
     resolved = settings.resolved_proxy or ""

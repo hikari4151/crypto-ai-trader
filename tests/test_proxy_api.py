@@ -52,3 +52,21 @@ def test_reset_proxy_cache_revalidates(monkeypatch):
     settings.reset_proxy_cache()
     third = settings.resolved_proxy
     assert third != first and calls["n"] == 2, "reset 后应重新探测"
+
+# 2026-09-25：手动代理 URL 校验（拒绝订阅链接/非法协议，防"网络加速无效"）
+def test_validate_proxy_url_rejects_subscription():
+    from web.api.proxy import _validate_proxy_url
+    ok, reason = _validate_proxy_url("https://x.example/api/v1/client/subscribe?token=abc")
+    assert ok is False and "扫描全部节点" in reason
+    ok, _ = _validate_proxy_url("https://x.example/sub?url=1")
+    assert ok is False
+
+
+def test_validate_proxy_url_rejects_bad_scheme():
+    from web.api.proxy import _validate_proxy_url
+    ok, reason = _validate_proxy_url("vmess://1.2.3.4:443")
+    assert ok is False and "socks5" in reason
+    ok, _ = _validate_proxy_url("socks5://1.2.3.4:7890")
+    assert ok is True
+    ok, _ = _validate_proxy_url("")
+    assert ok is True

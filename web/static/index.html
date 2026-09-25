@@ -2267,7 +2267,7 @@
             <div class="settings-head">网络加速（仅本软件生效）</div>
             <div class="mt-2 text-[length:var(--fs-caption)] text-slate-500">用户提供 VPN/代理 URL（http/socks5）后，本软件所有出站请求（交易所/行情/通知/AI）走该代理加速；不影响系统其他程序。</div>
             <div style="display:flex;gap:8px;margin-top:12px">
-              <input class="mac-input" v-model="proxyUrl" placeholder="例如 http://127.0.0.1:7890（留空=自动探测）" @keyup.enter="saveProxy()" style="flex:1"/>
+              <input class="mac-input" v-model="proxyUrl" placeholder="单个代理地址 如 socks5://ip:port 或 http://ip:port（订阅链接请用下方扫描节点）" @keyup.enter="saveProxy()" style="flex:1"/>
               <button class="mac-btn" @click="saveProxy()">保存并应用</button>
             </div>
             <div class="mt-2 text-[length:var(--fs-caption)] text-slate-500" style="margin-top:8px">

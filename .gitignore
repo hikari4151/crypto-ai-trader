@@ -106,3 +106,14 @@ _trash_archive/
 
 # 一次性提交信息/临时产物
 .improve/
+
+# 覆盖率数据与运行时快照（提交时保持仓库干净）
+.coverage
+data/*.pkl
+
+# 前端备份/临时文件（index.html.bak_* 是编辑历史备份，不入库）
+web/static/index.html.bak_*
+
+# 意外创建/临时脚本
+/{fontSize
+/verify-*.mjs

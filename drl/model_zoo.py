@@ -682,7 +682,7 @@ class ModelZoo:
             meta = json.loads(path.read_text(encoding="utf-8"))
             self._meta_cache[name] = (key, meta)
             return meta
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             import time as _t
             stamp = _t.strftime("%Y%m%d_%H%M%S")
             corrupt = path.with_name(f"meta.corrupt-{stamp}.json")

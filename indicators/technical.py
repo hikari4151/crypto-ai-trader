@@ -76,7 +76,7 @@ def bollinger(values: Any, period: int = 20, num_std: float = 2.0) -> tuple[np.n
 def atr(highs, lows, closes, period: int = 14) -> np.ndarray:
     """真实波幅均值（Wilder 平滑）——波动率基准，供 ATR 归一化与风险提示。"""
     h = np.asarray(highs, dtype=float)
-    l = np.asarray(lows, dtype=float)
+    lo = np.asarray(lows, dtype=float)
     c = np.asarray(closes, dtype=float)
     n = len(c)
     out = np.full(n, np.nan)
@@ -84,7 +84,7 @@ def atr(highs, lows, closes, period: int = 14) -> np.ndarray:
         return out
     prev_c = np.roll(c, 1)
     prev_c[0] = c[0]
-    tr = np.maximum(h - l, np.maximum(np.abs(h - prev_c), np.abs(l - prev_c)))
+    tr = np.maximum(h - lo, np.maximum(np.abs(h - prev_c), np.abs(lo - prev_c)))
     out[period] = tr[1:period + 1].mean()
     for i in range(period + 1, n):
         out[i] = (out[i - 1] * (period - 1) + tr[i]) / period
@@ -123,24 +123,24 @@ def _cluster_pivots(points, min_touches: int) -> list[dict]:
                 break
         if not hit:
             levels.append({"price": price, "touches": 1, "last_idx": idx})
-    return [l for l in levels if l["touches"] >= min_touches]
+    return [lv for lv in levels if lv["touches"] >= min_touches]
 
 
 def _sr_result(sup, res, last: float) -> dict:
     """由已聚类的支撑/阻力位构造 S/R 结果结构（两函数共用，保证口径一致）。"""
-    near_sup = max([l["price"] for l in sup if l["price"] < last], default=None)
-    near_res = min([l["price"] for l in res if l["price"] > last], default=None)
+    near_sup = max([lv["price"] for lv in sup if lv["price"] < last], default=None)
+    near_res = min([lv["price"] for lv in res if lv["price"] > last], default=None)
     # 刚被突破的阻力位：低于当前价的最高阻力（此前是阻力、现被上穿）。
     # 突破入场判据必须用它——"上方最近的阻力"在数学上永远无法被突破。
-    broken_res = max([l["price"] for l in res if l["price"] < last], default=None)
+    broken_res = max([lv["price"] for lv in res if lv["price"] < last], default=None)
     return {
         "support": None if near_sup is None else round(near_sup, 4),
         "resistance": None if near_res is None else round(near_res, 4),
         "broken_resistance": None if broken_res is None else round(broken_res, 4),
         "at_support": bool(near_sup and (last - near_sup) / last < 0.005),
         "at_resistance": bool(near_res and (near_res - last) / last < 0.005),
-        "support_levels": [round(l["price"], 4) for l in sorted(sup, key=lambda x: -x["price"]) if l["price"] <= last][:5],
-        "resistance_levels": [round(l["price"], 4) for l in sorted(res, key=lambda x: x["price"]) if l["price"] >= last][:5],
+        "support_levels": [round(lv["price"], 4) for lv in sorted(sup, key=lambda x: -x["price"]) if lv["price"] <= last][:5],
+        "resistance_levels": [round(lv["price"], 4) for lv in sorted(res, key=lambda x: x["price"]) if lv["price"] >= last][:5],
         "distance_to_support": None if near_sup is None else round((last - near_sup) / last, 5),
         "distance_to_resistance": None if near_res is None else round((near_res - last) / last, 5),
     }

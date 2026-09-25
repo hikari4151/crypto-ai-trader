@@ -44,14 +44,20 @@ def _pair_stream_vs_batch(seed: int = 7, n: int = 600):
     closes, highs, lows, vols = [], [], [], []
     sf = StreamingCompositeFactor(recipe["weights"], recipe["mu"], recipe["sd"])
     maxdiff = 0.0
-    for c, h, l, v in zip(close, high, low, volume):
-        closes.append(float(c)); highs.append(float(h)); lows.append(float(l)); vols.append(float(v))
+    for c, h, lo, v in zip(close, high, low, volume):
+        closes.append(float(c))
+        highs.append(float(h))
+        lows.append(float(lo))
+        vols.append(float(v))
         if len(closes) > 400:
-            closes = closes[-400:]; highs = highs[-400:]; lows = lows[-400:]; vols = vols[-400:]
+            closes = closes[-400:]
+            highs = highs[-400:]
+            lows = lows[-400:]
+            vols = vols[-400:]
         df = pd.DataFrame({"open": closes, "high": highs, "low": lows,
                            "close": closes, "volume": vols})
         ref = CompositeFactorEvaluator(recipe["weights"], recipe["mu"], recipe["sd"]).eval(df)
-        got = sf.update(float(c), float(h), float(l), float(v))
+        got = sf.update(float(c), float(h), float(lo), float(v))
         if ref is not None and got is not None:
             maxdiff = max(maxdiff, abs(ref - got))
     return maxdiff

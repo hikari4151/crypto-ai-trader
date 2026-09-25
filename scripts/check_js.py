@@ -21,8 +21,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import esprima
-
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_RE = re.compile(r"<script(?P<attrs>[^>]*)>(?P<body>.*?)</script>", re.S | re.I)
 
@@ -100,8 +98,13 @@ def check_js_source(name: str, source: str) -> list[str]:
     if _NODE:
         return _check_with_node(source)
     # 回退路径：esprima 4.x 兼容层较脆弱（词法按字符扫描，正则含裸引号会失同步），
-    # 结果仅供参考——若触发此分支，输出明确警告以便 CI 干预升级环境
+    # 结果仅供参考——若触发此分支，输出明确警告以便 CI 干预升级环境。
+    # esprima 延迟导入：只有无 node 时才需要它（避免 CI 有 node 时仍被缺包卡死）。
     print("[WARN] 未找到 node 可执行文件，JS 语法检查降级为 esprima 兼容层（结果仅供参考）")
+    try:
+        import esprima
+    except ImportError:
+        return ["缺少 node 且未安装 esprima：请安装 requirements-dev.txt 或提供 node 可执行文件"]
     try:
         esprima.parseScript(es2020_compat(source))
         return []

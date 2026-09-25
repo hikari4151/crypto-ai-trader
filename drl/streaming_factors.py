@@ -61,7 +61,7 @@ class StreamingCompositeFactor:
     # ---------- 因子值（增量，O(1~w)）----------
     def _factor_values(self, close: float, high: float, low: float,
                        volume: float) -> dict:
-        c, h, l, v = self._close, self._high, self._low, self._vol
+        c, h, lo, v = self._close, self._high, self._low, self._vol
         n = len(c)
         out: dict = {}
         # mom_10 / mom_5 / mom_accel（pct_change(k)*100，窗口不足 None=NaN）
@@ -103,7 +103,7 @@ class StreamingCompositeFactor:
             prev_c = c[-2]
             tr = max(high - low, abs(high - prev_c), abs(low - prev_c))
             up = high - h[-2]
-            down = -(low - l[-2])
+            down = -(low - lo[-2])
             pdm_ = up if (up > down and up > 0) else 0.0
             mdm_ = down if (down > up and down > 0) else 0.0
             self._atr = _ema_next(self._atr, tr, a)

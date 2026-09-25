@@ -7,7 +7,7 @@
   2- 2026-09-23 F-①：+calmar_ratio/sortino
   3- 2026-09-23 C-①：+avg_slippage / trades.slippage
 """
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 

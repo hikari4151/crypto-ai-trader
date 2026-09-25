@@ -46,7 +46,7 @@ def make_snap(n=100, trend=1.0):
     highs = np.maximum(opens, closes) * 1.001
     lows = np.minimum(opens, closes) * 0.999
     vols = np.abs(rng.normal(100, 20, n))
-    candles = [[i, o, h, l, c, v] for i, (o, h, l, c, v) in enumerate(zip(opens, highs, lows, closes, vols))]
+    candles = [[i, o, h, lo, c, v] for i, (o, h, lo, c, v) in enumerate(zip(opens, highs, lows, closes, vols))]
     return {"symbol": "BTC/USDT", "timeframe": "1h", "candles": candles,
             "indicators": {"close": float(closes[-1]), "ma_fast": float(np.mean(closes[-10:])),
                            "ma_slow": float(np.mean(closes[-30:]))}}

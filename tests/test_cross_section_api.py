@@ -64,6 +64,7 @@ def test_unknown_source_rejected(api):
     assert r.status_code == 400
 
 
+@pytest.mark.slow
 def test_local_source_with_real_store(api):
     """local 源读真实本地库（BTC/ETH/SOL 1h 已在库时）。"""
     from backtest import kline_store

@@ -12,7 +12,7 @@ def build_short_market_desc():
     import numpy as np
     idx = pd.date_range("2024-01-01", periods=10, freq="1h", tz="UTC")
     close = pd.Series(np.linspace(100.5, 110.5, 10), index=idx)
-    ret = close.pct_change().dropna()
+
     if len(close) >= 21:
         mom_desc = f"近期动量(20期): {(close.iloc[-1] / close.iloc[-21] - 1) * 100:.1f}%"
     else:
@@ -35,7 +35,7 @@ def test_normal_data_market_desc_has_momentum():
     import numpy as np
     idx = pd.date_range("2024-01-01", periods=50, freq="1h", tz="UTC")
     close = pd.Series(np.linspace(100.0, 200.0, 50), index=idx)
-    ret = close.pct_change().dropna()
+
     if len(close) >= 21:
         mom_desc = f"近期动量(20期): {(close.iloc[-1] / close.iloc[-21] - 1) * 100:.1f}%"
     else:

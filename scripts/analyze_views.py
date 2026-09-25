@@ -18,8 +18,8 @@ s = HTML.read_text(encoding="utf-8")
 lines = s.split("\n")
 
 starts = []
-for i, l in enumerate(lines):
-    m = re.search(r"""<section v-if="view==='([a-zA-Z0-9_]+)'""", l)
+for i, line in enumerate(lines):
+    m = re.search(r"""<section v-if="view==='([a-zA-Z0-9_]+)'""", line)
     if m:
         starts.append((i, m.group(1)))
 

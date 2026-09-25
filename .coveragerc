@@ -1,0 +1,19 @@
+# 测试覆盖率配置（P1-覆盖率）：聚焦核心模块（含 exchange/factors），排除测试/研究/虚拟环境。
+[run]
+source = core, engine, ai, web, backtest, strategies, indicators, config, drl, exchange, factors
+omit =
+    */tests/*
+    */.optim/*
+    */.venv/*
+    */__pycache__/*
+
+[report]
+# 覆盖率门禁：首次基线实测 TOTAL=69%（16028 语句，全量 pytest RC=0）。
+# CI 用 --cov-fail-under 引用，门槛 65%（留平台差异余量）；后续按模块提升。
+show_missing = True
+skip_covered = False
+sort = Miss
+fail_under = 65
+
+[html]
+directory = .optim/coverage_html

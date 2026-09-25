@@ -28,7 +28,8 @@ def _episode_total_reward(scale: float, action_fn) -> float:
 
 def test_participation_shaping_rewards_holding_position():
     """开启持仓塑形后，同样「恒买入并持有」轨迹的累计奖励必须更高。"""
-    hold = lambda: 1  # 已持仓时 action=1 为空操作 → 保持多头到结束
+    def hold() -> int:
+        return 1
     with_scale = _episode_total_reward(1.0, hold)
     without_scale = _episode_total_reward(0.0, hold)
     assert with_scale > without_scale
@@ -36,7 +37,8 @@ def test_participation_shaping_rewards_holding_position():
 
 def test_participation_shaping_flat_gets_no_bonus():
     """恒空仓（action=0）不产生持仓奖励：开/关塑形累计奖励应一致。"""
-    flat = lambda: 0
+    def flat() -> int:
+        return 0
     assert _episode_total_reward(1.0, flat) == _episode_total_reward(0.0, flat)
 
 

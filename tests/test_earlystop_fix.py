@@ -18,7 +18,7 @@ def make_data(n=800, seed=7):
 
 
 df = make_data()
-from drl import train_drl
+from drl import train_drl  # noqa: E402
 
 base = {"hidden": [32, 32], "lr_actor": 2e-3, "lr_critic": 5e-3, "vol_penalty": 20.0,
         "entropy_coef": 0.05, "val_eval_interval": 8, "lr_final_ratio": 0.3, "seed": 42}

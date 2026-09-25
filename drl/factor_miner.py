@@ -26,7 +26,6 @@ import pandas as pd
 
 from .agent import ACAgent
 from .factor_env import FactorMiningEnv
-from .env import ACTION_BUCKETS  # noqa: F401（保持与 drl 包导出习惯一致）
 from factors.analysis import factor_quality_gate
 from factors.mining import composite_factor
 

@@ -13,8 +13,8 @@ HTML = ROOT / "web" / "static" / "index.html"
 lines = HTML.read_text(encoding="utf-8").split("\n")
 
 starts = []
-for i, l in enumerate(lines):
-    m = re.search(r"""<section v-if="view==='([a-zA-Z0-9_]+)'""", l)
+for i, line in enumerate(lines):
+    m = re.search(r"""<section v-if="view==='([a-zA-Z0-9_]+)'""", line)
     if m:
         starts.append((i, m.group(1)))
 
@@ -42,9 +42,9 @@ for name, a, b in bounds:
     print(f"[{name}]  行 {a+1}-{b}  ({b-a} 行)")
     print("=" * 70)
     for j in range(a, b):
-        l = lines[j]
-        if PAT.search(l):
-            t = l.strip()
+        line = lines[j]
+        if PAT.search(line):
+            t = line.strip()
             t = re.sub(r"\s+", " ", t)
             print(f"  {j+1:>5} | {t[:150]}")
     print()

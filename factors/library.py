@@ -96,9 +96,9 @@ def _realized_vol(df, n: int) -> pd.Series:
 
 
 def _atr(df, n: int = 14) -> pd.Series:
-    h, l, c = df["high"], df["low"], df["close"]
+    h, lo, c = df["high"], df["low"], df["close"]
     prev_c = c.shift(1)
-    tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    tr = pd.concat([h - lo, (h - prev_c).abs(), (lo - prev_c).abs()], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
 

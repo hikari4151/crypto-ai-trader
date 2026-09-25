@@ -101,7 +101,8 @@ def test_parse_base64_encoded_subscription():
 
 
 def test_parse_vmess_link():
-    import base64, json
+    import base64
+    import json
     payload = json.dumps({"v": "2", "ps": "HK-VM", "add": "1.2.3.4", "port": "443", "id": "x"})
     b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
     nodes = parse_nodes_text(f"vmess://{b64}")

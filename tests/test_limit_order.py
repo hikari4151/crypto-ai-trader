@@ -198,7 +198,7 @@ class _TestLimitBase(Strategy):
         self._emitted = False
 
 
-import contextlib
+import contextlib  # noqa: E402
 
 
 @contextlib.contextmanager
@@ -260,7 +260,6 @@ class TestOHLCVSanitizer:
     def test_clean_returns_copy(self):
         """返回副本，不修改原数据"""
         df = pd.DataFrame({"close": [1.0, np.nan, 3.0]})
-        original = df.copy()
         s = OHLCVSanitizer()
         cleaned = s.clean(df)
         assert cleaned is not df

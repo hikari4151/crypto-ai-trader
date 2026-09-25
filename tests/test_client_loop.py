@@ -135,7 +135,7 @@ def test_close_loop_after_close_still_safe():
         await client.close_loop(loop)
         return loop
 
-    loop = asyncio.run(run())
+    asyncio.run(run())
     assert len(client._http_clients) == 0
 
 

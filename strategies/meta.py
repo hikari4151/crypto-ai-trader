@@ -549,7 +549,7 @@ class MetaController(Strategy):
                     action = 1 if weighted_sum > self.params["ensemble_buy_threshold"] else (
                         -1 if weighted_sum < self.params["ensemble_sell_threshold"] else 0
                     )
-                    reason = f"元策略状态不匹配，回退集成"
+                    reason = "元策略状态不匹配，回退集成"
             else:
                 return None
         else:
@@ -1085,9 +1085,6 @@ def train_meta_controller(df, cfg: dict,
     mini_batch_size = max(8, int(cfg.get("mini_batch_size", 64)))
     seed_cfg = cfg.get("seed", 42)
     seed = int(seed_cfg) if seed_cfg is not None else random.randint(0, 99999)
-    meta_window = max(5, int(cfg.get("meta_window", _DEFAULT_META_WINDOW)))
-    fee_rate = float(cfg.get("fee_rate", 0.001))
-    start_cash = float(cfg.get("start_cash", 10000.0))
     warmup = int(cfg.get("warmup", 60))
 
     # 子策略可用性校验；实例由每个环境自建（见 MetaControllerEnv 同构约束 1）

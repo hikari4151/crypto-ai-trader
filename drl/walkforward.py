@@ -9,7 +9,6 @@
 `scripts/walkforward_rl_evolve.py::main`）。
 """
 import logging
-from typing import Optional
 
 import numpy as np
 

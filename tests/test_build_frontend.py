@@ -23,7 +23,8 @@ def test_build_frontend_js_and_css_pass():
 
 def test_build_frontend_manifest_written():
     """正常模式写入清单，字段齐全且指向当前文件。"""
-    import subprocess, sys
+    import subprocess
+    import sys
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "build_frontend.py")],
                        capture_output=True, text=True, encoding="utf-8", errors="replace",
                        cwd=ROOT, timeout=120)
@@ -41,7 +42,8 @@ def test_build_frontend_check_only_no_manifest(tmp_path, monkeypatch):
     # 临时把清单路径指到 tmp，验证 check-only 不创建
     target = tmp_path / "build_manifest.json"
     monkeypatch.setattr(bf, "MANIFEST", target)
-    import subprocess, sys
+    import subprocess
+    import sys
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "build_frontend.py"), "--check-only"],
                        capture_output=True, text=True, encoding="utf-8", errors="replace",
                        cwd=ROOT, timeout=120)

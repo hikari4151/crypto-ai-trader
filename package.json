@@ -6,7 +6,10 @@
   "scripts": {
     "build": "python scripts/build_frontend.py",
     "build:check": "python scripts/build_frontend.py --check-only",
-    "check:js": "python scripts/check_js.py"
+    "check:js": "python scripts/check_js.py",
+    "verify": "python scripts/verify_all.py",
+    "verify:fast": "python scripts/verify_all.py --skip-pytest --skip-backtest",
+    "test": "python -m pytest -q"
   },
   "engines": {
     "node": ">=20"

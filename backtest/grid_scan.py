@@ -7,7 +7,7 @@
 import copy
 import logging
 from itertools import product
-from typing import Any, Optional
+from typing import Optional
 
 log = logging.getLogger("backtest.grid_scan")
 

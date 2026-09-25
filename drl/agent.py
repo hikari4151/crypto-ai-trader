@@ -881,7 +881,7 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
             if val_skipped:
                 # P1-10：退化分支显式标注（前端/日志可识别，val 评估整体停用）
                 row["val_skipped"] = True
-    
+
             # 周期性用确定性策略验证，按验证收益选最优模型（避免训练期随机轨迹误导）
             val_ret = None
             if (ep % val_eval_interval == 0 or ep == episodes) and not val_skipped:
@@ -979,7 +979,7 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                 row["val_gap"] = round(_last_val_gap, 6)
             # 无验证轮次：保留上一轮的 _adv_scale（不重置）
             history.append(row)
-    
+
             if on_progress:
                 try:
                     on_progress({
@@ -994,7 +994,7 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     })
                 except Exception as e:  # noqa: BLE001
                     log.warning("[drl] 进度回调异常: %s", e)
-    
+
     # 若期间从未验证成功（异常），退回当前 agent
     finally:
         pool.shutdown(wait=True)

@@ -117,7 +117,8 @@ class StreamingFeatureEngine:
         risk = _percentile_last(list(self._std20), std20) if std20 == std20 else 0.0
 
         # ---- 组装（与 _precompute_features 同表、同 tanh/clip/fillna(0)）----
-        pct = lambda k: (c_arr[-1] / c_arr[-1 - k] - 1.0) * 100.0 if n > k else float("nan")
+        def pct(k: int) -> float:
+            return (c_arr[-1] / c_arr[-1 - k] - 1.0) * 100.0 if n > k else float("nan")
         feat = np.array([
             np.tanh(ret / _TANH_RET) if ret == ret else 0.0,
             np.tanh(pct(3) / _TANH_RET) if n > 3 and pct(3) == pct(3) else 0.0,

@@ -173,7 +173,10 @@ def build_price_action_pine(spec: dict) -> str:
     """
     P = {**_PA_DEFAULTS, **(spec.get("params") or {})}
     L = []
-    push = lambda s: L.append(s)
+
+    def push(s: str) -> None:
+        L.append(s)
+
     push("//@version=5")
     push('// ════════════════════════════════════════════════════════════════')
     push(f'//  AI 策略 · {spec.get("name", "ai_strategy")}'

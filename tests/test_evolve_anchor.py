@@ -26,8 +26,8 @@ def _disable_deploy_longwindow(monkeypatch):
     测试模型；anchor 测试聚焦锚点可比性逻辑，与本门无关——显式关闭。"""
     monkeypatch.setattr(settings, "evolve_strategy_drl_deploy_requires_longwindow",
                         False, raising=False)
-from drl.model_zoo import ModelZoo
-from tests.test_drl_optimizations import _MetaDB
+from drl.model_zoo import ModelZoo  # noqa: E402
+from tests.test_drl_optimizations import _MetaDB  # noqa: E402
 
 
 # ---------------- ModelZoo：锚点元数据 ----------------
@@ -253,6 +253,7 @@ def _seed_anchor(eng, fitness, data_source, oos_ret=None, identity=None):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_demo_anchor_does_not_block_a_profitable_exchange_model(engine):
     """锁死现场复现：demo 锚点 fitness=3.9167，真实交易所一轮 best_ret=0.30
     （且样本外赚钱、过了部署硬门）。旧逻辑判 rollback，新逻辑判不可比并放行。"""
@@ -268,6 +269,7 @@ async def test_demo_anchor_does_not_block_a_profitable_exchange_model(engine):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_comparable_exchange_anchor_still_protects(engine):
     """守卫不能顺手关掉回退保护：同口径（交易所+同训练身份）时劣质模型仍要被旧锚点压住。"""
     eng, registered, holder = engine
@@ -295,6 +297,7 @@ async def test_comparable_exchange_anchor_still_protects(engine):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_legacy_anchor_without_identity_does_not_block_new_model(engine):
     """旧版本锚点缺身份字段应按 unknown 处理：不回退比较，候选凭自身 OOS 建立新基线。"""
     eng, registered, holder = engine
@@ -340,6 +343,7 @@ async def test_status_exposes_anchor_and_stall(engine):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_reset_anchor_via_engine_unlocks_and_reports(engine):
     eng, registered, holder = engine
     _seed_anchor(eng, 3.916665, "demo")

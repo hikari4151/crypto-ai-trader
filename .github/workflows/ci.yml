@@ -1,31 +1,59 @@
-# P1 CI 流水线：push/PR 自动跑全部质量门禁。
+# CI 流水线：push/PR（及手动 workflow_dispatch）自动跑全部质量门禁。
+# 平台/版本矩阵（C4）：
+#   quality-matrix（push/PR 快路径）：
+#     - ubuntu-latest × Python 3.12 / 3.13（平台无关依赖）
+#     - windows-latest × Python 3.13（完整 requirements-lock.txt，覆盖 start.bat/GBK/winloop）
+#   nightly-full（schedule 或手动 dispatch）：ubuntu × 3.13 全量回归
 # 门禁：
-#   1. ruff check（E9+F：语法级 + 正确性，ruff.toml）
-#   2. JS 语法检查（node --check 优先，esprima 回退）
-#   3. 前端构建链（check-only：JS/CSS/静态引用）
-#   4. compileall（全包字节码编译）
-#   5. 全量 pytest
-# 依赖：requirements-lock.txt（完整锁定，可复现环境）
+#   1. ruff check（E9+F+W+E4+E7：语法级/正确性/空白，ruff.toml）
+#   2. mypy 试点（schema/events/symbols）
+#   3. 配置 schema 校验 + check_doc_sync（C5）
+#   4. JS 语法检查（node --check 优先，esprima 回退）
+#   5. 前端构建链（check-only：JS/CSS/静态引用）
+#   6. compileall（全包字节码编译，含 exchange/factors/tests/run.py）
+#   7. 快路径 pytest（-m "not slow"，覆盖率 ≥60）；nightly-full 全量（≥65）
+#   8. 模块级覆盖率门禁（C1，coverage_gate.py）
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 20 * * *'   # UTC 20:00 夜间全量回归（B3）
 
 jobs:
-  quality:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  quality-matrix:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: windows-latest
+            python: "3.13"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 45 }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python }}
           cache: "pip"
 
-      - name: 安装依赖（锁定文件）
+      - name: 安装平台无关依赖（ubuntu）
+        if: matrix.os != 'windows-latest'
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: 安装完整 Windows 锁定依赖
+        if: matrix.os == 'windows-latest'
         run: |
           pip install --upgrade pip
           pip install -r requirements-lock.txt
@@ -33,11 +61,20 @@ jobs:
       - name: 0) 依赖一致性校验（requirements vs lock）
         run: python scripts/check_lock.py
 
-      - name: 1) ruff 门禁（E9+F）
-        run: python -m ruff check core/ engine/ ai/ web/ scripts/ backtest/ strategies/ indicators/ config/ drl/
+      - name: 0a) 平台锁校验（Windows+Linux，B5）
+        run: python scripts/compile_lock.py --check-platform
+
+      - name: 1) ruff 门禁（E9+F+W+E4+E7）
+        run: python -m ruff check core/ engine/ ai/ web/ scripts/ backtest/ strategies/ indicators/ config/ drl/ exchange/ factors/ tests/
+
+      - name: 1a) mypy 试点（schema/events/symbols）
+        run: python -m mypy backtest/schema.py core/events.py exchange/symbols.py
 
       - name: 1b) 配置 schema 校验（config.yaml 快速失败门禁）
         run: python scripts/validate_config.py
+
+      - name: 1c) 文档-门禁同步校验（C5）
+        run: python scripts/check_doc_sync.py
 
       - name: 2) JS 语法检查
         run: python scripts/check_js.py
@@ -46,9 +83,83 @@ jobs:
         run: python scripts/build_frontend.py --check-only
 
       - name: 4) 全包字节码编译
-        run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl
+        run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl exchange factors tests run.py
 
-      - name: 5) 全量 pytest
-        # 并行工作流已收敛（d484a95 等提交），DRL 训练测试已纳入其职责；
-        # 恢复全量回归（此前 17 个训练测试排除段已移除）
-        run: python -m pytest -q
+      - name: 5) 快路径 pytest + 覆盖率门禁（≥60）
+        run: python -m pytest -q -m "not slow" --cov --cov-fail-under=60 --cov-report=html --junitxml=reports/junit.xml
+
+      - name: 5a) 模块级覆盖率门禁（C1）
+        run: |
+          python -m coverage json -o .optim/coverage_gate.json
+          python scripts/coverage_gate.py --json .optim/coverage_gate.json
+
+      - name: 上传测试产物（覆盖率 HTML + JUnit XML）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.os }}-${{ matrix.python }}
+          path: |
+            .optim/coverage_html
+            reports/junit.xml
+
+  nightly-full:
+    # 夜间全量回归（B3 定时）；workflow_dispatch 时也跑全量（手动触发）
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: 安装平台无关依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: 0) 依赖一致性校验
+        run: python scripts/check_lock.py
+
+      - name: 0a) 平台锁校验（Windows+Linux，B5）
+        run: python scripts/compile_lock.py --check-platform
+
+      - name: 1) ruff 门禁（E9+F+W+E4+E7）
+        run: python -m ruff check core/ engine/ ai/ web/ scripts/ backtest/ strategies/ indicators/ config/ drl/ exchange/ factors/ tests/
+
+      - name: 1a) mypy 试点（schema/events/symbols）
+        run: python -m mypy backtest/schema.py core/events.py exchange/symbols.py
+
+      - name: 1b) 配置 schema 校验
+        run: python scripts/validate_config.py
+
+      - name: 1c) 文档-门禁同步校验（C5）
+        run: python scripts/check_doc_sync.py
+
+      - name: 2) JS 语法检查
+        run: python scripts/check_js.py
+
+      - name: 3) 前端构建链
+        run: python scripts/build_frontend.py --check-only
+
+      - name: 4) 全包字节码编译
+        run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl exchange factors tests run.py
+
+      - name: 5) 全量 pytest + 覆盖率门禁（≥65）
+        run: python -m pytest -q --cov --cov-fail-under=65 --cov-report=html --junitxml=reports/junit.xml
+
+      - name: 5a) 模块级覆盖率门禁（C1）
+        run: |
+          python -m coverage json -o .optim/coverage_gate.json
+          python scripts/coverage_gate.py --json .optim/coverage_gate.json
+
+      - name: 上传测试产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-nightly
+          path: |
+            .optim/coverage_html
+            reports/junit.xml

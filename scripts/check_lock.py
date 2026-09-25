@@ -1,7 +1,9 @@
-"""依赖一致性校验：requirements.txt 顶层包必须都在 requirements-lock.txt 中。
+"""依赖一致性校验：requirements*.txt + requirements*.in 顶层包必须都在 requirements-lock.txt 中。
 
-目的：防止"改了 requirements.txt 却忘了更新 lock"——lock 是可复现环境的
+目的：防止"改了 requirements 却忘了更新 lock"——lock 是可复现环境的
 唯一来源，两者不同步时 CI 应拦截（否则新机器装出不同依赖集）。
+同时校验开发依赖文件（ruff/esprima/pytest-asyncio 等），避免 CI 缺工具。
+.in 是生成 lock 的源清单（B5），txt 是当前安装说明，两边都必须被 lock 覆盖。
 
 用法：
   python scripts/check_lock.py          # 校验，0=一致 1=不一致
@@ -14,6 +16,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REQ = ROOT / "requirements.txt"
+REQ_DEV = ROOT / "requirements-dev.txt"
+REQ_IN = ROOT / "requirements.in"
+REQ_DEV_IN = ROOT / "requirements-dev.in"
 LOCK = ROOT / "requirements-lock.txt"
 
 
@@ -35,9 +40,16 @@ def lock_names(lock_text: str) -> set[str]:
     return set(re.findall(r"^([A-Za-z0-9_.\-]+)==", lock_text, re.M))
 
 
+def requirement_files() -> list[Path]:
+    """校验源清单：requirements*.txt 与 *.in（.in 是生成 lock 的源，须与 lock 同覆盖）。"""
+    return [p for p in (REQ, REQ_DEV, REQ_IN, REQ_DEV_IN) if p.exists()]
+
+
 def check() -> tuple[set[str], set[str]]:
-    """返回 (missing, extra)。missing=req 有 lock 缺；extra=lock 有 req 缺。"""
-    req_top = top_level_names(REQ.read_text(encoding="utf-8"))
+    """返回 (missing, extra)。missing=requirements* 有 lock 缺；extra=lock 有 req 缺。"""
+    req_top = set()
+    for p in requirement_files():
+        req_top |= top_level_names(p.read_text(encoding="utf-8"))
     lk = lock_names(LOCK.read_text(encoding="utf-8"))
     missing = req_top - lk
     # lock 里可以有传递依赖（extra 是正常的），只报缺失
@@ -50,9 +62,9 @@ def main() -> int:
     args = ap.parse_args()
     missing, _ = check()
     if not missing:
-        print(f"[lock] 依赖一致性校验通过（{LOCK.name} 覆盖 requirements.txt 全部顶层包）")
+        print(f"[lock] 依赖一致性校验通过（{LOCK.name} 覆盖 requirements*.txt / *.in 全部顶层包）")
         return 0
-    print(f"[lock] 不一致：requirements.txt 有 {len(missing)} 个包不在 lock 中:")
+    print(f"[lock] 不一致：requirements 文件有 {len(missing)} 个包不在 lock 中:")
     for m in sorted(missing):
         print(f"  - {m}")
     if args.fix:

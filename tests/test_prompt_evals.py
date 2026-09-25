@@ -107,7 +107,7 @@ def test_trades_block_capped_at_20():
     trades = [{"ts": "2026-01-01T00:00:00+00:00", "side": "buy", "price": 100.0,
                "qty": 0.1, "pnl": 0.0, "strategy": "dual_ma", "reason": "r"}] * 30
     block = _trades_block(trades)
-    lines = [l for l in block.splitlines() if l.startswith("- ")]
+    lines = [line for line in block.splitlines() if line.startswith("- ")]
     assert len(lines) == 20, "近期交易应只保留最近 20 笔"
     assert "暂无" not in block
 
@@ -116,7 +116,7 @@ def test_backtests_block_capped_at_5():
     from ai.prompts import _backtests_block
     bts = [{"strategy": "dual_ma", "symbol": "BTC/USDT", "timeframe": "1h"} for _ in range(8)]
     block = _backtests_block(bts)
-    lines = [l for l in block.splitlines() if l.startswith("- ")]
+    lines = [line for line in block.splitlines() if line.startswith("- ")]
     assert len(lines) == 5, "回测历史应只保留最近 5 条"
 
 

@@ -83,8 +83,8 @@
 
 1. **门禁要统计严谨**：`oos_ret>0` 只是门槛，要补 DSR / PBO / 成本翻倍扫描（AlphaForge、How Much Sharpe is Illusory、purgedcv、GAP-01 验收标准）。
 2. **部署要闭环**：testnet 沙盒 → 小资金实盘 → 自动切换/回滚/监控（Dukesan、FreqAI、QuantStart）；"注册了但 reload skipped"不算部署。
-3. **数据对齐要防窗口错位**：同轮直传或按窗口身份校验，而不是尾戳严格相等（AlphaForge、Harvard lookahead 规范、FreqAI）。
-4. **奖励设计要防懒解**：空仓惩罚/最低动作约束 + 训练段/OOS 分离评估（TensorTrade、MetaTrader/AAAI）。
+3. **数据对齐要防窗口错位**：同轮直传或按窗口身份校验，而不是尾戳严格相等（AlphaForge、Harvard lookahead 规范、FreqAI）。✅ 已在 crypto_ai_trader 落地（2026-09-19）：`_load_cascade_factor_values` 在 npy 缺失/尾戳失配时改用**已部署权重在当轮 df 上复算**（`composite_factor(z_mode="expanding")`，与训练端/实盘 `rl_adaptive` 复算同口径，天然按当前窗口对齐、无前视）；测试 `tests/test_evolve_cascade_recompute.py`。
+4. **奖励设计要防懒解**：空仓惩罚/最低动作约束 + 训练段/OOS 分离评估（TensorTrade、MetaTrader/AAAI）。✅ 已在 crypto_ai_trader 落地（2026-09-19）：元策略「持仓参与塑形」`evolve_meta_participation_scale`（默认0.5，奖励+=系数×仓位比，只进训练梯度；测试 `tests/test_meta_participation_shaping.py`）。
 5. **连续进化要防陈旧锚点**：种群 + 多样性 + from-scratch 重置，推广到所有管线（PopAgent、Ergodicity、PBT）。
 
 ---

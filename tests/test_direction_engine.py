@@ -13,7 +13,7 @@ def make_candles(closes, seed=1):
     highs = np.maximum(opens, closes) * (1 + np.abs(rng.normal(0, 0.004, len(closes))))
     lows = np.minimum(opens, closes) * (1 - np.abs(rng.normal(0, 0.004, len(closes))))
     vols = np.abs(rng.normal(100, 20, len(closes)))
-    return [[i, o, h, l, c, v] for i, (o, h, l, c, v) in enumerate(zip(opens, highs, lows, closes, vols))]
+    return [[i, o, h, lo, c, v] for i, (o, h, lo, c, v) in enumerate(zip(opens, highs, lows, closes, vols))]
 
 
 # 场景1：强上升趋势

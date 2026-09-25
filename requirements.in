@@ -1,0 +1,21 @@
+# 运行依赖（顶层声明，生成 requirements-lock.txt 的源；B5 依赖治理）
+# 与 requirements.txt 保持同源（check_lock.py 会同时校验 *.txt 与 *.in）。
+ccxt>=4.2.0              # 交易所 REST
+pandas>=2.0.0
+numpy>=1.24.0
+httpx>=0.27.0            # 异步 AI HTTP 客户端
+orjson>=3.9.0            # run16 E1：模型 zoo 权重 JSON 快速解析
+# Web
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+# 配置
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+python-dotenv>=1.0.0
+PyYAML>=6.0
+# 数据库
+SQLAlchemy>=2.0.25
+aiosqlite>=0.20.0
+asyncpg>=0.29.0          # 可选：PostgreSQL
+# 安全
+cryptography>=42.0.0

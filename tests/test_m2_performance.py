@@ -115,7 +115,8 @@ class TestPriceActionFeaturesSeries:
         close = np.cumsum(rng.normal(0, 1, 15)) + 100
         high = close + rng.uniform(0, 2, 15)
         low = close - rng.uniform(0, 2, 15)
-        open_ = np.roll(close, 1); open_[0] = close[0]
+        open_ = np.roll(close, 1)
+        open_[0] = close[0]
         vol = rng.uniform(100, 1000, 15)
         pa_new = price_action_features_series(high, low, close, open_, vol)
         assert len(pa_new) == 15

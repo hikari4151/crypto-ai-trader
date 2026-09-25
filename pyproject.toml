@@ -1,0 +1,17 @@
+# 项目级工具配置（C2 类型检查试点；无 [build-system]，不影响 pip 安装行为）。
+# mypy 试点范围：纯函数/数据模块，先跑通再逐步扩大。
+# 运行：
+#   .venv\Scripts\python -m mypy          # 使用下方 files 列表
+#   .venv\Scripts\python -m mypy backtest/schema.py core/events.py exchange/symbols.py
+[tool.mypy]
+python_version = "3.13"
+files = [
+    "backtest/schema.py",
+    "core/events.py",
+    "exchange/symbols.py",
+]
+# 试点阶段不深入检查第三方依赖与未纳入范围的模块：
+follow_imports = "skip"
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_unused_ignores = true

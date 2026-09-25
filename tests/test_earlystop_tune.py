@@ -21,7 +21,7 @@ def make_data(n=1500, seed=3):
     return df.set_index("timestamp").astype(float)
 
 df = make_data()
-from drl import train_drl
+from drl import train_drl  # noqa: E402
 
 base = {"hidden": [32, 32], "lr_actor": 2e-3, "lr_critic": 5e-3,
         "vol_penalty": 20.0, "entropy_coef": 0.05, "val_eval_interval": 10,

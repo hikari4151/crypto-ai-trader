@@ -468,7 +468,7 @@ async def get_result(result_id: int, db: Database = Depends(get_db)):
         # E-②（2026-09-24）：schema 校验（防 NaN/inf 脏数据 500；字段版本化）
         schema_valid, schema_err = True, ""
         try:
-            from backtest.schema import SCHEMA_VERSION, validate_backtest_result
+            from backtest.schema import validate_backtest_result
             validate_backtest_result({
                 "symbol": cfg.get("symbol", ""), "timeframe": cfg.get("timeframe", ""),
                 "strategy": cfg.get("strategy_name", ""),

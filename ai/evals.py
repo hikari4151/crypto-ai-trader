@@ -38,8 +38,8 @@ def _build_golden(n_cases: int = 12, n_candles: int = 60, seed: int = 7) -> list
     for k in range(n_cases):
         i = n_candles + k
         window = df.iloc[i - n_candles: i]
-        candles = [[int(ts.timestamp() * 1000), float(o), float(h), float(l), float(c), float(v)]
-                   for ts, o, h, l, c, v in zip(window.index, window["open"], window["high"],
+        candles = [[int(ts.timestamp() * 1000), float(o), float(h), float(lo), float(c), float(v)]
+                   for ts, o, h, lo, c, v in zip(window.index, window["open"], window["high"],
                                                 window["low"], window["close"], window["volume"])]
         closes_w = list(closes[i - n_candles:i])
         snap = {

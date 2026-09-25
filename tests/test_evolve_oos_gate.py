@@ -152,6 +152,7 @@ def engine(tmp_path, monkeypatch):
     return eng, registered, holder
 
 
+@pytest.mark.slow
 async def test_rejected_model_does_not_take_over_live_files(engine):
     """OOS 拦截：实盘模型文件保持原样、不注册策略；被拦模型归档到 archive/ 可复查，
     但不占版本名额（P4-C2：废模型不得把真改进版挤出版本历史）。"""

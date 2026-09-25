@@ -49,7 +49,13 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 pip install -r requirements.txt
 ```
 
-要完全复现开发环境，可用锁定版本清单（含 CUDA/Windows 专用包，跨平台请按需裁剪）：
+开发/测试工具（lint、异步测试、JS 回退解析、覆盖率门禁）另行安装：
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+要完全复现 Windows 开发环境，可用锁定版本清单（含 winloop/CUDA 等 Windows/CUDA 专用包；CI 的 ubuntu job 只装 `requirements.txt + requirements-dev.txt`，windows job 装完整 lock）：
 
 ```bash
 pip install -r requirements-lock.txt
@@ -132,6 +138,48 @@ pytest
 .venv\Scripts\python -m pytest -q
 .venv\Scripts\python scripts\check_js.py                      :: 前端内联 JS 语法（esprima，无需 node）
 .venv\Scripts\python run.py backtest --source demo --strategy dual_ma   :: 双引擎一致性基线与基线对比
+```
+
+工具链统一入口（P1-B1）：
+
+```bat
+.venv\Scripts\python scripts\verify_all.py                  :: 完整链（门禁 + pytest + 基线回测）
+.venv\Scripts\python scripts\verify_all.py --skip-pytest --skip-backtest   :: 快速门禁（提交前）
+.venv\Scripts\python scripts\install_git_hooks.py          :: 安装本地 pre-commit hook（快速门禁）
+```
+
+CI 分层（P1-B4）：push/PR 快路径跑 `pytest -m "not slow"`（覆盖率门槛 60），最慢的进化引擎/DRL 重场景测试打 `@pytest.mark.slow` 挪到 `nightly-full` job 全量回归（门槛 65）。
+
+平台/版本矩阵（P1-C4）：`quality-matrix` 快路径覆盖 **ubuntu × Python 3.12/3.13** 与 **windows × Python 3.13**（Windows 用完整 lock，其余平台无关依赖）；`nightly-full` 为 ubuntu × 3.13 全量回归。
+
+ruff（E9+F+W+E4+E7）已覆盖 `tests/`（B6 延伸）。
+
+依赖治理（P1-B5）：`requirements.in` / `requirements-dev.in` 是顶层源清单；`requirements-lock.txt` 是 Windows 完整锁定（含 winloop/CUDA），`requirements-lock-linux.txt` 是平台无关/Ubuntu 锁定；校验与重生成入口：
+
+```bash
+python scripts/compile_lock.py --check              # 校验 Windows lock 覆盖 .in
+python scripts/compile_lock.py --check-platform     # 校验 Windows+Linux 两个锁都覆盖 .in
+python scripts/compile_lock.py --freeze             # 从当前 .venv 重新生成 Windows 锁 + 派生 Linux 锁
+python scripts/compile_lock.py --compile            # 有 uv/pip-compile 时从 .in 生成 Linux 锁
+```
+
+类型检查试点（P1-C2，`pyproject.toml`）：
+
+```bash
+.venv\Scripts\python -m mypy backtest/schema.py core/events.py exchange/symbols.py
+```
+
+文档-门禁同步（P1-C5）：核对 `docs/REDEV_GUIDE.md` §4 与 `ci.yml` 的目录清单不漂移：
+
+```bash
+.venv\Scripts\python scripts\check_doc_sync.py
+```
+
+模块级覆盖率门禁（P1-C1）：在 `pytest --cov` 后生成 coverage.json 并校验每个核心模块下限：
+
+```bash
+.venv\Scripts\python -m coverage json -o .optim/coverage_gate.json
+.venv\Scripts\python scripts\coverage_gate.py --json .optim/coverage_gate.json
 ```
 
 核心回归覆盖：双回测引擎逐笔一致性（`test_backtest_engine_consistency.py`）、风控防线（NaN/Infinity 拒绝、平仓豁免冷却、止损放行，`test_risk_guards.py`）、AI 校验（NaN/Inf/布尔拦截）、跨 loop DB 调度、实盘限价单对账、引擎失败复位等。

@@ -12,9 +12,9 @@ import logging
 
 log = logging.getLogger("drl.evolve_observations")
 
-from config.settings import settings
-from drl.model_zoo import ModelZoo
-from drl.evolve_rules import _longwindow_verdict
+from config.settings import settings  # noqa: E402
+from drl.model_zoo import ModelZoo  # noqa: E402
+from drl.evolve_rules import _longwindow_verdict  # noqa: E402
 
 
 class EvolveObservationsMixin:

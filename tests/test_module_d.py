@@ -48,7 +48,7 @@ def test_env_shaping_log_dd_positive(caplog):
     from drl.env import TradingEnv
     caplog.set_level(logging.INFO)
     df = _demo_df()
-    env = TradingEnv(df, reward_dd_penalty=0.5, reward_losing_penalty=0.0,
+    TradingEnv(df, reward_dd_penalty=0.5, reward_losing_penalty=0.0,
                      reward_trend_align=0.0)
     found = False
     for record in caplog.records:
@@ -66,7 +66,7 @@ def test_env_shaping_log_losing_positive(caplog):
     from drl.env import TradingEnv
     caplog.set_level(logging.INFO)
     df = _demo_df()
-    env = TradingEnv(df, reward_dd_penalty=0.0, reward_losing_penalty=0.2,
+    TradingEnv(df, reward_dd_penalty=0.0, reward_losing_penalty=0.2,
                      reward_trend_align=0.0)
     found = False
     for record in caplog.records:
@@ -84,7 +84,7 @@ def test_env_shaping_log_trend_positive(caplog):
     from drl.env import TradingEnv
     caplog.set_level(logging.INFO)
     df = _demo_df()
-    env = TradingEnv(df, reward_dd_penalty=0.0, reward_losing_penalty=0.0,
+    TradingEnv(df, reward_dd_penalty=0.0, reward_losing_penalty=0.0,
                      reward_trend_align=0.1)
     found = False
     for record in caplog.records:
@@ -102,7 +102,7 @@ def test_env_shaping_log_all_positive(caplog):
     from drl.env import TradingEnv
     caplog.set_level(logging.INFO)
     df = _demo_df()
-    env = TradingEnv(df, reward_dd_penalty=0.5, reward_losing_penalty=0.2,
+    TradingEnv(df, reward_dd_penalty=0.5, reward_losing_penalty=0.2,
                      reward_trend_align=0.1)
     found = False
     for record in caplog.records:
@@ -380,31 +380,31 @@ async def test_auto_optimize_with_grid_scan(monkeypatch):
     # But auto-optimize starts a thread, which is hard to test.
     # Instead, let's directly test the _run logic by calling it.
     # We'll mock the worker to run synchronously.
-    
+
     task_id = 1
     aimod._AI_TASKS[task_id] = {}
-    
+
     # Create a simplified version of the auto-optimize _run flow
     async def test_run():
         from web.api.ai import _ai_progress, _run_nearby_grid_scan
-        
+
         _ai_progress(task_id, "snapshot", "test", 5)
         snap = await engine._current_snapshot()
         assert snap is not None
-        
+
         _ai_progress(task_id, "ai", "AI test", 40)
         result = await engine.optimizer.optimize_price_action(
             engine.strategy, None, snap, "test", [], apply=False)
         assert result is not None
-        
+
         # Apply params (direct await since we are in the same loop)
         if result.get("params") and engine._loop is not None:
             await engine.apply_strategy_params(engine.strategy.name, result["params"])
-        
+
         # Grid scan phase
         grid_center = result.get("grid_center") or {}
         grid_result = None
-        if grid_center and not engine.bus is None:
+        if grid_center and engine.bus is not None:
             _ai_progress(task_id, "grid", "局部网格扫描", 70, "test")
             grid_result = await _run_nearby_grid_scan(engine, grid_center)
             if grid_result and grid_result.get("best"):
@@ -413,11 +413,11 @@ async def test_auto_optimize_with_grid_scan(monkeypatch):
                     await engine.apply_strategy_params(engine.strategy.name, best)
                 result["grid_scan"] = {"scanned": grid_result.get("scanned"),
                                        "best": best, "applied": bool(best)}
-        
+
         return result, grid_result
 
     result, grid_result = await test_run()
-    
+
     assert grid_scan_called[0], "_run_nearby_grid_scan should have been called"
     assert grid_result is not None, "grid scan should return a result"
     assert "grid_scan" in result, "result should have grid_scan key"
@@ -459,7 +459,7 @@ async def test_auto_optimize_no_grid_center(monkeypatch):
             engine.strategy, None, snap, "test", [], apply=False)
         grid_center = result.get("grid_center") or {}
         grid_result = None
-        if grid_center and not engine.bus is None:
+        if grid_center and engine.bus is not None:
             grid_result = await aimod._run_nearby_grid_scan(engine, grid_center)
         return grid_result
 

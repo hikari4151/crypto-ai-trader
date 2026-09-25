@@ -97,4 +97,4 @@ def test_supervisor_restart_logic(tmp_path, monkeypatch):
     assert restarts == 1, "连续 3 次失败应触发一次重启"
     assert calls["start"] == 2, "初次启动 + 重启 = 2 次启动"
     lines = log.read_text(encoding="utf-8").strip().splitlines()
-    assert any("restart_due_probe" in l for l in lines)
+    assert any("restart_due_probe" in line for line in lines)

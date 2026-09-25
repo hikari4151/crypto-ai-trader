@@ -52,12 +52,20 @@ def _compute_sr_pa(candles: list) -> tuple[dict, dict]:
 
 class MarketDataHub:
     def __init__(self, exchange_id: str, symbols: list[str], timeframes: list[str], bus: EventBus,
-                 max_candles: int = 300, ma_fast_period: int = 10, ma_slow_period: int = 30) -> None:
+                 max_candles: int = 300, ma_fast_period: int = 10, ma_slow_period: int = 30,
+                 rest_fallback: bool = True, fallback_interval: int = 60,
+                 fallback_max_candles: int = 300) -> None:
         self.exchange_id = exchange_id
         self.symbols = symbols
         self.timeframes = timeframes
         self.bus = bus
         self.max_candles = max_candles
+        # REST/本地回退（2026-09-23）：WS 行情（ccxt.pro）依赖 binance 端点，
+        # 网络不可达时行情断流（simulated 引擎 market_stale=-1 不交易）。开启后
+        # 并行用 load_klines_cached（本地 kline_store 优先）轮询驱动行情。
+        self.rest_fallback = bool(rest_fallback)
+        self.fallback_interval = int(fallback_interval)
+        self.fallback_max_candles = int(fallback_max_candles)
         # MA 快/慢线周期（跟随当前策略；dual_ma 的 fast_period/slow_period 生效）
         self.ma_fast_period = int(ma_fast_period)
         self.ma_slow_period = int(ma_slow_period)
@@ -201,7 +209,59 @@ class MarketDataHub:
             self.last_klines_ts[key] = time.time()
         return changed
 
+    async def _fallback_poll_once(self, symbol: str, timeframe: str) -> bool:
+        """REST/本地回退轮询一次（2026-09-23）：load_klines_cached（本地
+        kline_store 优先；binance 不可达时用历史缓存）→ apply_ohlcv + 发布
+        MARKET_CANDLE。返回是否有新K线；回退关闭/数据不可用返回 False。
+        """
+        if not self.rest_fallback:
+            return False
+        try:
+            from backtest.data_loader import load_klines_cached
+            # 数据源固定 binance：本地 kline_store 的历史缓存来自 binance
+            #（self.exchange_id 可能为 okx 等行情交易所，本地库无其数据）。
+            df = await load_klines_cached("binance", symbol, timeframe,
+                                          limit=self.fallback_max_candles,
+                                          max_candles=self.fallback_max_candles)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[ws] REST回退拉取失败 %s/%s: %s", symbol, timeframe, e)
+            return False
+        if df is None or len(df) == 0:
+            return False
+        candles = []
+        for i in range(len(df)):
+            row = df.iloc[i]
+            ts_ms = int(df.index[i].value // 10**6)
+            candles.append([ts_ms, float(row["open"]), float(row["high"]),
+                            float(row["low"]), float(row["close"]),
+                            float(row["volume"])])
+        changed = self.apply_ohlcv(symbol, timeframe, candles)
+        if changed:
+            await self.bus.publish(Event(EventType.MARKET_CANDLE, {
+                "symbol": symbol, "timeframe": timeframe,
+                "candles": candles,
+                "snapshot": self.snapshot(symbol, timeframe)}, source="ws_fallback"))
+        return changed
+
     async def run(self) -> None:
+        self._running = True
+        # REST/本地回退**先行**启动（2026-09-23）：WS 初始化可能卡在 load_markets
+        # （binance 不可达时网络超时、阻塞数分钟），fallback 必须独立先行，
+        # 行情才不断流（simulated 引擎 market_stale=-1 不交易的根因）。
+        tasks: list = []
+        if self.rest_fallback:
+            async def fallback_loop():
+                while self._running:
+                    for symbol in self.symbols:
+                        for tf in self.timeframes:
+                            try:
+                                await self._fallback_poll_once(symbol, tf)
+                            except Exception as e:  # noqa: BLE001
+                                log.warning("[ws] REST回退轮询异常 %s/%s: %s",
+                                            symbol, tf, e)
+                    await asyncio.sleep(self.fallback_interval)
+
+            tasks.append(asyncio.create_task(fallback_loop()))
         import ccxt.pro as ccxtpro
         if not hasattr(ccxtpro, self.exchange_id):
             raise ValueError(f"ccxt.pro 不支持交易所: {self.exchange_id}")
@@ -217,7 +277,6 @@ class MarketDataHub:
             await ex.load_markets()
         except Exception:  # noqa: BLE001
             log.warning("[ws] load_markets 失败（网络受限时仍可继续）", exc_info=True)
-        self._running = True
         log.info("[ws] 行情中枢启动: %s %s %s", self.exchange_id, self.symbols, self.timeframes)
 
         async def watch_symbols():
@@ -261,8 +320,8 @@ class MarketDataHub:
                     backoff = min(backoff * 2, 30)  # 指数退避，最多 30s
 
         try:
-            # 多交易对并行订阅
-            tasks = [watch_symbols()]
+            # 多交易对并行订阅（fallback 任务已在 run() 开头先行启动）
+            tasks.append(watch_symbols())
             for symbol in self.symbols:
                 for tf in self.timeframes:
                     tasks.append(watch_ohlcv_for(symbol, tf))

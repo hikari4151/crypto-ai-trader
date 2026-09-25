@@ -5,21 +5,16 @@
 #   scripts/slippage_sensitivity_drl.py F601 字典重复键）。
 # 风格类（E/W）后续按模块渐进开启，避免一次性 400+ 错误淹没门禁。
 line-length = 110
-target-version = "py310"
+target-version = "py313"
 
 [lint]
-select = ["E9", "F"]
+select = ["E9", "F", "W", "E4", "E7"]
 ignore = ["E902"]
 
 [lint.per-file-ignores]
 # 脚本/研究代码允许较宽松（一次性脚本不强制全部正确性规则）
 "scripts/slippage_sensitivity_drl.py" = ["F401", "F841"]
 ".optim/*" = ["E9", "F"]
-# ⚠️ 并行工作流文件（持续进化/GAP-01 方向，本会话另一任务正在改）：
-# 暂不纳入 lint 门禁，待其合入后移除本段
-"config/settings.py" = ["E9", "F"]
-"drl/evolve_engine.py" = ["E9", "F"]
-"drl/model_zoo.py" = ["E9", "F"]
-"drl/walkforward.py" = ["E9", "F"]
-"strategies/meta.py" = ["E9", "F"]
-"drl/factor_miner.py" = ["E9", "F"]  # 历史遗留：noqa 指令后带中文注释导致无效，暂豁免
+# 注：config/settings.py、drl/evolve_engine.py、drl/model_zoo.py、drl/walkforward.py、
+#     strategies/meta.py、drl/factor_miner.py 的历史整文件豁免已于 2026-09-24 解除
+#     （P0-A4/B6：违规 11 处已修复，E9+F 全绿，纳入常规门禁）。

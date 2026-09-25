@@ -76,3 +76,11 @@ yarl==1.24.5
 zlib-ng==1.0.0
 
 pytest==9.1.1
+coverage==7.16.1
+pytest-cov==7.1.0
+
+# 开发/测试工具（与 requirements-dev.txt 对应，check_lock.py 校验）
+ruff==0.16.8
+esprima==4.0.1
+pytest-asyncio==1.4.0
+mypy==2.3.1

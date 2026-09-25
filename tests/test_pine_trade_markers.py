@@ -124,7 +124,7 @@ def test_drl_pine_supports_state_window_stacking():
 def test_drl_pine_target_ternary_is_valid_pine():
     """target 档位映射必须是合法三元链（曾因拼接符误用 ' ? ' 产出非法语句）。"""
     from drl.pine_export import build_drl_pine
-    line = next(l for l in build_drl_pine(_agent(15)).splitlines() if l.startswith("target ="))
+    line = next(line for line in build_drl_pine(_agent(15)).splitlines() if line.startswith("target ="))
     assert line == ("target = bestIdx == 0 ? 0.0 : bestIdx == 1 ? 0.25"
                     " : bestIdx == 2 ? 0.5 : bestIdx == 3 ? 0.75 : 1.0")
     assert line.count("?") == line.count(":")

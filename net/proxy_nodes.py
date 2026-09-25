@@ -6,6 +6,7 @@
 - supported=False（ss/vmess/trojan 等）：需本地客户端转换，列出但提示不可直用
 """
 import base64
+import json
 import logging
 import re
 import socket
@@ -58,11 +59,89 @@ def _parse_ss_link(line: str) -> dict:
     }
 
 
+
+
+_NODE_MARKERS = ("ss://", "vmess://", "trojan://", "ssr://",
+                 "socks5://", "socks4://", "http://", "https://", "proxies:")
+
+
+def _maybe_base64_decode(text: str) -> Optional[str]:
+    """订阅内容常见为整段 base64（节点行编码）——自动解码识别。"""
+    compact = re.sub(r"\s+", "", text)
+    if len(compact) < 40:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9+/=]+", compact):
+        return None
+    try:
+        pad = "=" * (-len(compact) % 4)
+        decoded = base64.b64decode(compact + pad).decode(errors="ignore")
+    except Exception:  # noqa: BLE001
+        return None
+    return decoded if any(m in decoded for m in _NODE_MARKERS) else None
+
+
+def _parse_vmess_link(line: str) -> dict:
+    """vmess://base64(JSON) → 节点（需本地客户端转换，仅提取展示信息）。"""
+    raw = line[len("vmess://"):].split("#")[0]
+    server = port = ""
+    name = ""
+    try:
+        pad = "=" * (-len(raw) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(raw + pad).decode(errors="ignore"))
+        name = str(payload.get("ps") or "")
+        server = str(payload.get("add") or "")
+        port = int(payload.get("port")) if str(payload.get("port", "")).isdigit() else None
+    except Exception:  # noqa: BLE001
+        pass
+    return {"name": name or f"{server or 'vmess'}:{port or ''}",
+            "type": "vmess", "server": server, "port": port,
+            "url": "", "supported": False}
+
+
+def _parse_trojan_link(line: str) -> dict:
+    """trojan://pass@host:port#name（需本地客户端转换）。"""
+    body = line[len("trojan://"):]
+    name = ""
+    m = re.search(r"#([^#\s]+)$", body)
+    if m:
+        name = m.group(1).strip()
+    server = port = ""
+    m2 = re.search(r"@([^:/#]+):(\d+)", body)
+    if m2:
+        server, port = m2.group(1), int(m2.group(2))
+    return {"name": name or f"{server or 'trojan'}:{port or ''}",
+            "type": "trojan", "server": server, "port": port or None,
+            "url": "", "supported": False}
+
+
+def _parse_ssr_link(line: str) -> dict:
+    """ssr://base64(host:port:...)（需本地客户端转换）。"""
+    raw = line[len("ssr://"):].split("#")[0]
+    server = port = ""
+    name = ""
+    m = re.search(r"#([^#\s]+)$", line)
+    if m:
+        name = m.group(1).strip()
+    try:
+        pad = "=" * (-len(raw) % 4)
+        decoded = base64.urlsafe_b64decode(raw + pad).decode(errors="ignore")
+        parts = decoded.split(":")
+        if len(parts) >= 2:
+            server, port = parts[0], int(parts[1])
+    except Exception:  # noqa: BLE001
+        pass
+    return {"name": name or f"{server or 'ssr'}:{port or ''}",
+            "type": "ssr", "server": server, "port": port or None,
+            "url": "", "supported": False}
+
 def parse_nodes_text(text: str) -> list[dict]:
     """解析节点文本（Clash YAML 或每行 URL），返回节点列表。"""
     text = (text or "").strip()
     if not text:
         return []
+    decoded = _maybe_base64_decode(text)
+    if decoded:
+        return parse_nodes_text(decoded)
     nodes: list[dict] = []
     # 1) Clash YAML：含 proxies 段（顶层或缩进）
     yaml_nodes = _parse_clash_yaml(text)
@@ -84,6 +163,12 @@ def parse_nodes_text(text: str) -> list[dict]:
             })
         elif low.startswith("ss://"):
             nodes.append(_parse_ss_link(line))
+        elif low.startswith("vmess://"):
+            nodes.append(_parse_vmess_link(line))
+        elif low.startswith("trojan://"):
+            nodes.append(_parse_trojan_link(line))
+        elif low.startswith("ssr://"):
+            nodes.append(_parse_ssr_link(line))
     return nodes
 
 

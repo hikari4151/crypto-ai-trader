@@ -87,3 +87,35 @@ async def test_resolve_subscription_returns_parsed():
             return _CLASH_YAML
     nodes = await resolve_subscription("https://example.com/sub", fetcher=_FakeFetcher())
     assert len(nodes) == 4
+
+
+# 2026-09-25：常见订阅格式覆盖（base64 编码 / vmess/trojan/ssr 行）
+def test_parse_base64_encoded_subscription():
+    import base64
+    raw = "socks5://1.2.3.4:7890\nss://FakePass@5.6.7.8:8388"
+    b64 = base64.b64encode(raw.encode()).decode()
+    nodes = parse_nodes_text(b64)
+    assert len(nodes) >= 2
+    socks = [n for n in nodes if n["type"] == "socks5"]
+    assert socks and socks[0]["supported"] is True
+
+
+def test_parse_vmess_link():
+    import base64, json
+    payload = json.dumps({"v": "2", "ps": "HK-VM", "add": "1.2.3.4", "port": "443", "id": "x"})
+    b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    nodes = parse_nodes_text(f"vmess://{b64}")
+    assert len(nodes) == 1
+    n = nodes[0]
+    assert n["name"] == "HK-VM" and n["server"] == "1.2.3.4" and n["port"] == 443
+    assert n["supported"] is False  # vmess 需本地客户端转换
+
+
+def test_parse_trojan_and_ssr_lines():
+    nodes = parse_nodes_text("trojan://pass@8.8.8.8:443#US-TJ\nssr://abcDEF123")
+    assert len(nodes) == 2
+    tj = [n for n in nodes if n["type"] == "trojan"][0]
+    assert tj["server"] == "8.8.8.8" and tj["port"] == 443 and tj["name"] == "US-TJ"
+    assert tj["supported"] is False
+    ssr = [n for n in nodes if n["type"] == "ssr"][0]
+    assert ssr["supported"] is False

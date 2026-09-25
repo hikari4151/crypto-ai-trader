@@ -43,9 +43,14 @@ echo [1/2] Starting web server on port !PORT! ...
 echo       URL: http://localhost:!PORT!
 echo.
 
-REM --- Start server in background (detached, output to log file) ---
-start "CryptoAI-Trader" /B ".venv\Scripts\python.exe" run.py web --port !PORT! > data\logs\server.log 2>&1
-set SERVER_PID=!ERRORLEVEL!
+REM --- Start server in background (detached) ---
+REM uvicorn writes data\logs\server.log itself via
+REM core.logging_config.uvicorn_log_config (run.py log_config=...).
+REM Do NOT redirect stdout/stderr to server.log here; doing so conflicts
+REM with the server_file RotatingFileHandler and breaks startup with
+REM "ValueError: Unable to configure handler 'server_file'".
+start "CryptoAI-Trader" /B ".venv\Scripts\python.exe" run.py web --port !PORT!
+set SERVER_PID=n/a
 
 REM --- Wait for server to be ready (probe health endpoint, max 60s) ---
 echo [2/2] Waiting for server to be ready...
@@ -79,7 +84,7 @@ exit /b 1
 start http://localhost:!PORT!
 
 echo.
-echo Server is running in background (PID: !SERVER_PID!).
+echo Server is running in background (port: !PORT!).
 echo Close this window or press Ctrl+C to stop the server.
 echo.
 

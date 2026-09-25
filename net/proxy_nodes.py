@@ -134,7 +134,7 @@ def _parse_ssr_link(line: str) -> dict:
             "type": "ssr", "server": server, "port": port or None,
             "url": "", "supported": False}
 
-def parse_nodes_text(text: str) -> list[dict]:
+def parse_nodes_text(text: str, _json_depth: int = 0) -> list[dict]:
     """解析节点文本（Clash YAML 或每行 URL），返回节点列表。"""
     text = (text or "").strip()
     if not text:
@@ -147,9 +147,12 @@ def parse_nodes_text(text: str) -> list[dict]:
     yaml_nodes = _parse_clash_yaml(text)
     if yaml_nodes:
         nodes.extend(yaml_nodes)
-    # 2) 行格式 URL
+    # 2) 行格式 URL（清洗行首序号/项目符号/引号：如 "1. ss://..."、'"vmess://..."')
     for line in text.splitlines():
         line = line.strip()
+        line = re.sub(r"^(?:[-\*]\s*)?(?:\d+[\.\)]\s*)?", "", line).strip()
+        if line.startswith(('"', "'")) and len(line) >= 2 and line.endswith(line[0]):
+            line = line[1:-1].strip()
         if not line or line.startswith("#") or line.startswith("proxies"):
             continue
         low = line.lower()
@@ -169,7 +172,44 @@ def parse_nodes_text(text: str) -> list[dict]:
             nodes.append(_parse_trojan_link(line))
         elif low.startswith("ssr://"):
             nodes.append(_parse_ssr_link(line))
+    if not nodes and _json_depth <= 2:
+        # JSON 包装的订阅（如 {"status":"success","data":"base64..."}）——递归提取字符串值
+        nodes = _extract_from_json(text, _json_depth)
     return nodes
+
+
+def _extract_from_json(text: str, depth: int = 0) -> list[dict]:
+    """从 JSON 结构递归收集含节点标记/base64 的字符串值并解析（防递归深度≤2）。"""
+    if depth > 2:
+        return []
+    try:
+        data = yaml.safe_load(text)
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(data, (dict, list)):
+        return []
+    found: list[str] = []
+
+    def _walk(v: Any) -> None:
+        if isinstance(v, str):
+            s = v.strip()
+            if any(m in s for m in _NODE_MARKERS):
+                found.append(s)
+            else:
+                dec = _maybe_base64_decode(s)
+                if dec:
+                    found.append(dec)
+        elif isinstance(v, dict):
+            for x in v.values():
+                _walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                _walk(x)
+    _walk(data)
+    out: list[dict] = []
+    for s in found:
+        out.extend(parse_nodes_text(s, _json_depth=depth + 1))
+    return out
 
 
 def _parse_clash_yaml(text: str) -> list[dict]:

@@ -115,5 +115,5 @@ data/*.pkl
 web/static/index.html.bak_*
 
 # 意外创建/临时脚本
-/{fontSize
+/\{fontSize
 /verify-*.mjs

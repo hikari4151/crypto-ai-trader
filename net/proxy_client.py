@@ -11,7 +11,6 @@ import subprocess
 import threading
 from pathlib import Path
 
-from config.settings import settings
 
 log = logging.getLogger("proxy_client")
 

@@ -2276,6 +2276,15 @@
             </div>
           </div>
           <div v-if="settingsTab==='proxy'" style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <span class="text-[length:var(--fs-caption)] text-slate-500">hysteria 客户端：
+                <template v-if="hyClient==='installed'"><span class="text-green-600">已就绪</span></template>
+                <template v-else-if="hyClient==='downloading'">下载中…</template>
+                <template v-else-if="hyClient==='error'"><span class="text-red-600">下载失败</span></template>
+                <template v-else>未安装</template>
+              </span>
+              <button v-if="hyClient!=='installed' && hyClient!=='downloading'" class="mac-btn" @click="downloadHyClient()">自动下载</button>
+            </div>
             <div style="font-weight:600;margin-bottom:6px">扫描全部节点</div>
             <textarea class="mac-input" v-model="proxySource" rows="3" placeholder="订阅 URL 或粘贴节点文本（Clash YAML / 每行 socks5:// http:// ss://）" style="width:100%;box-sizing:border-box"></textarea>
             <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
@@ -4164,6 +4173,7 @@ const app = createApp({
     const proxyNodes = ref([]);
     const proxyScanMsg = ref('');
     const proxyScanning = ref(false);
+    const hyClient = ref('checking');  // checking/installed/not_installed/downloading/error
 
     const clock = ref('');
     const toasts = ref([]);
@@ -5572,7 +5582,7 @@ const app = createApp({
     const wsLast = ref(null), wsChange = ref(null), wsVol = ref(null), wsFlash = ref('');
     // 持久化工坊行情设置（品种/周期）
     async function loadProxy() {
-      try { const r = await api('/proxy'); proxyUrl.value = r.proxy_url || ''; proxyResolved.value = r.resolved_proxy || ''; proxyAuto.value = !!r.auto_detected; } catch (e) {}
+      try { const r = await api('/proxy'); proxyUrl.value = r.proxy_url || ''; proxyResolved.value = r.resolved_proxy || ''; proxyAuto.value = !!r.auto_detected; hyClient.value = r.hy_client_installed ? 'installed' : 'not_installed'; } catch (e) { hyClient.value='error'; }
     }
     async function saveProxy() {
       try {
@@ -5582,6 +5592,15 @@ const app = createApp({
       } catch (e) { toast('保存失败 ' + e); }
     }
     loadProxy();  // 页面加载即读代理配置（面板显示当前状态；保存后即时更新）
+    async function downloadHyClient() {
+      hyClient.value = 'downloading';
+      try {
+        const r = await api('/proxy/client/download', {method:'POST', headers:{'Content-Type':'application/json'}});
+        if (!r.ok) { toast(r.error || '下载失败', 'error'); hyClient.value = 'error'; return; }
+        hyClient.value = 'installed';
+        toast('hysteria 客户端已就绪，可选择节点');
+      } catch(e){ toast('下载失败 ' + e, 'error'); hyClient.value = 'error'; }
+    }
     async function scanProxy() {
       if (!proxySource.value.trim()) { toast('请先输入订阅 URL 或节点文本', 'error'); return; }
       proxyScanning.value = true; proxyScanMsg.value = '扫描中…';
@@ -7721,6 +7740,7 @@ const app = createApp({
       wsLast, wsChange, wsVol, wsFlash, getWsSymbol, wsSymbolText, wsTimeframe, wsTimeframeText,
       proxyUrl, proxyResolved, proxyAuto, saveProxy, loadProxy,
       proxySource, proxyNodes, proxyScanMsg, proxyScanning, scanProxy, chooseProxy,
+      hyClient, downloadHyClient,
       wsCtx, wsSignalRows, iterCompareRows, scrollToIterCard,
       pineImportOpen, pineImportCode, pineImportName, pineImportAiCheck, pineImportLoading, pineImportWarnings, importPine, drlPineOpen, copyDrlPine,
       liveCfg, liveStatus, liveModeMsg, liveModeMsgOk, loadLiveConfig, saveLiveConfig, setLiveMode,

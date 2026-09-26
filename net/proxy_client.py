@@ -117,3 +117,35 @@ def select_node(node: dict) -> tuple[bool, str, str]:
     if scheme in ("hysteria2", "hysteria"):
         return start_local_proxy(node)
     return False, "", f"节点类型 {scheme} 暂不支持直接使用（需本地客户端转换）"
+
+
+# 官方 GitHub Releases 最新版 Windows amd64（下载来源固定，防止任意 URL 注入）
+HYSTERIA_DOWNLOAD_URL = ("https://github.com/apernet/hysteria/releases/"
+                         "latest/download/hysteria-windows-amd64.exe")
+_HY_BIN_NAME = "hysteria-windows-amd64.exe"
+
+
+def download_hysteria_client(dest_dir: Path | None = None,
+                             timeout: int = 180) -> tuple[bool, str, str]:
+    """自动下载官方 hysteria 客户端二进制到 bin/（网页一键操作）。返回 (ok, dest, error)。"""
+    import requests
+    dest_dir = Path(dest_dir or BIN_DIR)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / _HY_BIN_NAME
+    try:
+        resp = requests.get(HYSTERIA_DOWNLOAD_URL, stream=True, timeout=timeout)
+        resp.raise_for_status()
+        size = int(resp.headers.get("content-length") or 0)
+        if size and not (1_000_000 <= size <= 200_000_000):
+            return False, "", f"下载文件大小异常（{size} 字节），已中止"
+        with open(dest, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1 << 16):
+                if chunk:
+                    f.write(chunk)
+    except Exception as e:  # noqa: BLE001
+        return False, "", f"下载 hysteria 客户端失败: {e}"
+    ok_size = dest.stat().st_size if dest.exists() else 0
+    if ok_size < 1_000_000:
+        return False, "", f"下载不完整（{ok_size} 字节），请重试或手动放入 bin/"
+    log.info("[proxy-client] hysteria 客户端已下载: %s (%d 字节)", dest, ok_size)
+    return True, str(dest), ""

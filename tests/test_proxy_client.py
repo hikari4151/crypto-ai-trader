@@ -75,3 +75,33 @@ def test_select_node_direct_url():
 def test_select_node_unsupported():
     ok, url, err = proxy_client.select_node({"type": "vmess", "url": ""})
     assert ok is False and "暂不支持" in err or "需本地客户端" in err or err != ""
+
+
+# 2026-09-26：自动下载 hysteria 客户端二进制
+def test_download_hysteria_client(monkeypatch, tmp_path):
+    import io
+
+    class _Resp:
+        headers = {"content-length": "5000000"}
+        def raise_for_status(self):
+            pass
+        def iter_content(self, chunk_size=1 << 16):
+            yield b"x" * (1 << 20)  # 1MB（满足大小校验）
+
+    def _fake_get(url, stream=True, timeout=0):
+        return _Resp()
+    monkeypatch.setattr("requests.get", _fake_get)
+    ok, dest, err = proxy_client.download_hysteria_client(dest_dir=tmp_path)
+    assert ok is True and err == ""
+    assert (tmp_path / "hysteria-windows-amd64.exe").exists()
+    assert (tmp_path / "hysteria-windows-amd64.exe").stat().st_size == (1 << 20)
+
+
+def test_download_hysteria_client_http_error(monkeypatch, tmp_path):
+    class _Resp:
+        def raise_for_status(self):
+            raise RuntimeError("404 Not Found")
+    monkeypatch.setattr("requests.get", lambda *a, **k: _Resp())
+    ok, dest, err = proxy_client.download_hysteria_client(dest_dir=tmp_path)
+    assert ok is False
+    assert "404" in err or "下载失败" in err

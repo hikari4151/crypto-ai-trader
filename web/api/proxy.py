@@ -34,10 +34,12 @@ def _persist(url: str) -> None:
 async def get_proxy() -> dict:
     """读取当前代理配置与生效地址。"""
     resolved = settings.resolved_proxy or ""
+    from net.proxy_client import find_hysteria_bin
     return {
         "proxy_url": (settings.proxy_url or "").strip(),
         "resolved_proxy": resolved,
         "auto_detected": not bool((settings.proxy_url or "").strip()),
+        "hy_client_installed": bool(find_hysteria_bin()),
     }
 
 
@@ -148,3 +150,18 @@ async def select_proxy_node(body: ProxySelectIn) -> dict:
             "resolved_proxy": settings.resolved_proxy or url,
             "selector": "local_client" if scheme in ("hysteria2", "hysteria") else "direct",
             "note": "仅作用于本软件出站请求"}
+
+
+@router.post("/client/download")
+async def download_hysteria_client_api():
+    """一键下载官方 hysteria 客户端二进制到 bin/（hysteria2 节点直用）。"""
+    import asyncio
+    from net.proxy_client import download_hysteria_client, find_hysteria_bin
+
+    if find_hysteria_bin():
+        return {"ok": True, "installed": True, "bin": find_hysteria_bin()}
+    ok, dest, err = await asyncio.to_thread(download_hysteria_client)
+    if not ok:
+        return {"ok": False, "error": err}
+    return {"ok": True, "installed": True, "bin": dest,
+            "note": "hysteria 客户端已下载，可直接选择 hysteria2 节点"}

@@ -148,26 +148,39 @@ _NEW_PROTO_TYPES = {"hysteria2", "hysteria", "tuic", "wireguard"}
 
 
 def _parse_generic_link(line: str, scheme: str) -> dict:
-    """新协议行：scheme://(user@)host:port(/?params)#名称（需本地客户端转换）。"""
+    """新协议行：scheme://(auth@)host:port(/?params)#名称（需本地客户端转换）。"""
     body = line.split("#", 1)[0]
     name = ""
     m = re.search(r"#([^#\s]+)$", line)
     if m:
         name = unquote(m.group(1).strip())
-    server, port = "", None
+    server, port, auth = "", None, ""
+    params: dict[str, str] = {}
     if "@" in body:
-        hostpart = body.rsplit("@", 1)[1]
+        auth, hostpart = body.rsplit("@", 1)
+        if "://" in auth:
+            auth = auth.split("://", 1)[-1]  # 去掉 scheme 前缀（hysteria2://uuid@...）
+        params["auth"] = unquote(auth)
     else:
         hostpart = body.split("://", 1)[-1] if "://" in body else body
-    hostpart = hostpart.split("?")[0].split("/")[0]
+    if "?" in hostpart:
+        hostpart, query = hostpart.split("?", 1)
+        for kv in query.split("&"):
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                params[k] = unquote(v)
+    hostpart = hostpart.split("/")[0]
     hp = hostpart.split(":")
     if hp and hp[0]:
         server = hp[0]
         if len(hp) > 1 and hp[1].isdigit():
             port = int(hp[1])
+    params.setdefault("auth", auth)
+    params.setdefault("sni", "")
+    params.setdefault("insecure", "")
     return {"name": name or f"{server or scheme}:{port or ''}",
             "type": scheme, "server": server, "port": port,
-            "url": "", "supported": False}
+            "url": "", "supported": False, "params": params}
 def _parse_qx_line(line: str):
     """Quantumult X / Loon 风格行：`协议 = host:port, 节点名`（机场常见导出）。
     socks5/http 可直接用作代理 URL；trojan/vmess/ss 仅提取展示（需本地转换）。

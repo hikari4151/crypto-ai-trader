@@ -2288,7 +2288,7 @@
                 <span v-if="nd.reachable" class="text-green-600">可连 {{nd.delay_ms}}ms</span>
                 <span v-else-if="!nd.supported" class="text-slate-500">需客户端</span>
                 <span v-else class="text-slate-500">不可达</span>
-                <button class="mac-btn" :disabled="!nd.supported || !nd.reachable" @click="chooseProxy(nd)">选择</button>
+                <button class="mac-btn" :disabled="!((nd.supported && nd.reachable) || nd.type==='hysteria2' || nd.type==='hysteria')" @click="chooseProxy(nd)">选择</button>
               </div>
             </div>
           </div>
@@ -5593,10 +5593,14 @@ const app = createApp({
       finally { proxyScanning.value = false; }
     }
     async function chooseProxy(nd) {
-      if (!nd.url) { toast('该节点类型需本地客户端转换，暂不可直用', 'error'); return; }
-      proxyUrl.value = nd.url;
-      await saveProxy();
-      toast('已切换至节点 ' + nd.name);
+      try {
+        const r = await api('/proxy/select', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({node: nd})});
+        if (!r.ok) { toast(r.error || '选择失败', 'error'); return; }
+        proxyUrl.value = r.proxy_url || '';
+        proxyResolved.value = r.resolved_proxy || '';
+        proxyAuto.value = false;
+        toast('已切换至节点 ' + nd.name);
+      } catch(e){ toast('选择失败 ' + e, 'error'); }
     }
     function saveWsSettings() {
       localStorage.setItem('cat_ws_sym', designSymbol.value);

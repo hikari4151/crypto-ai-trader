@@ -117,3 +117,34 @@ async def scan_proxy_nodes(body: ProxyNodesIn) -> dict:
     for n in nodes:
         n["reachable"], n["delay_ms"] = probe_node(n.get("url", ""))
     return {"ok": True, "nodes": nodes, "count": len(nodes)}
+
+
+class ProxySelectIn(BaseModel):
+    node: dict = Field(default_factory=dict)
+
+
+@router.post("/select")
+async def select_proxy_node(body: ProxySelectIn) -> dict:
+    """选择节点：socks5/http 直接设为代理；hysteria2/hysteria 内置客户端本地启动。"""
+    from net.proxy_client import select_node, stop_local_proxy
+
+    node = body.node or {}
+    if not node.get("type"):
+        return {"ok": False, "error": "node 为空"}
+    scheme = str(node.get("type", "")).lower()
+    if scheme in ("hysteria2", "hysteria"):
+        stop_local_proxy()  # 切换节点前停旧客户端
+    ok, url, err = select_node(node)
+    if not ok:
+        return {"ok": False, "error": err, "node": node.get("name", "")}
+    # 设置并持久化（本地 socks5 URL / 直连 URL）
+    v_ok, v_reason = _validate_proxy_url(url)
+    if not v_ok:
+        return {"ok": False, "error": v_reason}
+    settings.proxy_url = url
+    settings.reset_proxy_cache()
+    _persist(url)
+    return {"ok": True, "proxy_url": url,
+            "resolved_proxy": settings.resolved_proxy or url,
+            "selector": "local_client" if scheme in ("hysteria2", "hysteria") else "direct",
+            "note": "仅作用于本软件出站请求"}

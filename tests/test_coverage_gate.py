@@ -71,3 +71,23 @@ def test_c1_main_fails_below_threshold(tmp_path, monkeypatch, capsys):
     jf.write_text(_module_json({"core/a.py": (90.0, 10)}), encoding="utf-8")
     assert cg.main(["--json", str(jf)]) == 1
     assert "[coverage] FAILED" in capsys.readouterr().out
+
+
+# ---- A5：net/ 代理包纳入覆盖率（曾整包漏出所有门禁）----
+def test_a5_coveragerc_includes_net():
+    cfg = (ROOT / ".coveragerc").read_text(encoding="utf-8")
+    src = cfg.split("source =", 1)[1].splitlines()[0]
+    assert "net" in [s.strip() for s in src.split(",")], "net 应纳入覆盖率 source"
+
+
+def test_a5_gate_has_net_threshold():
+    assert "net" in cg.THRESHOLDS, "net 应有模块级覆盖率下限"
+    assert 0 < cg.THRESHOLDS["net"] <= 100
+
+
+def test_a5_net_missing_from_json_is_reported(monkeypatch):
+    """net 未进 coverage.json → 门禁必须报「无数据」而非静默放过。"""
+    monkeypatch.setattr(cg, "THRESHOLDS", {"net": 70.0})
+    issues = cg.check({"core": 90.0})
+    assert any("net" in i and "无数据" in i for i in issues)
+

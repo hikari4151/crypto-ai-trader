@@ -14,7 +14,7 @@ import time
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
-import yaml  # type: ignore
+import yaml
 
 log = logging.getLogger("proxy_nodes")
 
@@ -33,7 +33,8 @@ def _parse_ss_link(line: str) -> dict:
     m = re.search(r"#([^#\s]+)$", line)
     if m:
         name = unquote(m.group(1).strip())
-    server = port = ""
+    server: str = ""
+    port: Optional[int] = None
     userinfo = raw
     if "@" in raw:
         userinfo, hostpart = raw.rsplit("@", 1)
@@ -84,7 +85,8 @@ def _maybe_base64_decode(text: str) -> Optional[str]:
 def _parse_vmess_link(line: str) -> dict:
     """vmess://base64(JSON) → 节点（需本地客户端转换，仅提取展示信息）。"""
     raw = line[len("vmess://"):].split("#")[0]
-    server = port = ""
+    server: str = ""
+    port: Optional[int] = None
     name = ""
     try:
         pad = "=" * (-len(raw) % 4)
@@ -106,7 +108,8 @@ def _parse_trojan_link(line: str) -> dict:
     m = re.search(r"#([^#\s]+)$", body)
     if m:
         name = unquote(m.group(1).strip())
-    server = port = ""
+    server: str = ""
+    port: Optional[int] = None
     m2 = re.search(r"@([^:/#]+):(\d+)", body)
     if m2:
         server, port = m2.group(1), int(m2.group(2))
@@ -118,7 +121,8 @@ def _parse_trojan_link(line: str) -> dict:
 def _parse_ssr_link(line: str) -> dict:
     """ssr://base64(host:port:...)（需本地客户端转换）。"""
     raw = line[len("ssr://"):].split("#")[0]
-    server = port = ""
+    server: str = ""
+    port: Optional[int] = None
     name = ""
     m = re.search(r"#([^#\s]+)$", line)
     if m:
@@ -154,7 +158,9 @@ def _parse_generic_link(line: str, scheme: str) -> dict:
     m = re.search(r"#([^#\s]+)$", line)
     if m:
         name = unquote(m.group(1).strip())
-    server, port, auth = "", None, ""
+    server: str = ""
+    port: Optional[int] = None
+    auth = ""
     params: dict[str, str] = {}
     if "@" in body:
         auth, hostpart = body.rsplit("@", 1)
@@ -325,9 +331,9 @@ def _parse_clash_yaml(text: str) -> list[dict]:
             continue
         typ = _norm_type(p.get("type", ""))
         server = str(p.get("server", "")).strip()
-        port = p.get("port")
+        raw_port = p.get("port")
         try:
-            port = int(port)
+            port: Optional[int] = int(raw_port) if raw_port is not None else None
         except (TypeError, ValueError):
             port = None
         name = str(p.get("name") or f"{server}:{port}").strip()

@@ -18,9 +18,11 @@ ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
 
 RUFF_DIRS = ("core/", "engine/", "ai/", "web/", "scripts/", "backtest/",
-             "strategies/", "indicators/", "config/", "drl/", "exchange/", "factors/", "tests/")
+             "strategies/", "indicators/", "config/", "drl/", "exchange/", "factors/",
+             "net/", "tests/")
 COMPILE_DIRS = ("core", "engine", "ai", "web", "scripts", "backtest",
-                "strategies", "indicators", "config", "drl", "exchange", "factors", "tests", "run.py")
+                "strategies", "indicators", "config", "drl", "exchange", "factors",
+                "net", "tests", "run.py")
 
 
 def run(cmd: list[str], label: str) -> bool:
@@ -37,10 +39,14 @@ def build_steps(skip_pytest: bool = False, skip_backtest: bool = False) -> list[
     steps: list[tuple[str, list[str]]] = [
         ("check_lock", [PY, str(ROOT / "scripts" / "check_lock.py")]),
         ("ruff", [PY, "-m", "ruff", "check", *RUFF_DIRS]),
-        ("mypy_pilot", [PY, "-m", "mypy", "backtest/schema.py", "core/events.py", "exchange/symbols.py"]),
+        # mypy 试点范围由 pyproject.toml [tool.mypy].files 声明（单一事实来源，
+        # 避免此处与 CI 各写一份文件清单发生漂移）
+        ("mypy_pilot", [PY, "-m", "mypy"]),
         ("validate_config", [PY, str(ROOT / "scripts" / "validate_config.py")]),
         ("check_doc_sync", [PY, str(ROOT / "scripts" / "check_doc_sync.py")]),
         ("check_js", [PY, str(ROOT / "scripts" / "check_js.py")]),
+        # 本地/pre-commit 用宽松模式：正在编辑 index.html 时不拦人（漂移会打印 WARN）。
+        # CI 用 `--check-only --require-manifest`（干净检出 ⇒ 等价于"清单必须描述已提交的 index.html"）
         ("build_frontend", [PY, str(ROOT / "scripts" / "build_frontend.py"), "--check-only"]),
         ("compileall", [PY, "-m", "compileall", "-q", *COMPILE_DIRS]),
     ]

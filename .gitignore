@@ -117,3 +117,13 @@ web/static/index.html.bak_*
 # 意外创建/临时脚本
 /\{fontSize
 /verify-*.mjs
+
+# 网络加速客户端二进制与临时配置（bin/ 是「一键下载 hysteria」的运行时落盘目录：
+# hysteria-windows-amd64.exe 约 23MB，另有 hy2_client_*.json。属运行态产物，永不入库；
+# 该目录此前未被忽略，`git add -A` 会静默吞下 23MB 二进制）
+/bin/
+
+# DSH harness 自检注入器在项目根误建的 junction 循环目录（路径名由 harness 拼接错误产生，
+# 内部 node_modules 是指向自身的长路径 junction；会让 git status / grep 报
+# "could not open directory ... Invalid argument"。本机工具产物，永不入库）
+/Userssbxg*self*test*/

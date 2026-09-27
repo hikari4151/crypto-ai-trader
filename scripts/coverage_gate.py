@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # 模块级最低覆盖率（%），按 fast（-m "not slow"）与 full 实测取 min 后留余量校准（C1）。
 # 实测（2026-09）：fast vs full → core79.9/80.0、engine80.1/80.1、exchange70.5/70.5、
 # backtest78.3/82.0、strategies58.1/81.2、drl62.6/73.8、ai59.3/59.0、web38.1/42.6、
-# factors60.4/60.5、config86.2/48.6、indicators92.4/92.4。
+# factors60.4/60.5、config86.2/48.6、indicators92.4/92.4、net83.0/83.0（A5）。
 THRESHOLDS: dict[str, float] = {
     "core": 75.0,
     "engine": 75.0,
@@ -31,6 +31,7 @@ THRESHOLDS: dict[str, float] = {
     "factors": 50.0,
     "indicators": 85.0,
     "config": 42.0,
+    "net": 70.0,
 }
 MODULES = tuple(THRESHOLDS)
 

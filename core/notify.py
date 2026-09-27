@@ -125,7 +125,9 @@ def _send_email_sync(cfg: dict, title: str, message: str) -> bool:
     password = cfg.get("password") or ""
     to_list = [x.strip() for x in str(cfg["to"]).replace(",", ";").split(";") if x.strip()]
     msg = MIMEText(message, "plain", "utf-8")
-    msg["Subject"] = Header(f"[Crypto AI Trader] {title}", "utf-8")
+    # str(Header(...)) 与直接赋 Header 的报文完全一致（compat32 policy 对非 ASCII
+    # 同样编码为 =?utf-8?b?...?=），显式转换是为了让类型标注成立（见 mypy 试点）。
+    msg["Subject"] = str(Header(f"[Crypto AI Trader] {title}", "utf-8"))
     msg["From"] = user
     msg["To"] = ";".join(to_list)
     if cfg.get("use_ssl", True) or port == 465:

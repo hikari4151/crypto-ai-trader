@@ -27,6 +27,30 @@ def test_ruff_and_compile_include_exchange_factors_tests():
     assert "exchange" in compile_cmd and "factors" in compile_cmd and "tests" in compile_cmd
 
 
+def test_ruff_and_compile_include_net():
+    """A5：net/ 代理包曾被 ruff/compileall/覆盖率三处同时漏掉，必须有回归。"""
+    steps = va.build_steps(skip_pytest=True, skip_backtest=True)
+    assert "net/" in dict(steps)["ruff"]
+    assert "net" in dict(steps)["compileall"]
+
+
+def test_mypy_range_comes_from_pyproject():
+    """C2：mypy 试点范围只在 pyproject.toml 声明，命令不得再写死文件清单。"""
+    steps = va.build_steps(skip_pytest=True, skip_backtest=True)
+    mypy_cmd = dict(steps)["mypy_pilot"]
+    assert mypy_cmd[-1] == "mypy", f"mypy 步骤不应传文件参数: {mypy_cmd}"
+
+
+def test_build_frontend_check_only_locally():
+    """本地链用宽松 check-only（正在编辑 index.html 时不拦人）；CI 才加 --require-manifest。"""
+    steps = va.build_steps(skip_pytest=True, skip_backtest=True)
+    fe = dict(steps)["build_frontend"]
+    assert "--check-only" in fe
+    assert "--require-manifest" not in fe, "本地链不应要求清单已同步（编辑中会误拦）"
+    ci = (va.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "--check-only --require-manifest" in ci, "CI 必须校验清单漂移"
+
+
 def test_main_returns_zero_when_all_steps_pass(monkeypatch, capsys):
     calls: list[list[str]] = []
 
@@ -41,7 +65,7 @@ def test_main_returns_zero_when_all_steps_pass(monkeypatch, capsys):
     assert "[verify] ALL PASS" in out
     assert len(calls) == 8
     assert calls[1][0] == va.PY  # ruff 第一步首元素是 python
-    assert "mypy" in calls[2] and "backtest/schema.py" in calls[2]
+    assert calls[2][-1] == "mypy"
     assert any("check_doc_sync.py" in c for c in calls[4])
 
 

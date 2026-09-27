@@ -65,10 +65,10 @@ jobs:
         run: python scripts/compile_lock.py --check-platform
 
       - name: 1) ruff 门禁（E9+F+W+E4+E7）
-        run: python -m ruff check core/ engine/ ai/ web/ scripts/ backtest/ strategies/ indicators/ config/ drl/ exchange/ factors/ tests/
+        run: python -m ruff check core/ engine/ ai/ web/ scripts/ backtest/ strategies/ indicators/ config/ drl/ exchange/ factors/ net/ tests/
 
-      - name: 1a) mypy 试点（schema/events/symbols）
-        run: python -m mypy backtest/schema.py core/events.py exchange/symbols.py
+      - name: 1a) mypy 试点（范围见 pyproject.toml [tool.mypy].files）
+        run: python -m mypy
 
       - name: 1b) 配置 schema 校验（config.yaml 快速失败门禁）
         run: python scripts/validate_config.py
@@ -79,11 +79,11 @@ jobs:
       - name: 2) JS 语法检查
         run: python scripts/check_js.py
 
-      - name: 3) 前端构建链（只读校验）
-        run: python scripts/build_frontend.py --check-only
+      - name: 3) 前端构建链（只读校验 + 清单漂移门禁）
+        run: python scripts/build_frontend.py --check-only --require-manifest
 
       - name: 4) 全包字节码编译
-        run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl exchange factors tests run.py
+        run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl exchange factors net tests run.py
 
       - name: 5) 快路径 pytest + 覆盖率门禁（≥60）
         run: python -m pytest -q -m "not slow" --cov --cov-fail-under=60 --cov-report=html --junitxml=reports/junit.xml
@@ -127,10 +127,10 @@ jobs:
         run: python scripts/compile_lock.py --check-platform
 
       - name: 1) ruff 门禁（E9+F+W+E4+E7）
-        run: python -m ruff check core/ engine/ ai/ web/ scripts/ backtest/ strategies/ indicators/ config/ drl/ exchange/ factors/ tests/
+        run: python -m ruff check core/ engine/ ai/ web/ scripts/ backtest/ strategies/ indicators/ config/ drl/ exchange/ factors/ net/ tests/
 
-      - name: 1a) mypy 试点（schema/events/symbols）
-        run: python -m mypy backtest/schema.py core/events.py exchange/symbols.py
+      - name: 1a) mypy 试点（范围见 pyproject.toml [tool.mypy].files）
+        run: python -m mypy
 
       - name: 1b) 配置 schema 校验
         run: python scripts/validate_config.py
@@ -145,7 +145,7 @@ jobs:
         run: python scripts/build_frontend.py --check-only
 
       - name: 4) 全包字节码编译
-        run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl exchange factors tests run.py
+        run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl exchange factors net tests run.py
 
       - name: 5) 全量 pytest + 覆盖率门禁（≥65）
         run: python -m pytest -q --cov --cov-fail-under=65 --cov-report=html --junitxml=reports/junit.xml

@@ -16,6 +16,8 @@
 用法：
   python scripts/build_frontend.py            # 校验 + 写清单；失败退出码 1
   python scripts/build_frontend.py --check-only  # 只校验，不写清单
+  python scripts/build_frontend.py --check-only --require-manifest
+                                                 # 只校验，并要求入库清单与源文件一致
 """
 import argparse
 import hashlib
@@ -24,6 +26,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 INDEX = ROOT / "web" / "static" / "index.html"
@@ -77,17 +80,42 @@ def check_static_refs(text: str) -> list[str]:
     return warnings
 
 
+def normalized_bytes() -> bytes:
+    """index.html 的 LF 归一化字节（跨平台稳定基底）。
+
+    本仓库 core.autocrlf=true 且无 .gitattributes：git blob 是 LF，Windows 工作区检出为
+    CRLF（实测同一文件 601424B vs 614685B）。清单一旦按"工作区原始字节"计算，
+    Ubuntu CI 与 Windows 会得出不同的 sha256 —— 而该 sha256 正是 web/api/ops.py
+    暴露给运维的"前端部署版本"、也是缓存 hash，必须跨平台一致。
+    因此统一以 LF 归一化字节作为 sha256 与 size_bytes 的共同基底
+    （与原实现 `read_text()`（universal newlines）+ 编码 的语义一致，只是让两个字段同源）。
+    """
+    raw = INDEX.read_bytes()
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _rel(path: Path) -> str:
+    """项目内相对路径；不在项目内（测试/自定义路径）时退回原路径字符串。"""
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def build_manifest() -> dict:
     text = INDEX.read_text(encoding="utf-8")
+    # sha256 与 size_bytes 必须同基底：原实现 sha256 用 read_text 归一化文本、
+    # size_bytes 用 stat() 原始字节，两者在 CRLF 工作区互不相符（清单不能作凭据）。
+    norm = normalized_bytes()
     js_errors = _check_js(text)
     css_errors = check_css_blocks(text)
     ref_warnings = check_static_refs(text)
     scripts = sum(1 for _ in SCRIPT_RE.finditer(text))
     style_blocks = sum(1 for _ in STYLE_RE.finditer(text))
     manifest = {
-        "file": str(INDEX.relative_to(ROOT)),
-        "size_bytes": INDEX.stat().st_size,
-        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "file": _rel(INDEX),
+        "size_bytes": len(norm),
+        "sha256": hashlib.sha256(norm).hexdigest(),
         "mtime_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(INDEX.stat().st_mtime)),
         "scripts": scripts,
         "style_blocks": style_blocks,
@@ -103,15 +131,38 @@ def build_manifest() -> dict:
     return manifest
 
 
+def manifest_drift(manifest: dict) -> Optional[str]:
+    """已提交清单与当前 index.html 的漂移说明（无漂移/清单缺失返回 None）。
+
+    背景：build_manifest.json 是入库的生成物，被 web/api/ops.py 当作「前端部署版本」
+    暴露给运维（sha256 前 8 位）。index.html 改了而清单没重生成，运维就会看到一个
+    永不变化、指向旧构建的版本号——属于「显示正常但信息是假的」，必须显式拦住。
+    只比较 size_bytes/sha256（mtime/built_at 天然随生成时刻变化，不参与判定）。
+    """
+    if not MANIFEST.exists():
+        return None  # 未生成过：由调用方决定是否要求生成（check-only 不强制）
+    try:
+        old = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return f"{MANIFEST.name} 不是合法 JSON（重新生成: python scripts/build_frontend.py）"
+    if old.get("sha256") == manifest["sha256"] and old.get("size_bytes") == manifest["size_bytes"]:
+        return None
+    return (f"{MANIFEST.name} 已过期：清单 sha256={str(old.get('sha256'))[:12]}… "
+            f"size={old.get('size_bytes')}，当前 index.html(LF) sha256={manifest['sha256'][:12]}… "
+            f"size={manifest['size_bytes']}（重新生成: python scripts/build_frontend.py）")
+
+
 def _check_js(text: str) -> list[str]:
     from check_js import check_file
     return check_file(INDEX)
 
 
-def main() -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check-only", action="store_true", help="只校验，不写清单")
-    args = ap.parse_args()
+    ap.add_argument("--require-manifest", action="store_true",
+                    help="check-only 下也要求已提交清单与 index.html 一致（CI/门禁用）")
+    args = ap.parse_args(argv)
 
     if not INDEX.exists():
         print(f"[build] 找不到 {INDEX}")
@@ -127,9 +178,27 @@ def main() -> int:
         print(f"  [FAIL] {e}")
     for w in manifest["warnings"]:
         print(f"  [WARN] {w}")
-    if not args.check_only and ok:
-        MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
-        print(f"[build] 清单已写入 {MANIFEST.relative_to(ROOT)}")
+    # 写模式：漂移是预期中间态（本次就会重写清单），不提示；
+    # check-only：源文件改了而入库清单没跟上 —— 默认 WARN（本地并行编辑 index.html 时不拦人），
+    # --require-manifest 时 FAIL（CI 判定"已提交状态是否自洽"）。
+    drift = manifest_drift(manifest)
+    if not args.check_only:
+        if ok:
+            MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n",
+                                encoding="utf-8")
+            # relative_to 在 MANIFEST 被指向项目外时抛 ValueError（测试/自定义路径场景），
+            # 打印路径不构成失败理由，降级为绝对路径
+            try:
+                shown = MANIFEST.relative_to(ROOT)
+            except ValueError:
+                shown = MANIFEST
+            print(f"[build] 清单已写入 {shown}")
+        return 0 if ok else 1
+    if drift:
+        tag = "FAIL" if args.require_manifest else "WARN"
+        print(f"  [{tag}] {drift}")
+    if drift and args.require_manifest:
+        return 1
     return 0 if ok else 1
 
 

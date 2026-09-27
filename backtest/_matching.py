@@ -354,8 +354,11 @@ def run_matching_loop(
 def forced_liquidation(*, data: pd.DataFrame, cfg, closes: np.ndarray,
                        cash: float, position: float, lots: list[tuple[float, float, int]],
                        trades: list[dict], equity_curve: list[float],
-                       stats: Optional[dict] = None) -> None:
-    """期末强制平仓（FIFO 成本摊销）。修改 cash/position/trades/equity_curve 就地。"""
+                       stats: Optional[dict] = None) -> float:
+    """期末强制平仓（FIFO 成本摊销）。修改 cash/position/trades/equity_curve 就地。
+
+    返回平仓后的 cash（调用方原本忽略返回值、依赖就地修改；返回值保留供单测/新调用方使用）。
+    """
     if position > 0 and lots:
         fill_price = float(closes[-1]) * (1 - _safe_slip(cfg))
         qty = position

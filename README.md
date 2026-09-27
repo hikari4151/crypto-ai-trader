@@ -134,7 +134,7 @@ pytest
 提交前建议跑完整验证链（见 `docs/REDEV_GUIDE.md` §4——再开发必读：当前基线、模块地图与禁止回退清单）：
 
 ```bat
-.venv\Scripts\python -m compileall -q ai backtest core drl engine exchange factors indicators strategies web config scripts run.py
+.venv\Scripts\python -m compileall -q ai backtest core drl engine exchange factors indicators net strategies web config scripts run.py
 .venv\Scripts\python -m pytest -q
 .venv\Scripts\python scripts\check_js.py                      :: 前端内联 JS 语法（esprima，无需 node）
 .venv\Scripts\python run.py backtest --source demo --strategy dual_ma   :: 双引擎一致性基线与基线对比
@@ -163,16 +163,22 @@ python scripts/compile_lock.py --freeze             # 从当前 .venv 重新生�
 python scripts/compile_lock.py --compile            # 有 uv/pip-compile 时从 .in 生成 Linux 锁
 ```
 
-类型检查试点（P1-C2，`pyproject.toml`）：
+类型检查试点（P1-C2，`pyproject.toml` 的 `[tool.mypy].files` 是唯一范围声明）：
 
 ```bash
-.venv\Scripts\python -m mypy backtest/schema.py core/events.py exchange/symbols.py
+.venv\Scripts\python -m mypy          # 撮合内核 + core/ + engine/risk.py + net/ 等，当前 0 错误
 ```
 
-文档-门禁同步（P1-C5）：核对 `docs/REDEV_GUIDE.md` §4 与 `ci.yml` 的目录清单不漂移：
+文档-门禁同步（P1-C5 / A5）：核对 `REDEV_GUIDE.md` §4 与 `ci.yml`、`verify_all.py`、`.coveragerc`、`coverage_gate.py` 的目录清单不漂移；**新增顶层包漏登记门禁会直接报错**：
 
 ```bash
 .venv\Scripts\python scripts\check_doc_sync.py
+```
+
+前端清单一致性（G3）：`build_manifest.json` 的 sha256 按原始字节计算，且不得与 `index.html` 脱节（该值即运维页展示的"前端版本"）：
+
+```bash
+.venv\Scripts\python scripts\build_frontend.py --check-only --require-manifest
 ```
 
 模块级覆盖率门禁（P1-C1）：在 `pytest --cov` 后生成 coverage.json 并校验每个核心模块下限：

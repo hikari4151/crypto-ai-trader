@@ -1,14 +1,20 @@
 # 项目级工具配置（C2 类型检查试点；无 [build-system]，不影响 pip 安装行为）。
-# mypy 试点范围：纯函数/数据模块，先跑通再逐步扩大。
+# mypy 试点范围（2026-09-27 扩容：3 → 4 文件 + core/ 与 net/ 两个整包）：
+#   backtest/_matching.py（撮合单一事实来源）、backtest/schema.py、
+#   core/（整包：事件/加密/DB/日志/通知）、engine/risk.py（资金安全核心）、
+#   exchange/symbols.py、net/（整包：代理节点解析与客户端）
+# 注意：不要同时列 core/ 和 core/events.py（mypy 会报 Duplicate module）。
 # 运行：
 #   .venv\Scripts\python -m mypy          # 使用下方 files 列表
-#   .venv\Scripts\python -m mypy backtest/schema.py core/events.py exchange/symbols.py
 [tool.mypy]
 python_version = "3.13"
 files = [
+    "backtest/_matching.py",
     "backtest/schema.py",
-    "core/events.py",
+    "core/",
+    "engine/risk.py",
     "exchange/symbols.py",
+    "net/",
 ]
 # 试点阶段不深入检查第三方依赖与未纳入范围的模块：
 follow_imports = "skip"

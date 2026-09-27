@@ -12,7 +12,7 @@ import bisect
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 from core.database import Database
@@ -68,11 +68,13 @@ _RULE_BOUNDS = {
 @dataclass
 class RiskManager:
     db: Database
-    _recent_pnls: list[dict] = None  # 最近平仓盈亏记录 [{ts, pnl, reason}]
+    # default_factory 而非 None 默认：声明即 list，mypy 试点可覆盖本文件，
+    # __post_init__ 仍保留 None 兜底（外部显式传 None 时不炸）
+    _recent_pnls: list[dict] = field(default_factory=list)  # 最近平仓盈亏记录 [{ts, pnl, reason}]
     _cooldown_until: float = 0.0     # 冷却截止时间戳
     # 闪崩保护状态
     _flash_cooldown_until: float = 0.0
-    _price_history: list = None  # list of (timestamp, price); 保留 48h，有序升序，bisect 定位窗口
+    _price_history: list[tuple[float, float]] = field(default_factory=list)  # 保留 48h，有序升序，bisect 定位窗口
     # 每日盈亏持久化
     _daily_pnl: float = 0.0
     _daily_pnl_date: str = ""
@@ -87,6 +89,7 @@ class RiskManager:
     _state_restored: bool = False
 
     def __post_init__(self) -> None:
+        # 声明默认已是 []；仅兜底外部显式传 None 的调用
         if self._recent_pnls is None:
             self._recent_pnls = []
         if self._price_history is None:
@@ -271,7 +274,9 @@ class RiskManager:
                 log.warning("[risk] 忽略非有限规则值 %s=%r", k, rules[k])
                 continue
             lo, hi = _RULE_BOUNDS.get(k, (None, None))
-            if lo is not None:
+            # _RULE_BOUNDS 的每项都是 (下限, 上限) 成对常量，lo 非空即 hi 非空；
+            # 显式判 hi 是为了让类型收窄成立（原写法 max(lo, min(None, v)) 类型不通过）
+            if lo is not None and hi is not None:
                 v = max(lo, min(hi, v))
             merged[k] = v
         await self.db.kv_json_set("risk_rules", merged)

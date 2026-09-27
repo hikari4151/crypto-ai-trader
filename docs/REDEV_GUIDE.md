@@ -12,7 +12,7 @@
 | 项 | 值 |
 |---|---|
 | 技术栈 | Python 3.13（.venv）+ FastAPI + ccxt/ccxt.pro + SQLite(WAL) + 事件总线 |
-| 平台 | Windows（中文 locale=GBK），前端为单体 `web/static/index.html`（Vue3 CDN 版本地化，5674 行） |
+| 平台 | Windows（中文 locale=GBK），前端为单体 `web/static/index.html`（Vue3 CDN 版本地化，约 7900 行） |
 | 入口 | `python run.py web`（子命令：web / backtest / cost-scan / portfolio / backfill） |
 | 认证 | 所有 `/api/*`（除 `/api/health`）要求 `X-API-Token` 头；令牌经 Cookie `zx_api_token` 下发；**无 CORS 中间件、默认绑 127.0.0.1** |
 | 数据库 | 主库 `data/trader.db`（aiosqlite）；K 线库 `data/klines.db`（独立 SQLite，复合主键 WITHOUT ROWID） |
@@ -24,7 +24,7 @@
 
 | 验证项 | 命令 | 当前锚定值 |
 |---|---|---|
-| 编译检查 | `.venv\Scripts\python -m compileall -q ai backtest core drl engine exchange factors indicators strategies web config scripts run.py` | ✅ |
+| 编译检查 | `.venv\Scripts\python -m compileall -q ai backtest core drl engine exchange factors indicators net strategies web config scripts run.py` | ✅ |
 | 测试 | `.venv\Scripts\python -m pytest -q` | ✅ **579 passed**（2026-09-05：回退基线全链路任务后 579 passed / 2 skipped，数量以"全绿"为准） |
 | 前端 JS 语法 | `.venv\Scripts\python scripts\check_js.py` | ✅（esprima，本机无 node） |
 | 双引擎一致性 | `.venv\Scripts\python run.py backtest --source demo --strategy dual_ma` | **ret=-0.206239 / trades=37 / final_equity=7937.6077** |
@@ -63,6 +63,7 @@
 | `drl/` | `agent.py`（PPO：熵正则符号/GAE 分段）、`env.py`、`factor_env.py`（无前视 z-score + fitness 缓存）、`factor_miner.py`、`model_zoo.py`（版本化模型仓库，≤10 版，flat 兼容）、`evolve_engine.py`（三条训练管线：factor_miner/strategy_drl/meta_controller + 回退/OOS 门/跨标门/增量门）、`pine_export.py`（Actor→Pine v5） |
 | `backtest/` | `_matching.py` **撮合单一事实来源**、`engine.py` 事件驱动、`fast_engine.py` 向量化、`metrics.py`（含 benchmark 键）、`overfit.py`（walk-forward + CSCV PBO）、`cost_scan.py`、`portfolio.py`（组合回测，研究层）、`binance_history.py`（data.binance.vision 月度 zip）、`kline_store.py`（K 线本地库） |
 | `engine/` | `trading_engine.py`（调度中枢，三把锁）、`risk.py`（检查带顶层兜底 + cooldown/人工解除）、`order_manager.py`（限价单生命周期/对账）、`portfolio.py`、`protective_stop.py`（服务端兜底止损） |
+| `net/` | `proxy_client.py`（代理探测/网络加速客户端：hysteria 检测与下载、本地 SOCKS5 启动、节点选择）、`proxy_nodes.py`（订阅解析：Clash YAML/ss/vmess/trojan/ssr/hysteria2/tuic/wireguard + Quantumult X/Loon + base64 自动解码、节点可达性探测）。**无 `__init__.py`**（与 `config/` 同为隐式命名空间包） |
 | `web/api/` | 15 个路由：ai / backtest / data（K 线库+下载）/ drl / **evolve** / exchanges / factors / live / market / notify / performance / portfolio / risk / strategy_repo / trading + `tasks_cache.py`（进度缓存 TTL 清理） |
 | `web/static/` | `index.html` 单体 + `vendor/`（vue.global.prod.js / tailwind.js / echarts.min.js，带 SRI）。**无拆分 js/css** |
 
@@ -159,13 +160,31 @@
 | F7 | 任务进度缓存无限增长 | `tasks_cache.py` TTL 清理（ai/backtest/drl 三处接入） | 内存缓慢泄漏 | 长跑内存 |
 | F8 | `pytest-asyncio` 缺失 | `.venv` 必须装 pytest-asyncio（pytest.ini `asyncio_mode=auto`） | 缺了 C/D 类异步测试全挂；重新装环境易漏 | pytest 全绿 |
 
+### G. 门禁与被测范围（A5，2026-09-27 建立）
+
+| # | 禁止回退到 | 现状（必须保持） | 为什么 | 怎么验 |
+|---|---|---|---|---|
+| G1 | 新增顶层包不进任何门禁 | 新包必须在 `scripts/check_doc_sync.py` 的 `CORE_DIRS` 登记，并同步 `ci.yml`（ruff+compileall）、`verify_all.py`（RUFF_DIRS/COMPILE_DIRS）、`.coveragerc`（source）、`coverage_gate.py`（THRESHOLDS） | `net/` 曾经整包（397 语句）漏出全部五处：门禁全绿但该包**从未被 lint/编译/覆盖**。"绿"不等于"查过" | `python scripts/check_doc_sync.py`（含"工作区新增顶层包未登记"自检） |
+| G2 | 门禁清单在多处各写一份 | 目录清单只在 `check_doc_sync.CORE_DIRS` 声明；mypy 范围只在 `pyproject.toml [tool.mypy].files` 声明 | 同一清单写 3 份（pyproject/verify_all/ci.yml），扩容必漂移（历史上发生过） | `tests/test_mypy_pilot.py`、`tests/test_doc_sync.py::test_check_ok_when_all_consistent` |
+| G3 | 入库生成物与源文件不一致 | `web/static/build_manifest.json` 的 `sha256`/`size_bytes` 必须**同按 LF 归一化字节**计算，且与当前 `index.html` 一致（CI 门禁 `--check-only --require-manifest`） | ① 原实现 sha256 用 `read_text`（LF）、size_bytes 用 `stat()`（工作区字节，本仓库 CRLF），两字段不同基底；② **不可**改成"统一用工作区原始字节"——`core.autocrlf=true` 且无 `.gitattributes` 会让该 sha256 变成平台相关，跨平台 CI 必挂；③ 该 sha256 前 8 位是 `web/api/ops.py` 暴露给运维的"部署版本"，清单过期=运维看到假版本号 | `tests/test_build_frontend.py`（含 CRLF/LF 同值用例）；`python scripts/build_frontend.py --check-only --require-manifest` |
+| G4 | 只靠本地 pre-commit 兜质量 | CI 是唯一不可绕过的防线；`.git/hooks/` 不入库，`--no-verify` 可绕过 | 2026-09-27 修的两处 ruff 红灯（F401/W292）正是已入库状态——本地钩子当时没拦住 | CI 全绿；`git log` 无带红灯的提交 |
+| G5 | 测试改写受版本控制的产物 | 测试不得以写模式改动入库文件（如 `build_manifest.json`）；必须写完还原，或把输出指到 tmp | 曾有测试直接写模式跑 `build_frontend.py`，把入库清单改成"与未提交的 index.html 一致"，等于**本地自动掩盖清单漂移**——CI 才炸 | `grep build_frontend tests/`；跑完 `git status` 看入库产物是否被动过 |
+
 ## 4. 验证链（提交前必跑，顺序执行）
+
+**推荐入口（一条命令覆盖下面全部 + 更多门禁）**：
+
+```bat
+.venv\Scripts\python scripts\verify_all.py                       :: 完整链（门禁 + pytest + 覆盖率 + 基线回测）
+.venv\Scripts\python scripts\verify_all.py --skip-pytest --skip-backtest   :: 快速门禁（提交前/pre-commit 用）
+```
+
+下面保留手工分步版本（排查单点失败时用）：
 
 ```bat
 :: 1. 编译
-.venv\Scripts\python -m compileall -q ai backtest core drl engine exchange factors indicators strategies web config scripts run.py
-:: 2. 测试（当前 434 例）
-.venv\Scripts\python -m pytest -q
+.venv\Scripts\python -m compileall -q ai backtest core drl engine exchange factors indicators net strategies web config scripts run.py
+:: 2. 测试（当前 434 例）.venv\Scripts\python -m pytest -q
 :: 3. 前端 JS 语法（esprima，无需 node）
 .venv\Scripts\python scripts\check_js.py
 :: 4. 双引擎一致性（凡触碰回测/指标/撮合/策略语义，必跑并与 §1 基线对比）
@@ -174,6 +193,10 @@
 ::    GET /api/health → 200 且含 degraded/bus 键
 ::    无令牌 GET /api/portfolio/summary → 401；带令牌 → 200
 ```
+
+> 上面只是目录清单的"存档视图"；真正的门禁断言在 `scripts/check_doc_sync.py`
+> （核对本节的目录集合 / `ci.yml` / `scripts/verify_all.py` / `.coveragerc` /
+> `coverage_gate.py` 五处一致，并把"工作区新增顶层包未登记"直接判为漂移）。
 
 **全绿才允许 commit。** 双引擎基线漂移 = 必须解释（有意变更 → 更新 §1 表；否则 → 修复）。
 
@@ -196,6 +219,8 @@
 | 断网/局域网打开全白屏 | E2 vendor 被改回 CDN | `web/static/vendor/` 三文件 + SRI |
 | DRL 训练 entropy 一路下降、策略很快收敛到单边 | D1 熵正则符号被反 | `drl/agent.py` 熵项符号 |
 | 进化引擎产出策略明显过拟合 | D5 OOS/安检门被绕过 | 训练日志 OOS 段 |
+| 新加的包/目录"在跑"但从没被 lint/编译/覆盖率检查过 | G1 门禁契约未登记新包 | `python scripts/check_doc_sync.py`（会直接点出未登记包） |
+| 运维页"前端版本"长期不变，与实际页面不符 | G3 入库清单过期 | `python scripts/build_frontend.py --check-only --require-manifest`（改了 index.html 后跑一次 `python scripts/build_frontend.py` 即可） |
 
 ## 6. 再开发工作流
 

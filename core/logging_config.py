@@ -116,7 +116,9 @@ def setup_logging(level: str = "INFO", log_dir: str = "./data/logs") -> None:
     trading_handler.setFormatter(fmt)
     trading_handler.addFilter(TradingEventFilter())
     for h in (handler, console, trading_handler):
-        h._trader_handler = True
+        # 幂等标记：上面按 getattr(h, "_trader_handler") 识别本模块安装的 handler，
+        # 动态属性用 setattr 赋值（三者的具体类型不同，直接属性赋值 mypy 过不了 union）。
+        setattr(h, "_trader_handler", True)  # noqa: B010
         h.addFilter(RedactFilter())
         root.addHandler(h)
     root.propagate = False

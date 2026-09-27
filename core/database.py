@@ -170,7 +170,10 @@ class Database:
         """
         if not self._is_cross_loop():
             return await coro_factory()
-        fut = asyncio.run_coroutine_threadsafe(coro_factory(), self._main_loop)
+        loop = self._main_loop
+        if loop is None:  # 与 _is_cross_loop() 的判据一致：None 时不会走到这里
+            return await coro_factory()
+        fut = asyncio.run_coroutine_threadsafe(coro_factory(), loop)
         # 取走迟到协程的最终异常（超时后无人 result()，否则噪音日志）；
         # 主循环关闭导致 future 取消时 f.exception() 会抛 CancelledError，需吞掉
         def _drain_cancelled(f) -> None:

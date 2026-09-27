@@ -145,6 +145,14 @@ def check() -> list[str]:
     miss = COVERED_DIRS - _coverage_gate_modules()
     if miss:
         issues.append(f"coverage_gate.py 模块级门槛缺模块: {sorted(miss)}")
+
+    # F1/F2 编码门禁（check_encoding.py）必须同时在 ci.yml 与 verify_all.py 注册，
+    # 否则会像 net/ 一样"脚本写了但没接进任何验证链"（A5 教训的延伸）。
+    if "check_encoding.py" not in ci:
+        issues.append("ci.yml 未注册 check_encoding.py（F1/F2 编码红线门禁）")
+    va_src = VERIFY_ALL.read_text(encoding="utf-8")
+    if "check_encoding.py" not in va_src:
+        issues.append("verify_all.py 未注册 check_encoding.py（F1/F2 编码红线门禁）")
     return issues
 
 

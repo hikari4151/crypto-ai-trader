@@ -1,11 +1,20 @@
-"""P1-B2：安装/卸载本地 git pre-commit hook（免框架、Python-only）。
+"""P1-B2：安装/卸载/检查本地 git pre-commit hook（免框架、Python-only）。
 
 hook 内容：调用 scripts/verify_all.py --skip-pytest --skip-backtest
 （check_lock / ruff / validate_config / check_js / build_frontend / compileall，
 秒级~十几秒，适合拦截提交前的低级错误；全量 pytest 与基线回测留给 CI/手动）。
 
+背景（2026-09-27）：`.git/hooks/` 不入库，新克隆仓库没有钩子；`--no-verify`
+可绕过。曾出现已入库的 ruff 红灯——本地钩子没拦住。因此：
+- `--check` 校验钩子是否安装、且内容与当前 hook_script() 一致（钩子本身也会过期：
+  verify_all 步骤变了而旧钩子没更新，照样漏拦）。
+- `--force` 覆盖安装（内容变更后钩子需要重装）。
+- CI 里不装钩子（无意义），但 check_doc_sync 契约保证 `--check` 模式的入口存在。
+
 用法：
-  python scripts/install_git_hooks.py            # 安装
+  python scripts/install_git_hooks.py            # 安装（已存在则不覆盖）
+  python scripts/install_git_hooks.py --force   # 安装并覆盖旧钩子
+  python scripts/install_git_hooks.py --check   # 校验（exit 0=已装且最新，1=缺/过期）
   python scripts/install_git_hooks.py --uninstall  # 卸载
 """
 import argparse
@@ -31,12 +40,12 @@ def hook_script() -> str:
     )
 
 
-def install_hook(git_dir: Path) -> bool:
-    """写入 .git/hooks/pre-commit；返回 True 表示新安装，False 表示已存在未覆盖。"""
+def install_hook(git_dir: Path, force: bool = False) -> bool:
+    """写入 .git/hooks/pre-commit；返回 True 表示（重新）写入。"""
     hooks = git_dir / "hooks"
     hooks.mkdir(parents=True, exist_ok=True)
     target = hooks / HOOK_NAME
-    if target.exists():
+    if target.exists() and not force:
         return False
     target.write_text(hook_script(), encoding="utf-8")
     try:
@@ -44,6 +53,18 @@ def install_hook(git_dir: Path) -> bool:
     except OSError:
         pass
     return True
+
+
+def check_hook(git_dir: Path) -> tuple[bool, bool]:
+    """返回 (是否存在, 内容是否与当前 hook_script 一致)。"""
+    target = git_dir / "hooks" / HOOK_NAME
+    if not target.exists():
+        return False, False
+    try:
+        cur = target.read_text(encoding="utf-8")
+    except OSError:
+        return True, False
+    return True, cur == hook_script()
 
 
 def uninstall_hook(git_dir: Path) -> bool:
@@ -55,8 +76,10 @@ def uninstall_hook(git_dir: Path) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="安装/卸载本地 git pre-commit hook")
+    ap = argparse.ArgumentParser(description="安装/卸载/检查本地 git pre-commit hook")
     ap.add_argument("--uninstall", action="store_true", help="卸载 hook")
+    ap.add_argument("--force", action="store_true", help="覆盖安装（内容变更后重装用）")
+    ap.add_argument("--check", action="store_true", help="校验：已安装且与当前内容一致")
     args = ap.parse_args(argv)
 
     git_dir = ROOT / ".git"
@@ -67,9 +90,21 @@ def main(argv: list[str] | None = None) -> int:
         removed = uninstall_hook(git_dir)
         print("[hooks] pre-commit hook 已卸载" if removed else "[hooks] 没有可卸载的 pre-commit hook")
         return 0
-    installed = install_hook(git_dir)
+    if args.check:
+        exists, up_to_date = check_hook(git_dir)
+        if not exists:
+            print("[hooks] 未安装 pre-commit hook（运行 install_git_hooks.py 安装；"
+                  "新克隆仓库默认无钩子）")
+            return 1
+        if not up_to_date:
+            print("[hooks] pre-commit hook 内容过期（verify_all 已变化；运行 "
+                  "install_git_hooks.py --force 重装）")
+            return 1
+        print("[hooks] pre-commit hook 已安装且内容最新")
+        return 0
+    installed = install_hook(git_dir, force=args.force)
     print("[hooks] pre-commit hook 已安装（verify_all fast 门禁）" if installed
-          else "[hooks] pre-commit hook 已存在（未覆盖，如需重装请先 --uninstall）")
+          else "[hooks] pre-commit hook 已存在（未覆盖；内容变化后用 --force 重装）")
     return 0
 
 

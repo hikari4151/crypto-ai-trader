@@ -8,7 +8,8 @@ def test_build_steps_fast_has_core_gates():
     steps = va.build_steps(skip_pytest=True, skip_backtest=True)
     labels = [label for label, _ in steps]
     assert labels == ["check_lock", "ruff", "mypy_pilot", "validate_config",
-                      "check_doc_sync", "check_js", "build_frontend", "compileall"]
+                      "check_doc_sync", "check_js", "check_encoding",
+                      "build_frontend", "compileall"]
 
 
 def test_build_steps_full_has_pytest_and_backtest():
@@ -17,6 +18,13 @@ def test_build_steps_full_has_pytest_and_backtest():
     assert "pytest_cov" in labels
     assert "coverage_json" in labels and "coverage_gate" in labels
     assert "backtest_baseline" in labels
+
+
+def test_encoding_gate_registered():
+    """F1/F2 编码红线门禁必须注册在 fast 链里（否则又是"脚本写了没接链"）。"""
+    steps = va.build_steps(skip_pytest=True, skip_backtest=True)
+    enc = dict(steps)["check_encoding"]
+    assert any("check_encoding.py" in c for c in enc)
 
 
 def test_ruff_and_compile_include_exchange_factors_tests():
@@ -63,10 +71,11 @@ def test_main_returns_zero_when_all_steps_pass(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "[verify] ALL PASS" in out
-    assert len(calls) == 8
+    assert len(calls) == 9  # 8 步 + check_encoding
     assert calls[1][0] == va.PY  # ruff 第一步首元素是 python
     assert calls[2][-1] == "mypy"
     assert any("check_doc_sync.py" in c for c in calls[4])
+    assert any("check_encoding.py" in c for c in calls[6])
 
 
 def test_main_returns_one_when_step_fails(monkeypatch, capsys):

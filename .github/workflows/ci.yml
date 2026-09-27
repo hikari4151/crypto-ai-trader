@@ -79,6 +79,9 @@ jobs:
       - name: 2) JS 语法检查
         run: python scripts/check_js.py
 
+      - name: 2a) 编码红线门禁（F1/F2：UTF-8 无 BOM / .bat 纯 ASCII）
+        run: python scripts/check_encoding.py
+
       - name: 3) 前端构建链（只读校验 + 清单漂移门禁）
         run: python scripts/build_frontend.py --check-only --require-manifest
 
@@ -140,6 +143,9 @@ jobs:
 
       - name: 2) JS 语法检查
         run: python scripts/check_js.py
+
+      - name: 2a) 编码红线门禁（F1/F2：UTF-8 无 BOM / .bat 纯 ASCII）
+        run: python scripts/check_encoding.py
 
       - name: 3) 前端构建链
         run: python scripts/build_frontend.py --check-only

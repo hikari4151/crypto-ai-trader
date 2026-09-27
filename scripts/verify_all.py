@@ -45,6 +45,8 @@ def build_steps(skip_pytest: bool = False, skip_backtest: bool = False) -> list[
         ("validate_config", [PY, str(ROOT / "scripts" / "validate_config.py")]),
         ("check_doc_sync", [PY, str(ROOT / "scripts" / "check_doc_sync.py")]),
         ("check_js", [PY, str(ROOT / "scripts" / "check_js.py")]),
+        # F1/F2 编码红线：入库文本文件 UTF-8 无 BOM、.bat 纯 ASCII
+        ("check_encoding", [PY, str(ROOT / "scripts" / "check_encoding.py")]),
         # 本地/pre-commit 用宽松模式：正在编辑 index.html 时不拦人（漂移会打印 WARN）。
         # CI 用 `--check-only --require-manifest`（干净检出 ⇒ 等价于"清单必须描述已提交的 index.html"）
         ("build_frontend", [PY, str(ROOT / "scripts" / "build_frontend.py"), "--check-only"]),

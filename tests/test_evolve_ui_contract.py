@@ -68,3 +68,36 @@ def test_kpi_stale_state_fallback():
     start = HTML.find("const evolveKpiTiles = computed")
     body = HTML[start:HTML.find("const evolveAccentModel", start)]
     assert "evolveFailStreak" in body
+
+
+def test_kpi_grid_rendered_in_evolve_view():
+    v = _evolve_view()
+    assert 'class="evolve-kpis"' in v
+    assert 'v-for="t in evolveKpiTiles"' in v
+    assert "kpiTileClick(t, $event)" in v
+
+
+def test_header_has_panel_button():
+    v = _evolve_view()
+    assert "toggleEvolvePanel()" in v
+    assert "配置 / 触发" in v
+
+
+def test_header_keeps_existing_actions():
+    v = _evolve_view()
+    for call in ("evolvePause()", "evolveResume()", "evolveEnable()", "fetchEvolveStatus()"):
+        assert call in v
+    assert 'disabled title="进化日志导出尚未提供接口"' in v
+
+
+def test_evolve_view_has_no_emoji():
+    v = _evolve_view()
+    # 约束 4：文件内不落 emoji 字面量——用码点表构造等价的禁用字符表
+    blocked = "".join(map(chr, (0x1F4C8, 0x1F9EA, 0x1F9E0, 0x1F916, 0x1F9EC, 0x23F8, 0x26A1, 0x231A, 0x1F680, 0x1F3AF, 0x1F527)))
+    assert not any(ch in v for ch in blocked)
+
+
+def test_kpi_glow_css_present():
+    assert ".evolve-kpi.on-green{border-color:rgba(13,204,130,.45)" in HTML
+    assert ".evolve-kpi.on-amber" in HTML
+    assert ".evolve-kpi.on-red" in HTML

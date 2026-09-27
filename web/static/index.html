@@ -1333,10 +1333,47 @@
   .ctx-chip{background:color-mix(in srgb,var(--bg-2) 58%,transparent);border-color:color-mix(in srgb,var(--border) 70%,transparent);box-shadow:0 3px 12px rgba(0,0,0,.16),inset 0 1px 0 var(--glass-edge)}
   .ctx-right .pill{background:color-mix(in srgb,var(--bg-2) 58%,transparent);border-color:color-mix(in srgb,var(--border) 70%,transparent);box-shadow:0 3px 12px rgba(0,0,0,.14),inset 0 1px 0 var(--glass-edge)}
 
-  /* ---------- 持续进化页 PDF 工作台：仅作用于 evolve 视图 ---------- */
+  /* ---------- 持续进化页 KPI 仪表盘（2026-09-27 重设计）：仅作用于 evolve 视图 ---------- */
   .evolve-page{display:flex;flex-direction:column;gap:16px}
   .evolve-page > *{margin-top:0!important}
   .evolve-page-head{min-height:52px}
+  .evolve-page-head{justify-content:flex-end}
+  /* ---- KPI 磁贴：等行高 + 三行文字各就各位（nowrap+ellipsis），任何文案不得换行挤压 ---- */
+  .evolve-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;grid-auto-rows:1fr}
+  .evolve-kpi{display:flex;flex-direction:column;justify-content:space-between;gap:4px;min-width:0;
+    padding:11px 12px;border-radius:8px;text-align:left;cursor:pointer;font-family:inherit;
+    background:var(--bg-1);border:1px solid var(--border);overflow:hidden;
+    transition:border-color .15s, box-shadow .15s}
+  .evolve-kpi:hover{border-color:var(--border2)}
+  .evolve-kpi:focus-visible{outline:2px solid var(--accent-text);outline-offset:1px}
+  .evolve-kpi.on-green{border-color:rgba(13,204,130,.45);box-shadow:0 0 14px rgba(13,204,130,.12);
+    background:linear-gradient(180deg,rgba(13,204,130,.06),var(--bg-1))}
+  .evolve-kpi.on-amber{border-color:rgba(245,158,10,.45);box-shadow:0 0 14px rgba(245,158,10,.10);
+    background:linear-gradient(180deg,rgba(245,158,10,.06),var(--bg-1))}
+  .evolve-kpi.on-red{border-color:rgba(245,71,94,.45);box-shadow:0 0 14px rgba(245,71,94,.10);
+    background:linear-gradient(180deg,rgba(245,71,94,.06),var(--bg-1))}
+  .evolve-kpi-lab{display:flex;align-items:center;gap:5px;font-size:var(--fs-micro);color:var(--text3);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:none}
+  .evolve-kpi-dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--muted)}
+  .evolve-kpi-dot.green{background:var(--green)}
+  .evolve-kpi-dot.amber{background:var(--orange)}
+  .evolve-kpi-dot.red{background:var(--red)}
+  .evolve-kpi-val{font-size:16px;font-weight:650;color:var(--text);font-variant-numeric:tabular-nums;
+    letter-spacing:-.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:none;line-height:1.25}
+  .evolve-kpi-val.pos{color:var(--green)}
+  .evolve-kpi-val.warn{color:var(--orange)}
+  .evolve-kpi-val.neg{color:var(--red)}
+  .evolve-kpi-sub{font-size:var(--fs-micro);color:var(--text3);white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis;flex:none}
+  /* ---- 配置/触发页头按钮与浮层 ---- */
+  .evolve-panel{position:relative;display:inline-flex}
+  .evolve-panel-btn.open{border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)}
+  .evolve-panel-pop{width:min(330px,92vw);gap:0;padding:11px 12px}
+  .evolve-pop-head{display:flex;align-items:center;gap:6px;font-size:var(--fs-body);font-weight:650;
+    color:var(--text);padding-bottom:8px}
+  .evolve-pop-group{padding:9px 0;border-top:1px solid var(--border);min-width:0}
+  .evolve-pop-group:first-of-type{border-top:0;padding-top:2px}
+  .evolve-pop-group .mac-label{margin-bottom:6px}
   .evolve-layout{display:grid;grid-template-columns:minmax(0,1fr) 370px;gap:14px;align-items:start}
   /* 左右两列各自独立成栅格。
      曾把 5 个窗口直接挂在外层网格上、用 grid-row 把它们定位到左右列——但外层网格的
@@ -3428,10 +3465,31 @@
       <!-- ========== 持续进化引擎 ========== -->
 <transition name="page" mode="out-in">  <!-- view: evolve -->
     <section v-if="view==='evolve'" class="space-y-3.5 evolve-page">
-      <div class="page-head evolve-page-head"><div class="page-actions"><button class="mac-btn" v-if="!evolveStatus.paused" @click="evolvePause()" :disabled="!evolveStatus.running || !evolveStatus.enabled" title="暂停持续训练（不停止进程）"><svg width="13" height="13"><use href="#i-pause"/></svg>暂停</button><button class="mac-btn primary" v-else @click="evolveResume()" :disabled="!evolveStatus.running || !evolveStatus.enabled" title="恢复持续训练"><svg width="13" height="13"><use href="#i-play"/></svg>恢复</button><button class="mac-btn" v-if="!evolveStatus.enabled" @click="evolveEnable()" :disabled="!evolveStatus.running" title="启用自动进化"><svg width="13" height="13"><use href="#i-power"/></svg>启用</button><button class="mac-btn" disabled title="进化日志导出尚未提供接口"><svg width="13" height="13"><use href="#i-download"/></svg>导出进化日志</button><button class="mac-btn" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button></div></div>
+      <div class="page-head evolve-page-head"><div class="page-actions">
+        <button class="mac-btn" v-if="!evolveStatus.paused" @click="evolvePause()" :disabled="!evolveStatus.running || !evolveStatus.enabled" title="暂停持续训练（不停止进程）"><svg width="13" height="13"><use href="#i-pause"/></svg>暂停</button>
+        <button class="mac-btn primary" v-else @click="evolveResume()" :disabled="!evolveStatus.running || !evolveStatus.enabled" title="恢复持续训练"><svg width="13" height="13"><use href="#i-play"/></svg>恢复</button>
+        <button class="mac-btn" v-if="!evolveStatus.enabled" @click="evolveEnable()" :disabled="!evolveStatus.running" title="启用自动进化"><svg width="13" height="13"><use href="#i-power"/></svg>启用</button>
+        <span class="evolve-panel" @click.stop>
+          <button class="mac-btn evolve-panel-btn" :class="{open:evolvePanelOpen}" data-form-key="evolvePanel" aria-haspopup="true" :aria-expanded="evolvePanelOpen?'true':'false'" @click.stop="toggleEvolvePanel()"><svg width="13" height="13"><use href="#i-settings"/></svg>配置 / 触发</button>
+          <!-- 浮层本体：Task 3 在此填充 Teleport -->
+        </span>
+        <button class="mac-btn" disabled title="进化日志导出尚未提供接口"><svg width="13" height="13"><use href="#i-download"/></svg>导出进化日志</button>
+        <button class="mac-btn" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button>
+      </div></div>
+      <!-- KPI 磁贴 ×8（状态光晕）：前三张点按切换曲线模型，锚点磁贴点按开浮层 -->
+      <div class="evolve-kpis">
+        <button v-for="t in evolveKpiTiles" :key="t.key" type="button" class="evolve-kpi"
+          :class="t.glow!=='plain' ? 'on-'+t.glow : ''"
+          @click="kpiTileClick(t, $event)"
+          :title="t.model ? ('切换曲线到'+t.label) : (t.anchor ? '打开配置/触发查看锚点详情' : '')">
+          <span class="evolve-kpi-lab"><i v-if="t.dot" class="evolve-kpi-dot" :class="t.dot"></i>{{t.label}}</span>
+          <span class="evolve-kpi-val" :class="t.valueCls">{{t.value}}</span>
+          <span class="evolve-kpi-sub">{{t.sub}}</span>
+        </button>
+      </div>
       <!-- 运行状态窗口已移除（2026-09-19）：健康度信息由上下文条承担，
            高频控制（暂停/恢复、启用）移入页头操作区，避免同一屏出现两套状态与两组按钮。
-           「立即训练」随窗口一并移除（下方「手动触发训练」区仍有等价入口）。 -->
+           「立即训练」入口已并入页头「配置 / 触发」浮层（2026-09-27）。 -->
 
       <!-- 训练配置：标的池 / 周期，可热更新写入 config.yaml -->
       <div class="evolve-layout">

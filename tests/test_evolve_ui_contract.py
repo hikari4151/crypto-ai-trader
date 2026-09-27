@@ -101,3 +101,29 @@ def test_kpi_glow_css_present():
     assert ".evolve-kpi.on-green{border-color:rgba(13,204,130,.45)" in HTML
     assert ".evolve-kpi.on-amber" in HTML
     assert ".evolve-kpi.on-red" in HTML
+
+
+def test_panel_pop_contains_all_functionality():
+    v = _evolve_view()
+    assert 'class="menu-sub evolve-panel-pop"' in v
+    assert "保存配置（热更新）" in v
+    assert "triggerFactorMiner()" in v
+    assert "triggerStrategyDrl()" in v
+    assert "triggerMetaController()" in v
+    assert "resetEvolveAnchor(a.model)" in v
+    assert "formDrop==='evolveSymbols'" in v
+
+
+def test_old_side_cards_removed_from_view():
+    v = _evolve_view()
+    assert "evolve-side-config" not in v
+    assert "evolve-side-trigger" not in v
+    assert "evolve-side-anchor" not in v
+
+
+def test_doc_click_closes_panel():
+    start = HTML.find("onDocClick = (e)")
+    end = HTML.find("document.addEventListener('click', onDocClick)")
+    assert start != -1 and end > start
+    body = HTML[start:end]
+    assert "evolvePanelOpen" in body and ".evolve-panel" in body

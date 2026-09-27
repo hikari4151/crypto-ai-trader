@@ -857,6 +857,42 @@
   .mac-form-row .fr-ctrl .mac-input{max-width:320px}
   .mac-form-hint{font-size:var(--fs-caption);color:var(--muted);line-height:var(--lh-body)}
   .mac-form-err{font-size:var(--fs-caption);color:var(--red-text);font-weight:600}
+  /* ---- 网络加速（proxy tab）：顶部状态条 + 三步向导（2026-09-27 布局重构）----
+     此前该 tab 写了两个并列 .settings-panel，而 .settings-wrap 是横向 flex ⇒ 左右分栏挤压。
+     合并为单 panel 后，本段负责状态条/步骤/节点卡片三块的局部排版，类名一律带 proxy-/ps-/pnode 前缀，
+     只用既有 token，不与全局组件类发生耦合。 */
+  .proxy-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;
+    background:color-mix(in srgb,var(--bg-2) 55%,transparent);border:1px solid var(--border);
+    border-radius:var(--r-md);padding:11px 14px;margin-bottom:14px}
+  .proxy-status .ps-cell{min-width:0}
+  .proxy-status .mac-label{margin-bottom:3px}
+  .proxy-status .ps-val{display:block;font-size:var(--fs-body);font-weight:600;color:var(--text);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .proxy-step{display:flex;gap:11px;align-items:flex-start;margin-bottom:12px}
+  .proxy-step .ps-num{width:20px;height:20px;flex:none;border-radius:50%;background:var(--accent);color:#fff;
+    font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:13px}
+  .proxy-step .ps-body{flex:1;min-width:0}
+  .proxy-step .ps-title{display:flex;align-items:center;gap:8px;font-size:var(--fs-body);
+    font-weight:600;margin-bottom:8px;flex-wrap:wrap}
+  .proxy-step .ps-title .mac-btn{margin-left:auto}
+  .proxy-step .ps-hint{font-size:var(--fs-caption);color:var(--muted);line-height:var(--lh-body)}
+  .proxy-step .ps-actions{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
+  .proxy-node-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;
+    max-height:260px;overflow:auto}
+  .pnode{border:1px solid var(--border);border-radius:var(--r-md);padding:8px 10px;
+    background:color-mix(in srgb,var(--bg-2) 45%,transparent)}
+  .pnode.on{border-color:var(--accent);box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 45%,transparent)}
+  .pnode .pnode-name{font-size:var(--fs-footnote);font-weight:600;color:var(--text);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pnode .pnode-meta{font-size:var(--fs-caption);color:var(--muted);margin-top:1px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pnode .pnode-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:7px}
+  .proxy-or{display:flex;align-items:center;gap:10px;font-size:var(--fs-caption);color:var(--muted);margin:12px 0 8px}
+  .proxy-or::before,.proxy-or::after{content:"";flex:1;height:1px;background:var(--border)}
+  .proxy-empty{border:1px dashed var(--border2);border-radius:var(--r-md);padding:16px;text-align:center;
+    font-size:var(--fs-caption);color:var(--muted)}
+  .ps-manual{display:flex;gap:8px}
+  .ps-manual .mac-input{flex:1;min-width:0}
   /* ---- 风控规则：组内两列（2026-09-19 第十轮）----
      风控有 16 个字段、可用宽 1126px，一行一字段时每行只用 ~530px（约一半空白），
      且 .fr-ctrl 原为 flex-end，输入框被甩到行最右、与标签隔 ~590px 死区。
@@ -2264,41 +2300,93 @@
           </div>
 
           <!-- 关于 -->
+          <!-- 网络加速：状态条 + 三步向导（2026-09-27 布局重构）
+               原为两个并列 .settings-panel，而 .settings-wrap 是横向 flex ⇒ 左右分栏挤压，已合并为单 panel；
+               原标题 .settings-head 在 CSS 中无定义（全项目仅此一处使用），改用与其他设置页同款 h2。 -->
           <div class="settings-panel" v-if="settingsTab==='proxy'">
-            <div class="settings-head">网络加速（仅本软件生效）</div>
-            <div class="mt-2 text-[length:var(--fs-caption)] text-slate-500">用户提供 VPN/代理 URL（http/socks5）后，本软件所有出站请求（交易所/行情/通知/AI）走该代理加速；不影响系统其他程序。</div>
-            <div style="display:flex;gap:8px;margin-top:12px">
-              <input class="mac-input" v-model="proxyUrl" placeholder="单个代理地址 如 socks5://ip:port 或 http://ip:port（订阅链接请用下方扫描节点）" @keyup.enter="saveProxy()" style="flex:1"/>
-              <button class="mac-btn" @click="saveProxy()">保存并应用</button>
+            <h2 class="text-[length:var(--fs-body)] font-bold mb-1">网络加速</h2>
+            <p class="text-[length:var(--fs-caption)] text-slate-500 mb-4">三步完成配置。所有出站请求（交易所 / 行情 / 通知 / AI）走代理加速，<b>仅本软件生效</b>，不影响系统其他程序。</p>
+
+            <!-- ① 状态条：只读现有 ref，不新增接口 -->
+            <div class="proxy-status">
+              <div class="ps-cell">
+                <span class="mac-label">当前模式</span>
+                <span class="ps-val">{{proxyAuto ? '自动探测本机代理' : (proxyUrl ? '手动指定' : '未设置')}}</span>
+              </div>
+              <div class="ps-cell">
+                <span class="mac-label">生效地址</span>
+                <span class="ps-val" :title="proxyResolved || proxyUrl">{{proxyResolved || proxyUrl || '—'}}</span>
+              </div>
+              <div class="ps-cell">
+                <span class="mac-label">已选节点 / 手动地址</span>
+                <span class="ps-val" :title="proxyUrl">{{proxyUrl || '未设置'}}</span>
+              </div>
+              <div class="ps-cell">
+                <span class="mac-label">hysteria 客户端</span>
+                <span class="ps-val">
+                  <span v-if="hyClient==='installed'" class="pill green">已就绪</span>
+                  <span v-else-if="hyClient==='downloading'" class="pill orange">下载中…</span>
+                  <span v-else-if="hyClient==='error'" class="pill orange">下载失败</span>
+                  <span v-else class="pill">未安装</span>
+                </span>
+              </div>
             </div>
-            <div class="mt-2 text-[length:var(--fs-caption)] text-slate-500" style="margin-top:8px">
-              <span v-if="proxyAuto">当前：自动探测本机代理</span>
-              <span v-else>当前：{{proxyUrl}}<span v-if="proxyResolved">（生效 {{proxyResolved}}）</span></span>
+
+            <!-- 步骤 1：客户端 -->
+            <div class="proxy-step">
+              <span class="ps-num">1</span>
+              <div class="ps-body mac-card">
+                <div class="ps-title">准备客户端
+                  <span v-if="hyClient==='installed'" class="pill green">已就绪</span>
+                  <span v-else-if="hyClient==='downloading'" class="pill orange">下载中…</span>
+                  <span v-else-if="hyClient==='error'" class="pill orange">下载失败</span>
+                  <span v-else class="pill">未安装</span>
+                  <button v-if="hyClient!=='installed' && hyClient!=='downloading'" class="mac-btn btn-sm" @click="downloadHyClient()">自动下载</button>
+                </div>
+                <div class="ps-hint">hysteria2 节点需要本机客户端；socks5 / http / ss 节点可直接使用，无需此步。</div>
+              </div>
             </div>
-          </div>
-          <div v-if="settingsTab==='proxy'" style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-              <span class="text-[length:var(--fs-caption)] text-slate-500">hysteria 客户端：
-                <template v-if="hyClient==='installed'"><span class="text-green-600">已就绪</span></template>
-                <template v-else-if="hyClient==='downloading'">下载中…</template>
-                <template v-else-if="hyClient==='error'"><span class="text-red-600">下载失败</span></template>
-                <template v-else>未安装</template>
-              </span>
-              <button v-if="hyClient!=='installed' && hyClient!=='downloading'" class="mac-btn" @click="downloadHyClient()">自动下载</button>
+
+            <!-- 步骤 2：扫描 -->
+            <div class="proxy-step">
+              <span class="ps-num">2</span>
+              <div class="ps-body mac-card">
+                <div class="ps-title">粘贴订阅或节点文本</div>
+                <textarea class="mac-input" v-model="proxySource" rows="3" placeholder="订阅 URL 或粘贴节点文本（Clash YAML / 每行 socks5:// http:// ss://）" style="width:100%;box-sizing:border-box"></textarea>
+                <div class="ps-actions">
+                  <button class="mac-btn primary" @click="scanProxy()">{{proxyScanning?'扫描中…':'扫描节点'}}</button>
+                  <span class="text-[length:var(--fs-caption)] text-slate-500">{{proxyScanMsg}}</span>
+                </div>
+              </div>
             </div>
-            <div style="font-weight:600;margin-bottom:6px">扫描全部节点</div>
-            <textarea class="mac-input" v-model="proxySource" rows="3" placeholder="订阅 URL 或粘贴节点文本（Clash YAML / 每行 socks5:// http:// ss://）" style="width:100%;box-sizing:border-box"></textarea>
-            <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
-              <button class="mac-btn" @click="scanProxy()">{{proxyScanning?'扫描中…':'扫描节点'}}</button>
-              <span class="text-[length:var(--fs-caption)] text-slate-500">{{proxyScanMsg}}</span>
-            </div>
-            <div v-if="proxyNodes.length" style="margin-top:10px;max-height:220px;overflow:auto;border:1px solid var(--border);border-radius:6px">
-              <div v-for="nd in proxyNodes" :key="nd.name+nd.url+nd.server" style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border)">
-                <span style="flex:1">{{nd.name}} <span class="text-slate-500">{{nd.type}} · {{nd.server||'-'}}:{{nd.port||'-'}}</span></span>
-                <span v-if="nd.reachable" class="text-green-600">可连 {{nd.delay_ms}}ms</span>
-                <span v-else-if="!nd.supported" class="text-slate-500">需客户端</span>
-                <span v-else class="text-slate-500">不可达</span>
-                <button class="mac-btn" :disabled="!((nd.supported && nd.reachable) || nd.type==='hysteria2' || nd.type==='hysteria')" @click="chooseProxy(nd)">选择</button>
+
+            <!-- 步骤 3：选节点 + 手动地址 -->
+            <div class="proxy-step">
+              <span class="ps-num">3</span>
+              <div class="ps-body mac-card">
+                <div class="ps-title">选择要使用的节点
+                  <span v-if="proxyNodes.length" class="pill">共 {{proxyNodes.length}} 个</span>
+                </div>
+                <div v-if="proxyNodes.length" class="proxy-node-grid">
+                  <div v-for="nd in proxyNodes" :key="nd.name+nd.url+nd.server"
+                       class="pnode" :class="(proxyUrl && nd.server && proxyUrl.indexOf(nd.server)>=0) ? 'on' : ''">
+                    <div class="pnode-name" :title="nd.name">{{nd.name}}</div>
+                    <div class="pnode-meta" :title="nd.type+' · '+(nd.server||'-')+':'+(nd.port||'-')">{{nd.type}} · {{nd.server||'-'}}:{{nd.port||'-'}}</div>
+                    <div class="pnode-foot">
+                      <span v-if="nd.reachable" class="pill" :class="nd.delay_ms<150?'green':(nd.delay_ms<=400?'orange':'')">{{nd.delay_ms}}ms</span>
+                      <span v-else-if="!nd.supported" class="pill">需客户端</span>
+                      <span v-else class="pill">不可达</span>
+                      <button class="mac-btn btn-sm" :disabled="!((nd.supported && nd.reachable) || nd.type==='hysteria2' || nd.type==='hysteria')" @click="chooseProxy(nd)">选择</button>
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="proxy-empty">还没有节点——先在上一步粘贴订阅并点击「扫描节点」。</div>
+
+                <div class="proxy-or">或者手动填写地址</div>
+                <div class="ps-manual">
+                  <input class="mac-input" v-model="proxyUrl" placeholder="单个代理地址 如 socks5://ip:port 或 http://ip:port" @keyup.enter="saveProxy()"/>
+                  <button class="mac-btn primary" @click="saveProxy()">保存并应用</button>
+                </div>
               </div>
             </div>
           </div>

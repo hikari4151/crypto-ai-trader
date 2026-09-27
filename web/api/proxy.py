@@ -35,16 +35,18 @@ async def get_proxy() -> dict:
     """读取当前代理配置与生效地址。"""
     resolved = settings.resolved_proxy or ""
     from net.proxy_client import find_hysteria_bin
+    proxy_url = (settings.proxy_url or "").strip()
     return {
-        "proxy_url": (settings.proxy_url or "").strip(),
+        "proxy_url": proxy_url,
         "resolved_proxy": resolved,
-        "auto_detected": not bool((settings.proxy_url or "").strip()),
+        "unreachable": bool(proxy_url and not resolved),
+        "auto_detected": not bool(proxy_url),
         "hy_client_installed": bool(find_hysteria_bin()),
     }
 
 
 _SUBSCRIPTION_HINTS = ("subscribe", "token=", "sub?")
-_PROXY_SCHEMES = {"http", "https", "socks5", "socks4"}
+_PROXY_SCHEMES = {"http", "https", "socks5", "socks5h", "socks4"}
 
 
 def _validate_proxy_url(url: str) -> tuple[bool, str]:
@@ -78,6 +80,9 @@ async def set_proxy(body: ProxyConfigIn) -> dict:
         "ok": True,
         "proxy_url": url,
         "resolved_proxy": resolved,
+        # 2026-09-27：不可达时如实标记——此前前端拿 proxy_url 兜底显示"生效"，
+        # 实际流量在直连，用户看到"加速中"却完全没加速。
+        "unreachable": bool(url and not resolved),
         "auto_detected": not bool(url),
         "note": "仅作用于本软件出站请求（交易所/K线/通知/AI）；不影响系统其他程序",
     }
@@ -146,8 +151,10 @@ async def select_proxy_node(body: ProxySelectIn) -> dict:
     settings.proxy_url = url
     settings.reset_proxy_cache()
     _persist(url)
+    resolved = settings.resolved_proxy or ""
     return {"ok": True, "proxy_url": url,
-            "resolved_proxy": settings.resolved_proxy or url,
+            "resolved_proxy": resolved,
+            "unreachable": bool(url and not resolved),
             "selector": "local_client" if scheme in ("hysteria2", "hysteria") else "direct",
             "note": "仅作用于本软件出站请求"}
 

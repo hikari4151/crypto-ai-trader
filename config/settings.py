@@ -47,6 +47,22 @@ def probe_local_proxy() -> str:
     return ""
 
 
+def normalize_proxy_url(url: str) -> str:
+    """代理 URL 规范化：`socks5://` → `socks5h://`（远端 DNS 解析）。
+
+    本机 DNS 常被污染/劫持（2026-09-27 实测 `www.okx.com → 169.254.0.2`），
+    `socks5://` 会把域名在**本机**解析出的废 IP 送给隧道，请求必然超时；
+    `socks5h://` 改由代理侧解析（等价 curl `--socks5-hostname`），requests/urllib3
+    与 httpx 均支持该 scheme。已是 socks5h 或其他协议则原样返回。
+    """
+    if not url or "://" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    if scheme.lower() == "socks5":
+        return "socks5h://" + rest
+    return url
+
+
 class _Utf8YamlSource(YamlConfigSettingsSource):
     """UTF-8 读取 config.yaml：pydantic-settings 默认以系统编码（中文 Windows=GBK）
     文本模式打开，UTF-8 中文注释直接 UnicodeDecodeError（启动即崩）。
@@ -282,7 +298,7 @@ class Settings(BaseSettings):
         """实际探测逻辑（阻塞 socket 连接，最坏 13 端口 × 0.4s ≈ 5s）。
         仅首次经 _ensure_proxy 调用，结果进程级缓存。"""
         if self.proxy_url and self.proxy_url.strip():
-            url = self.proxy_url.strip()
+            url = normalize_proxy_url(self.proxy_url.strip())
             try:
                 parts = urlsplit(url if "://" in url else "http://" + url)
                 host = parts.hostname or "127.0.0.1"

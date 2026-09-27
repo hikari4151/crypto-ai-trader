@@ -94,6 +94,17 @@ async def lifespan(app: FastAPI):
         log.info("[main] 持续进化引擎已启动（后台训练循环，因子挖掘15s后开始，策略DRL 30s后开始）")
     except Exception as e:  # noqa: BLE001
         log.warning("[main] 持续进化引擎启动失败（不影响主服务）: %s", e)
+    # 2026-09-27：重启后恢复本地加速客户端（必须在代理预热**之前**，
+    # 否则端口探测先落空、结果被缓存一整轮，加速静默失效）。
+    try:
+        from net.proxy_client import rearm_local_proxy
+        arm_ok, arm_url, arm_err = rearm_local_proxy()
+        if arm_ok:
+            log.info("[main] 已恢复本地加速客户端: %s", arm_url)
+        elif arm_err:
+            log.warning("[main] 恢复本地加速客户端失败: %s", arm_err)
+    except Exception as e:  # noqa: BLE001
+        log.warning("[main] 恢复本地加速客户端异常: %s", e)
     # P2-4：代理探测异步预热（阻塞 socket 探测放线程池，启动即缓存，
     # 首个行情请求不再在事件循环上同步阻塞数秒）
     try:

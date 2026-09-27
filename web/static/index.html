@@ -868,6 +868,8 @@
   .proxy-status .mac-label{margin-bottom:3px}
   .proxy-status .ps-val{display:block;font-size:var(--fs-body);font-weight:600;color:var(--text);
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* 配了地址但探测不到 → 如实标红（此前界面显示"生效"，实际流量在直连） */
+  .proxy-status .ps-val.ps-down{color:var(--red)}
   .proxy-step{display:flex;gap:11px;align-items:flex-start;margin-bottom:12px}
   .proxy-step .ps-num{width:20px;height:20px;flex:none;border-radius:50%;background:var(--accent);color:#fff;
     font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;margin-top:13px}
@@ -2315,7 +2317,7 @@
               </div>
               <div class="ps-cell">
                 <span class="mac-label">生效地址</span>
-                <span class="ps-val" :title="proxyResolved || proxyUrl">{{proxyResolved || proxyUrl || '—'}}</span>
+                <span class="ps-val" :class="(proxyUrl && !proxyResolved) ? 'ps-down' : ''" :title="proxyResolved">{{proxyResolved || (proxyUrl ? '未生效（地址不可达）' : '—')}}</span>
               </div>
               <div class="ps-cell">
                 <span class="mac-label">已选节点 / 手动地址</span>

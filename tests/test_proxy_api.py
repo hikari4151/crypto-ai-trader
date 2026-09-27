@@ -72,6 +72,62 @@ def test_validate_proxy_url_rejects_bad_scheme():
     assert ok is True
 
 
+# 2026-09-27：内置加速失效根因（三连）
+# ① 本机 DNS 被污染（www.okx.com -> 169.254.0.2），socks5:// 在本地解析域名，
+#    经隧道连到废 IP 必然超时；socks5h:// 由节点侧解析，实测 OKX 1.5s 通。
+# ② hysteria 节点自签证书 + 只写 pin ⇒ 客户端秒退（详见 test_proxy_client）。
+# ③ 代理不可达时接口把死地址报成 resolved_proxy，界面显示"生效"却在直连。
+def test_validate_proxy_url_accepts_socks5h():
+    from web.api.proxy import _validate_proxy_url
+    ok, reason = _validate_proxy_url("socks5h://127.0.0.1:7891")
+    assert ok is True, reason
+
+
+def test_resolved_proxy_upgrades_socks5_to_socks5h():
+    from config.settings import normalize_proxy_url
+    assert normalize_proxy_url("socks5://1.2.3.4:7890") == "socks5h://1.2.3.4:7890"
+    assert normalize_proxy_url("SOCKS5://1.2.3.4:7890") == "socks5h://1.2.3.4:7890"
+    assert normalize_proxy_url("socks5h://1.2.3.4:1080") == "socks5h://1.2.3.4:1080"
+    assert normalize_proxy_url("http://127.0.0.1:7890") == "http://127.0.0.1:7890"
+    assert normalize_proxy_url("socks4://1.2.3.4:1080") == "socks4://1.2.3.4:1080"
+    assert normalize_proxy_url("") == ""
+
+
+def test_resolve_proxy_sync_applies_normalization(monkeypatch):
+    """显式配置 socks5:// 且可达 → resolved 必须返回 socks5h://（远端 DNS）。"""
+    from config import settings as settings_mod
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(settings_mod, "probe_local_proxy", lambda: "")
+    monkeypatch.setattr(settings_mod.socket, "create_connection", lambda *a, **k: _Conn())
+    monkeypatch.setattr(settings, "proxy_url", "socks5://127.0.0.1:7891")
+    assert settings._resolve_proxy_sync() == "socks5h://127.0.0.1:7891"
+    monkeypatch.setattr(settings, "proxy_url", "http://127.0.0.1:7890")
+    assert settings._resolve_proxy_sync() == "http://127.0.0.1:7890"
+
+
+@pytest.mark.asyncio
+async def test_select_node_does_not_report_dead_proxy_as_resolved(monkeypatch, tmp_path):
+    """节点不可达时不许把死地址报成生效（否则界面显示"生效"却在直连）。"""
+    monkeypatch.setattr(proxy_api, "OVERRIDE_FILE", tmp_path / "proxy_config.json")
+    monkeypatch.setattr(settings, "_resolve_proxy_sync", lambda: "", raising=False)
+    settings.reset_proxy_cache()
+    try:
+        r = await proxy_api.select_proxy_node(proxy_api.ProxySelectIn(
+            node={"type": "socks5", "url": "socks5://1.2.3.4:7890"}))
+        assert r["ok"] is True
+        assert r["resolved_proxy"] == "", "不可达时 resolved_proxy 必须为空"
+        assert r["unreachable"] is True, "必须显式告知不可达"
+    finally:
+        settings.reset_proxy_cache()
+
+
 # 2026-09-25：扫描端点拉取失败应返回具体 error（前端可显示，而非"未解析到节点"）
 @pytest.mark.asyncio
 async def test_scan_returns_error_on_fetch_failure(monkeypatch):

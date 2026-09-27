@@ -4,6 +4,7 @@ ccxt>=4.2.0              # 交易所 REST
 pandas>=2.0.0
 numpy>=1.24.0
 httpx>=0.27.0            # 异步 AI HTTP 客户端
+socksio>=1.0.0           # 网络加速：httpx 走 socks5/socks5h 必需
 orjson>=3.9.0            # run16 E1：模型 zoo 权重 JSON 快速解析
 # Web
 fastapi>=0.110.0

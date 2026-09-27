@@ -6,9 +6,12 @@
 """
 import json
 import logging
+import os
 import shutil
 import subprocess
+import tempfile
 import threading
+import time
 from pathlib import Path
 
 
@@ -119,6 +122,70 @@ def select_node(node: dict) -> tuple[bool, str, str]:
     return False, "", f"节点类型 {scheme} 暂不支持直接使用（需本地客户端转换）"
 
 
+# --- CA 信任包（2026-09-27：github.com 下载 SSL 校验失败的根因修复）---------
+# 本机加速器/杀软（实测为 Steam++ · Watt Toolkit · BeyondDimension 装的
+# 「SteamTools Certificate」根证书）会拦截 github.com 的 TLS 并用自建根证书签名。
+# 该根证书在 Windows 根证书库（浏览器/系统默认信任），但 requests 只认 certifi，
+# 于是报 `unable to get local issuer certificate`。桌面应用标准做法是与系统
+# 信任集对齐：合并 certifi ∪ Windows 根证书库，验证保持开启（绝不 verify=False）。
+_CA_BUNDLE_CACHE = Path(tempfile.gettempdir()) / "cat_ca_trust_bundle.pem"
+_CA_TTL_SECONDS = 24 * 3600
+_ca_lock = threading.Lock()
+
+
+def _export_windows_roots(dest: Path) -> bool:
+    """导出 Windows 根证书库（LocalMachine\\Root + CurrentUser\\Root）为 PEM。"""
+    ps = ("Get-ChildItem Cert:\\LocalMachine\\Root, Cert:\\CurrentUser\\Root "
+          "-ErrorAction SilentlyContinue | ForEach-Object { "
+          "$b=[Convert]::ToBase64String($_.RawData); "
+          "'-----BEGIN CERTIFICATE-----'; $b; '-----END CERTIFICATE-----' } | "
+          f"Set-Content -Path '{dest}' -Encoding Ascii")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           capture_output=True, timeout=60)
+    except Exception as e:  # noqa: BLE001
+        log.warning("[proxy-client] 导出 Windows 根证书库失败: %s", e)
+        return False
+    return r.returncode == 0 and dest.exists() and dest.stat().st_size > 1000
+
+
+def ca_bundle_path(refresh: bool = False) -> str | bool:
+    """certifi ∪ Windows 根证书库的合并 CA 包（缓存 24h），给 requests 的 verify= 用。
+
+    失败一律回退 certifi；**绝不返回空值**——requests 收到 falsy 的 verify
+    会直接关闭证书验证（CERT_NONE），那是把下载暴露给任意中间人。
+    """
+    import certifi
+    try:
+        certifi_path = str(certifi.where())
+    except Exception:  # noqa: BLE001  # pragma: no cover
+        return True  # certifi 是 requests 的依赖，取不到才退化为库默认（仍开启验证）
+    if os.name != "nt":
+        return certifi_path
+    with _ca_lock:
+        try:
+            stale = (not _CA_BUNDLE_CACHE.exists()
+                     or time.time() - _CA_BUNDLE_CACHE.stat().st_mtime >= _CA_TTL_SECONDS)
+        except OSError:
+            stale = True
+        if refresh:
+            stale = True
+        if not stale:
+            return str(_CA_BUNDLE_CACHE)
+        try:
+            roots = _CA_BUNDLE_CACHE.with_suffix(".roots.pem")
+            if _export_windows_roots(roots):
+                certifi_text = Path(certifi_path).read_text(errors="ignore")
+                merged = certifi_text + "\n" + roots.read_text(errors="ignore")
+                if merged.count("BEGIN CERTIFICATE") > 0:
+                    _CA_BUNDLE_CACHE.write_text(merged, encoding="utf-8")
+                    roots.unlink(missing_ok=True)
+                    return str(_CA_BUNDLE_CACHE)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[proxy-client] 构建合并 CA 包失败，回退 certifi: %s", e)
+        return certifi_path
+
+
 # 官方 GitHub Releases 最新版 Windows amd64（下载来源固定，防止任意 URL 注入）
 HYSTERIA_DOWNLOAD_URL = ("https://github.com/apernet/hysteria/releases/"
                          "latest/download/hysteria-windows-amd64.exe")
@@ -133,7 +200,8 @@ def download_hysteria_client(dest_dir: Path | None = None,
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / _HY_BIN_NAME
     try:
-        resp = requests.get(HYSTERIA_DOWNLOAD_URL, stream=True, timeout=timeout)
+        resp = requests.get(HYSTERIA_DOWNLOAD_URL, stream=True, timeout=timeout,
+                            verify=ca_bundle_path())
         resp.raise_for_status()
         size = int(resp.headers.get("content-length") or 0)
         if size and not (1_000_000 <= size <= 200_000_000):

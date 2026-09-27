@@ -5078,7 +5078,7 @@ const app = createApp({
       evolvePanelOpen.value = (force === true) ? true : !evolvePanelOpen.value;
     }
     // KPI 磁贴统一点击：前三张切曲线模型；锚点磁贴开浮层。
-    // ⚠️ anchor 分支必须 stopPropagation：否则本次点击冒泡到 document 的
+    // 注意：anchor 分支必须 stopPropagation——否则本次点击冒泡到 document 的
     //    onDocClick（此时 evolvePanelOpen 刚变 true）会把浮层立刻关掉，表现为"点了打不开"。
     function kpiTileClick(t, ev) {
       if (t.model) { setEvolveCurveModel(t.model); return; }

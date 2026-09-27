@@ -210,6 +210,48 @@ async def test_select_node_does_not_report_dead_proxy_as_resolved(monkeypatch, t
         settings.reset_proxy_cache()
 
 
+@pytest.mark.asyncio
+async def test_get_proxy_rechecks_liveness_when_client_died(monkeypatch):
+    """resolved_proxy 是启动时探测的进程级缓存：本地客户端中途挂掉后必须按实测置空。
+
+    否则界面显示"生效"、实际请求连到死端口（用户实测"还是报网络问题"的一种）。
+    """
+    monkeypatch.setattr(settings, "proxy_url", "socks5h://127.0.0.1:7999")
+    settings.reset_proxy_cache()
+    monkeypatch.setattr(settings, "_resolve_proxy_sync", lambda: "socks5h://127.0.0.1:7999",
+                        raising=False)
+    settings.reset_proxy_cache()
+    try:
+        monkeypatch.setattr(proxy_api, "_probe_alive", lambda url, timeout=0.4: False)
+        r = await proxy_api.get_proxy()
+        assert r["resolved_proxy"] == "", "端口没人监听时 resolved 必须为空"
+        assert r["unreachable"] is True
+    finally:
+        settings.reset_proxy_cache()
+
+
+@pytest.mark.asyncio
+async def test_get_proxy_keeps_resolved_when_alive(monkeypatch):
+    monkeypatch.setattr(settings, "proxy_url", "socks5h://127.0.0.1:7998")
+    monkeypatch.setattr(settings, "_resolve_proxy_sync", lambda: "socks5h://127.0.0.1:7998",
+                        raising=False)
+    settings.reset_proxy_cache()
+    try:
+        monkeypatch.setattr(proxy_api, "_probe_alive", lambda url, timeout=0.4: True)
+        r = await proxy_api.get_proxy()
+        assert r["resolved_proxy"] == "socks5h://127.0.0.1:7998"
+        assert r["unreachable"] is False
+    finally:
+        settings.reset_proxy_cache()
+
+
+def test_probe_alive_connects_to_host_port():
+    """_probe_alive：连不上返回 False，连得上返回 True，无法解析按 True（不误报）。"""
+    assert proxy_api._probe_alive("socks5h://127.0.0.1:1", timeout=0.2) is False
+    assert proxy_api._probe_alive("", timeout=0.2) is True
+    assert proxy_api._probe_alive("not-a-url", timeout=0.2) is True
+
+
 # 2026-09-25：扫描端点拉取失败应返回具体 error（前端可显示，而非"未解析到节点"）
 @pytest.mark.asyncio
 async def test_scan_returns_error_on_fetch_failure(monkeypatch):

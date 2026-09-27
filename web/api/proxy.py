@@ -6,7 +6,9 @@
 """
 import json
 import logging
+import socket
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -17,6 +19,24 @@ log = logging.getLogger("api.proxy")
 router = APIRouter(prefix="/api/proxy", tags=["proxy"])
 
 OVERRIDE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "proxy_config.json"
+
+
+def _probe_alive(proxy_url: str, timeout: float = 0.4) -> bool:
+    """实测代理端口是否还有人监听。
+
+    `settings.resolved_proxy` 是**启动时探测的进程级缓存**：本地客户端（hysteria）
+    中途挂掉后缓存仍是旧值，界面会显示"生效"、实际请求连到死端口（2026-09-27
+    用户实测"还是报网络问题"的成因之一）。读取状态时补一次廉价探测。
+    无法解析 host/port 时按 True 处理——不误报，交给后续请求暴露真实错误。
+    """
+    try:
+        parts = urlsplit(proxy_url)
+        if not parts.hostname or not parts.port:
+            return True
+        with socket.create_connection((parts.hostname, int(parts.port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
 
 
 class ProxyConfigIn(BaseModel):
@@ -36,6 +56,13 @@ async def get_proxy() -> dict:
     resolved = settings.resolved_proxy or ""
     from net.proxy_client import find_hysteria_bin
     proxy_url = (settings.proxy_url or "").strip()
+    if resolved:
+        # 缓存可能是陈的：按实测端口活性上报（客户端中途挂掉 ⇒ 立即显示未生效）
+        import asyncio
+        if not await asyncio.to_thread(_probe_alive, resolved):
+            log.warning("[proxy] 生效代理 %s 已无监听（本地客户端可能已退出），按未生效上报",
+                        resolved)
+            resolved = ""
     return {
         "proxy_url": proxy_url,
         "resolved_proxy": resolved,

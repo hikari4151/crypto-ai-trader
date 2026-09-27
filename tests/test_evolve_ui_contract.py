@@ -127,3 +127,9 @@ def test_doc_click_closes_panel():
     assert start != -1 and end > start
     body = HTML[start:end]
     assert "evolvePanelOpen" in body and ".evolve-panel" in body
+
+
+def test_panel_pop_anchored_to_button():
+    # spec §3.6：浮层必须按页头按钮位置锚定（popPos + 右对齐覆盖），不能裸 fixed
+    assert "evolvePanelStyle" in _setup_return()
+    assert ':style="evolvePanelStyle"' in _evolve_view()

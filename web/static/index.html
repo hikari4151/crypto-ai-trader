@@ -3473,7 +3473,7 @@
         <span class="evolve-panel" @click.stop>
           <button class="mac-btn evolve-panel-btn" :class="{open:evolvePanelOpen}" data-form-key="evolvePanel" aria-haspopup="true" :aria-expanded="evolvePanelOpen?'true':'false'" @click.stop="toggleEvolvePanel()"><svg width="13" height="13"><use href="#i-settings"/></svg>配置 / 触发</button>
           <Teleport to="body">
-            <div v-if="evolvePanelOpen" class="menu-sub evolve-panel-pop" @click.stop>
+            <div v-if="evolvePanelOpen" class="menu-sub evolve-panel-pop" :style="evolvePanelStyle" @click.stop>
               <div class="evolve-pop-head"><span>配置 / 触发</span><span style="flex:1"></span><button class="mac-btn btn-sm" style="padding:2px 9px" @click="toggleEvolvePanel()">收起</button></div>
               <div class="evolve-pop-group">
                 <div class="mac-label">训练标的池</div>
@@ -5131,8 +5131,25 @@ const app = createApp({
     });
     // ---- 配置/触发页头浮层（2026-09-27 重设计）：菜单按钮点开，点外部收起 ----
     const evolvePanelOpen = ref(false);
+    const evolvePanelStyle = ref({ zIndex: 95 });
+    // 浮层锚定：按钮下方 + 右对齐（popPos 负责 top/翻向/maxHeight/视口钳制，
+    // left 用本式覆盖为按按钮右缘对齐，与 CSS width:min(330px,92vw) 同口径）
+    const _evolvePanelLeft = (r) => {
+      const w = Math.min(330, innerWidth * 0.92);
+      return Math.round(Math.max(8, Math.min(r.right - w, innerWidth - 8 - w))) + 'px';
+    };
     function toggleEvolvePanel(force) {
-      evolvePanelOpen.value = (force === true) ? true : !evolvePanelOpen.value;
+      const next = force === true ? true : !evolvePanelOpen.value;
+      evolvePanelOpen.value = next;
+      if (!next) return;
+      const btn = document.querySelector('[data-form-key="evolvePanel"]');
+      if (!btn) return;
+      const r = btn.getBoundingClientRect();
+      evolvePanelStyle.value = Object.assign(popPos(null, r), { left: _evolvePanelLeft(r) });
+      nextTick(() => {
+        const el = document.querySelector('.evolve-panel-pop');
+        if (el && evolvePanelOpen.value) evolvePanelStyle.value = Object.assign(popPos(el, r), { left: _evolvePanelLeft(r) });
+      });
     }
     // KPI 磁贴统一点击：前三张切曲线模型；锚点磁贴开浮层。
     // 注意：anchor 分支必须 stopPropagation——否则本次点击冒泡到 document 的
@@ -8046,7 +8063,7 @@ const app = createApp({
       evolveConfig, fetchEvolveConfig, saveEvolveConfig,
       evolveFailStreak, evolveRoundsErr,
       evolveRounds, evolveCurveModel, evolveCurveHasData, evolveCurveStat, fetchEvolveRounds, renderEvolveCurve, setEvolveCurveModel, setEvolveRange, evolveCurveNote, evolveExtra,
-      evolvePanelOpen, toggleEvolvePanel, kpiTileClick, evolveKpiTiles, evolveAccentModel,
+      evolvePanelOpen, evolvePanelStyle, toggleEvolvePanel, kpiTileClick, evolveKpiTiles, evolveAccentModel,
       formDrop, formDropStyle, formDropMenu, toggleFormDrop, normSymbols,
       evolveSymbolOptions, evolveSymbolManual, evolveSymbolsLabel, toggleEvolveSymbol, addEvolveSymbolManual,
       exchangeOptions, livePoolOptions, livePoolArr, livePoolManual, livePoolLabel,

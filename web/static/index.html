@@ -5072,6 +5072,130 @@ const app = createApp({
       if (v.bucket <= 1) return base;
       return `${base}；每 ${v.bucket} 轮聚合成一格，点越大该段事件越多`;
     });
+    // ---- 配置/触发页头浮层（2026-09-27 重设计）：菜单按钮点开，点外部收起 ----
+    const evolvePanelOpen = ref(false);
+    function toggleEvolvePanel(force) {
+      evolvePanelOpen.value = (force === true) ? true : !evolvePanelOpen.value;
+    }
+    // KPI 磁贴统一点击：前三张切曲线模型；锚点磁贴开浮层。
+    // ⚠️ anchor 分支必须 stopPropagation：否则本次点击冒泡到 document 的
+    //    onDocClick（此时 evolvePanelOpen 刚变 true）会把浮层立刻关掉，表现为"点了打不开"。
+    function kpiTileClick(t, ev) {
+      if (t.model) { setEvolveCurveModel(t.model); return; }
+      if (t.anchor) { ev.stopPropagation(); toggleEvolvePanel(true); }
+    }
+    // ---- KPI 磁贴数据层：8 磁贴全部由现有数据前端计算，后端零改动 ----
+    // 轮次口径与曲线红点同源（evolveVisual / EVOLVE_STOP_STATUS），杜绝"文本与图不符"。
+    const evolveKpiLoops = computed(() => {
+      const sup = evolveStatus.supervisor || {};
+      void clock.value;                 // 挂秒级时钟：下次训练倒计时每秒刷新
+      const nowSec = Date.now() / 1000;
+      const defs = [
+        { key:'factor_miner', label:'因子挖掘', intKey:'factor_miner_interval' },
+        { key:'strategy_drl', label:'策略 DRL', intKey:'strategy_drl_interval' },
+        { key:'meta_controller', label:'元策略', intKey:'meta_controller_interval' },
+      ];
+      return defs.map(d => {
+        const p = evolveStatus[d.key] || {};
+        let state, glow, valueCls;
+        if (!evolveStatus.running || !evolveStatus.enabled) { state='已停用'; glow='plain'; valueCls=''; }
+        else if (evolveStatus.paused) { state='已暂停'; glow='amber'; valueCls='warn'; }
+        else if (sup.loops_alive && sup.loops_alive[d.key] === false) { state='已停训'; glow='red'; valueCls='neg'; }
+        else { state='运行中'; glow='green'; valueCls='pos'; }
+        const next = Number(p.next_run || 0);
+        const interval = Number(evolveStatus[d.intKey] || 0);
+        let sub = interval ? interval + 's/轮' : '';
+        if (state === '运行中' && next > nowSec) {
+          const left = Math.ceil(next - nowSec);
+          const mm = String(Math.floor(left / 60)).padStart(2, '0');
+          const ss = String(left % 60).padStart(2, '0');
+          sub = `下次 ${mm}:${ss} · ` + sub;
+        } else if (state === '已暂停') sub = '随引擎暂停 · ' + sub;
+        else if (state === '已停用') sub = sub || '引擎未启用';
+        return { key:d.key, label:d.label, value:state, glow, valueCls, sub, model:d.key, dot:glow };
+      });
+    });
+    const evolveKpiTiles = computed(() => {
+      const loops = evolveKpiLoops.value;
+      const sup = evolveStatus.supervisor || {};
+      // ⑤ 空态（spec §5）：连续 ≥3 次状态轮询失败 ⇒ 全部置灰，不拿陈旧数据当实时
+      if (evolveFailStreak.value >= 3) {
+        const blank = { value:'—', glow:'plain', valueCls:'', sub:'状态未知' };
+        return [
+          ...loops.map(l => ({ key:l.key, label:l.label, ...blank, model:l.key })),
+          { key:'keepalive', label:'引擎保活', ...blank },
+          { key:'anchor', label:'锚点健康', ...blank, anchor:true },
+          { key:'rounds', label:'累计轮次', ...blank },
+          { key:'best', label:'最佳 fitness', ...blank },
+          { key:'oos', label:'OOS 通过率', ...blank },
+        ];
+      }
+      // ④ 引擎保活：supervisor 降级判定 + 心跳/自愈
+      let kaVal = '—', kaGlow = 'plain', kaCls = '', kaSub = '状态未知';
+      if (evolveStatus.running && evolveStatus.enabled) {
+        kaVal = sup.degraded ? '降级' : '正常';
+        kaGlow = sup.degraded ? 'red' : 'plain';
+        kaCls = sup.degraded ? 'neg' : '';
+        const hb = sup.heartbeat_age != null ? Math.round(sup.heartbeat_age) : null;
+        const rs = Object.values(sup.restarts_by_loop || {}).reduce((s, n) => s + (Number(n) || 0), 0);
+        kaSub = (hb != null ? `心跳 ${hb}s 前` : '心跳未知') + ` · 自愈 ${rs} 次`;
+      }
+      // ⑤ 锚点健康：复用现有 evolveAnchorIssues（3 - 告警数）
+      const issues = evolveAnchorIssues.value;
+      const anchorTile = {
+        key:'anchor', label:'锚点健康', value:(3 - issues.length) + ' / 3',
+        glow: issues.length ? 'red' : 'green', valueCls:'',
+        sub: issues.length ? (issues[0].label + ' · ' + issues[0].tag) : '三模型基线正常',
+        anchor: true,
+      };
+      // ⑥ 累计轮次：_pipeline_view.rounds_total 三模型合计（status 同源，零额外请求）
+      const roundsSum = EVOLVE_MODELS.reduce(
+        (s, m) => s + (Number(evolveStatus[m.key] && evolveStatus[m.key].rounds_total) || 0), 0);
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+      const curRows = evolveRounds[evolveCurveModel.value] || [];
+      const todayN = curRows.filter(r => r.ts && r.ts * 1000 >= todayStart.getTime()).length;
+      const curLabel = EVOLVE_MODEL_LABELS[evolveCurveModel.value] || evolveCurveModel.value;
+      // ⑦ 最佳 fitness：三模型最大者，数值色按正负
+      let best = null;
+      for (const m of EVOLVE_MODELS) {
+        const f = Number(evolveStatus[m.key] && evolveStatus[m.key].fitness);
+        if (!Number.isFinite(f)) continue;
+        if (!best || f > best.f) {
+          best = { f, name: m.name,
+                   ver: Number(evolveStatus[m.key] && evolveStatus[m.key].deployed_version) || 0 };
+        }
+      }
+      // ⑧ OOS 通过率：近 30 轮，拦截口径 = EVOLVE_STOP_STATUS（与曲线红点同源）
+      const v = evolveVisual(evolveCurveModel.value);
+      const recent = (v.rows || []).slice(-30);
+      const stopN = recent.filter(r => EVOLVE_STOP_STATUS.has(r.status)).length;
+      const passN = recent.length - stopN;
+      const passPct = recent.length ? Math.round(passN / recent.length * 100) : null;
+      return [
+        ...loops,
+        { key:'keepalive', label:'引擎保活', value:kaVal, glow:kaGlow, valueCls:kaCls, sub:kaSub },
+        anchorTile,
+        { key:'rounds', label:'累计轮次', value: roundsSum.toLocaleString('en-US'),
+          glow:'plain', valueCls:'', sub:`今日（${curLabel}）+${todayN}` },
+        { key:'best', label:'最佳 fitness', glow:'plain',
+          value: best ? (best.f >= 0 ? '+' : '') + best.f.toFixed(4) : '—',
+          valueCls: best ? (best.f >= 0 ? 'pos' : 'neg') : '',
+          sub: best ? `${best.name}${best.ver ? ' · v' + best.ver + ' 已部署' : ''}` : '尚无训练记录' },
+        { key:'oos', label:'OOS 通过率', glow:'plain', valueCls:'',
+          value: passPct == null ? '—' : passPct + '%',
+          sub: recent.length ? `${passN} 过 / ${stopN} 拦` : '暂无轮次数据' },
+      ];
+    });
+    // 部署旗舰高亮：deployed_fitness 非空且最高者；均无部署则不高亮
+    const evolveAccentModel = computed(() => {
+      let best = null;
+      for (const m of EVOLVE_MODELS) {
+        const f = evolveStatus[m.key] ? evolveStatus[m.key].deployed_fitness : null;
+        if (f == null || !Number.isFinite(Number(f))) continue;
+        if (!best || Number(f) > best.f) best = { key: m.key, f: Number(f) };
+      }
+      return best ? best.key : '';
+    });
     let evolveCurveChart = null;
     // 数据指纹：轮次未变化时**不重建**图表（轮询 10s 一次，而新轮次约 60s 才落一轮
     // ⇒ 旧实现每次轮询都 notMerge 全量重建，白白打断用户正在进行的拖拽 / 缩放）。
@@ -7857,6 +7981,7 @@ const app = createApp({
       evolveConfig, fetchEvolveConfig, saveEvolveConfig,
       evolveFailStreak, evolveRoundsErr,
       evolveRounds, evolveCurveModel, evolveCurveHasData, evolveCurveStat, fetchEvolveRounds, renderEvolveCurve, setEvolveCurveModel, setEvolveRange, evolveCurveNote, evolveExtra,
+      evolvePanelOpen, toggleEvolvePanel, kpiTileClick, evolveKpiTiles, evolveAccentModel,
       formDrop, formDropStyle, formDropMenu, toggleFormDrop, normSymbols,
       evolveSymbolOptions, evolveSymbolManual, evolveSymbolsLabel, toggleEvolveSymbol, addEvolveSymbolManual,
       exchangeOptions, livePoolOptions, livePoolArr, livePoolManual, livePoolLabel,

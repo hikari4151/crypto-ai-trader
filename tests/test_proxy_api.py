@@ -72,7 +72,89 @@ def test_validate_proxy_url_rejects_bad_scheme():
     assert ok is True
 
 
-# 2026-09-27：内置加速失效根因（三连）
+# 2026-09-27（第二轮）：软件内仍报「网络问题」——根因是 ccxt 异步的代理写法
+# ① ccxt async 的 REST 走 aiohttp，`aiohttp_proxy` 只认 http/https；socks 必须用
+#    `socksProxy`（内部走 aiohttp_socks，且识别 socks5h 远端 DNS）。
+#    误用 aiohttp_proxy → WinError 64 → /api/exchanges/test 502（用户实测）。
+#    两者同时设置 ccxt 会抛 NotSupported('you have set multiple proxies')。
+def test_ccxt_async_proxy_cfg_picks_scheme():
+    from config.settings import ccxt_async_proxy_cfg
+    assert ccxt_async_proxy_cfg("socks5h://127.0.0.1:7891") == {"socksProxy": "socks5h://127.0.0.1:7891"}
+    assert ccxt_async_proxy_cfg("socks5://10.0.0.5:1080") == {"socksProxy": "socks5://10.0.0.5:1080"}
+    assert ccxt_async_proxy_cfg("http://127.0.0.1:7890") == {"aiohttp_proxy": "http://127.0.0.1:7890"}
+    assert ccxt_async_proxy_cfg(None) == {}
+    assert ccxt_async_proxy_cfg("") == {}
+
+
+def test_ccxt_async_proxy_cfg_never_sets_both():
+    """同时设 socksProxy 与 aiohttp_proxy 会被 ccxt 直接拒绝。"""
+    from config.settings import ccxt_async_proxy_cfg
+    for px in ("socks5h://127.0.0.1:7891", "http://127.0.0.1:7890", None):
+        cfg = ccxt_async_proxy_cfg(px)
+        assert not (("socksProxy" in cfg) and ("aiohttp_proxy" in cfg))
+
+
+@pytest.mark.asyncio
+async def test_market_fetch_retries_transport_errors(monkeypatch):
+    """传输层错误（代理瞬时 Host unreachable）也要重试，而非直接 502。
+
+    实测：binance tickers 经节点首连偶发 ProxyError、第 2 次即成功 1.9MB。
+    """
+    import httpx
+    from web.api import market as market_api
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class _Flaky:
+        def __init__(self, fails):
+            self.fails = fails
+            self.calls = 0
+
+        async def get(self, url, params=None):
+            self.calls += 1
+            if self.calls <= self.fails:
+                raise httpx.ConnectError("proxy unreachable")
+            return _Resp()
+
+    flaky = _Flaky(fails=1)
+    monkeypatch.setattr(market_api, "_get_client", lambda: flaky)
+    out = await market_api._fetch_json("https://example.com/x")
+    assert out == {"ok": True}
+    assert flaky.calls == 2, "第 1 次传输失败应重试"
+
+
+@pytest.mark.asyncio
+async def test_market_fetch_error_mentions_exception_type(monkeypatch):
+    """错误体不能是空串（用户看到"数据源不可达: "无法定位）。"""
+    import httpx
+    from fastapi import HTTPException
+    from web.api import market as market_api
+
+    class _Dead:
+        def __init__(self):
+            self.calls = 0
+
+        async def get(self, url, params=None):
+            self.calls += 1
+            raise httpx.ConnectError("")
+
+    dead = _Dead()
+    monkeypatch.setattr(market_api, "_get_client", lambda: dead)
+    with pytest.raises(HTTPException) as ei:
+        await market_api._fetch_json("https://example.com/x")
+    detail = ei.value.detail
+    assert "ConnectError" in detail, f"错误体应含异常类型，实际: {detail!r}"
+    assert dead.calls == 3, "重试耗尽后才失败"
+
+
+# 2026-09-27（第一轮）：内置加速失效根因（三连）
 # ① 本机 DNS 被污染（www.okx.com -> 169.254.0.2），socks5:// 在本地解析域名，
 #    经隧道连到废 IP 必然超时；socks5h:// 由节点侧解析，实测 OKX 1.5s 通。
 # ② hysteria 节点自签证书 + 只写 pin ⇒ 客户端秒退（详见 test_proxy_client）。

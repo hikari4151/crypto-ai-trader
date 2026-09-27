@@ -63,6 +63,25 @@ def normalize_proxy_url(url: str) -> str:
     return url
 
 
+def ccxt_async_proxy_cfg(proxy: Optional[str]) -> dict:
+    """把应用级代理翻译成 ccxt **异步**客户端可接受的配置（只返回其一）。
+
+    ccxt async 的 REST 走 aiohttp：`aiohttp_proxy` 只支持 http/https；socks 必须用
+    `socksProxy`（ccxt 内部改走 aiohttp_socks，并识别 `socks5h://` 保留远端 DNS）。
+    两者同时设置 ccxt 会直接抛 `NotSupported: you have set multiple proxies`。
+
+    2026-09-27 实测：socks 误塞进 aiohttp_proxy → aiohttp 不认 socks scheme →
+    `ClientOSError [WinError 64]` → `/api/exchanges/test` 502（用户看到的
+    「连接失败（网络受限）」）。改为 socksProxy 后 6/6 全通。
+    """
+    if not proxy:
+        return {}
+    scheme = proxy.split("://", 1)[0].lower() if "://" in proxy else ""
+    if scheme.startswith("socks"):
+        return {"socksProxy": proxy}
+    return {"aiohttp_proxy": proxy}
+
+
 class _Utf8YamlSource(YamlConfigSettingsSource):
     """UTF-8 读取 config.yaml：pydantic-settings 默认以系统编码（中文 Windows=GBK）
     文本模式打开，UTF-8 中文注释直接 UnicodeDecodeError（启动即崩）。

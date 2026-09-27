@@ -2,7 +2,7 @@
 import logging
 from typing import Any, Optional
 
-from config.settings import settings
+from config.settings import ccxt_async_proxy_cfg, settings
 
 log = logging.getLogger(__name__)
 
@@ -24,11 +24,9 @@ class ExchangeManager:
 
     def _client_cfg(self, **extra: Any) -> dict[str, Any]:
         cfg: dict[str, Any] = {"enableRateLimit": True, "timeout": self._timeout_ms}
-        if self._proxy:
-            # REST 用 aiohttp_proxy（ccxt python 特有，仅对 REST 生效）。
-            # 注意：不要设置 httpProxy/httpsProxy——它们与 aiohttp_proxy 并存时
-            # 会改变 REST 代理路径且对 WebSocket 无效（WS 代理用 wsProxy）
-            cfg["aiohttp_proxy"] = self._proxy
+        # 代理按协议分流（2026-09-27）：http/https → aiohttp_proxy；socks → socksProxy。
+        # 此前一律塞 aiohttp_proxy，socks 时 aiohttp 直接报 WinError 64 ⇒ 交易所测试 502。
+        cfg.update(ccxt_async_proxy_cfg(self._proxy))
         cfg.update(extra)
         return cfg
 

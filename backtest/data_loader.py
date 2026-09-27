@@ -15,7 +15,7 @@ from typing import Optional
 
 import pandas as pd
 
-from config.settings import settings
+from config.settings import ccxt_async_proxy_cfg, settings
 
 log = logging.getLogger(__name__)
 
@@ -132,8 +132,8 @@ async def _fetch_ccxt(exchange_id: str, symbol: str, timeframe: str,
     import ccxt.async_support as ccxt
     proxy = settings.resolved_proxy or None
     cfg: dict = {"enableRateLimit": True}
-    if proxy:
-        cfg["aiohttp_proxy"] = proxy
+    # socks 必须走 socksProxy（aiohttp_proxy 不认 socks scheme → WinError 64）
+    cfg.update(ccxt_async_proxy_cfg(proxy))
     ex_cls = getattr(ccxt, exchange_id, None)
     if ex_cls is None:
         raise ValueError(f"不支持的交易所: {exchange_id}")

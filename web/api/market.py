@@ -129,10 +129,21 @@ async def _fetch_json(url: str, params: Optional[dict] = None) -> Any:
         except httpx.HTTPStatusError as e:
             raise HTTPException(status_code=502, detail=f"数据源 {e.response.status_code}: {e.response.text[:200]}")
         except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"数据源不可达: {e}")
+            # 传输层错误（代理瞬时 Host unreachable / 连接被重置）同样重试：
+            # 实测 binance tickers 经节点首连偶发失败、第 2 次即成功 1.9MB。
+            # 重试耗尽才 502，且错误体必须带异常类型——原实现 f"...: {e}" 在
+            # 空 message 时输出「数据源不可达: 」，用户完全无法定位。
+            if attempt < 2:
+                wait = 0.5 * (2 ** attempt)
+                log.warning("[market] %s 传输错误(第%d/2次) %s: %s，%.1fs 后重试",
+                            url, attempt + 1, type(e).__name__, e, wait)
+                await asyncio.sleep(wait)
+                continue
+            raise HTTPException(status_code=502,
+                                detail=f"数据源不可达: {type(e).__name__}: {e}")
         except Exception as e:  # noqa: BLE001
             log.exception("[market] fetch 失败 %s", url)
-            raise HTTPException(status_code=502, detail=f"行情获取失败: {e}")
+            raise HTTPException(status_code=502, detail=f"行情获取失败: {type(e).__name__}: {e}")
     # 防御性兜底（正常路径由 raise_for_status 抛错转 502，不可达）
     raise HTTPException(status_code=502, detail=f"数据源重试后仍失败: {url}")
 

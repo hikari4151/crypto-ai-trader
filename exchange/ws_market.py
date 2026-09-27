@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any, Optional
 
-from config.settings import settings
+from config.settings import ccxt_async_proxy_cfg, settings
 from core.bus import EventBus
 from core.events import Event, EventType
 from indicators.vectorized import IncrIndicators
@@ -267,11 +267,17 @@ class MarketDataHub:
             raise ValueError(f"ccxt.pro 不支持交易所: {self.exchange_id}")
         cfg: dict[str, Any] = {"enableRateLimit": True}
         if self._proxy:
-            # REST 代理：aiohttp_proxy（仅对 REST 生效）
-            cfg["aiohttp_proxy"] = self._proxy
+            # REST 代理按协议分流（2026-09-27）：http→aiohttp_proxy、socks→socksProxy。
+            # 此前一律 aiohttp_proxy，socks 时 REST 全挂（load_markets 与回退轮询一起失败）。
+            cfg.update(ccxt_async_proxy_cfg(self._proxy))
             # WebSocket 代理：ccxt.pro 的 watch_* 只认 wsProxy（曾误设
-            # httpProxy/httpsProxy——对 WS 无效，导致"REST 测试通过但行情连不通"）
-            cfg["wsProxy"] = self._proxy
+            # httpProxy/httpsProxy——对 WS 无效，导致"REST 测试通过但行情连不通"）。
+            # ⚠️ 但 ccxt Python 的 WS 底层是 aiohttp 的 ws_connect(proxy=...)，**只支持
+            # http/https**（wsSocksProxy 在 Python 侧无实现）；socks 时设 wsProxy 只会
+            # 让 WS 必挂。故 socks 场景 WS 走直连，由 rest_fallback 轮询兜底
+            # （REST 侧已修好 socksProxy，行情不会断流）。
+            if not self._proxy.lower().startswith("socks"):
+                cfg["wsProxy"] = self._proxy
         ex = getattr(ccxtpro, self.exchange_id)(cfg)
         try:
             await ex.load_markets()

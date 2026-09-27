@@ -2395,6 +2395,7 @@
                 <div class="ps-actions">
                   <button class="mac-btn primary" @click="scanProxy()">{{proxyScanning?'扫描中…':'扫描节点'}}</button>
                   <span class="text-[length:var(--fs-caption)] text-slate-500">{{proxyScanMsg}}</span>
+                  <span v-if="proxySource && !proxyScanning" class="text-[length:var(--fs-caption)] text-slate-400">· 订阅源与节点列表已自动保存，下次打开自动带出</span>
                 </div>
               </div>
             </div>
@@ -3471,7 +3472,52 @@
         <button class="mac-btn" v-if="!evolveStatus.enabled" @click="evolveEnable()" :disabled="!evolveStatus.running" title="启用自动进化"><svg width="13" height="13"><use href="#i-power"/></svg>启用</button>
         <span class="evolve-panel" @click.stop>
           <button class="mac-btn evolve-panel-btn" :class="{open:evolvePanelOpen}" data-form-key="evolvePanel" aria-haspopup="true" :aria-expanded="evolvePanelOpen?'true':'false'" @click.stop="toggleEvolvePanel()"><svg width="13" height="13"><use href="#i-settings"/></svg>配置 / 触发</button>
-          <!-- 浮层本体：Task 3 在此填充 Teleport -->
+          <Teleport to="body">
+            <div v-if="evolvePanelOpen" class="menu-sub evolve-panel-pop" @click.stop>
+              <div class="evolve-pop-head"><span>配置 / 触发</span><span style="flex:1"></span><button class="mac-btn btn-sm" style="padding:2px 9px" @click="toggleEvolvePanel()">收起</button></div>
+              <div class="evolve-pop-group">
+                <div class="mac-label">训练标的池</div>
+              <div class="menu-drop" :class="{open: formDrop==='evolveSymbols'}" style="width:100%">
+                <button class="mac-input" style="width:100%;display:flex;align-items:center;gap:6px" :data-form-key="'evolveSymbols'"
+                  :aria-expanded="formDrop==='evolveSymbols'?'true':'false'" aria-haspopup="true"
+                  @click.stop="toggleFormDrop('evolveSymbols', $event)">
+                  <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{evolveSymbolsLabel}}</span>
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex:none"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+                <Teleport to="body">
+                  <div v-if="formDrop==='evolveSymbols'" ref="formDropMenu" class="menu-sub evolve-symbols-pop" :style="formDropStyle" @click.stop style="min-width:280px;overflow-y:auto">
+                    <div class="text-[length:var(--fs-caption)] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">可选品种（点击勾选/取消）</div>
+                    <span v-for="s in evolveSymbolOptions" :key="s" class="menu-item sub"
+                      :class="(normSymbols(evolveConfig.symbols)).includes(s)?'active':''"
+                      @click="toggleEvolveSymbol(s)" style="padding:5px 12px;justify-content:space-between">
+                      {{s}}<svg v-if="normSymbols(evolveConfig.symbols).includes(s)" width="11" height="11"><use href="#i-check"/></svg>
+                    </span>
+                    <div class="flex gap-1 mt-1" style="border-top:1px solid var(--border);padding:6px 8px 4px">
+                      <input v-model="evolveSymbolManual" class="mac-input" style="flex:1;min-width:0;padding:4px 8px" placeholder="输入其他交易对（如 DOGE/USDT）"
+                        @keydown.enter.prevent="addEvolveSymbolManual()"/>
+                      <button class="mac-btn btn-sm" style="padding:3px 10px" @click="addEvolveSymbolManual()">添加</button>
+                    </div>
+                  </div>
+                </Teleport>
+              </div>
+                <div class="mac-label" style="margin-top:9px">训练时间周期</div>
+                <mac-select v-model="evolveConfig.timeframe" :options="evolveTfOptions" style="width:100%"></mac-select>
+                <button class="mac-btn primary" style="width:100%;margin-top:10px;justify-content:center" @click="saveEvolveConfig()"><svg width="13" height="13"><use href="#i-check"/></svg>保存配置（热更新）</button>
+              </div>
+              <div class="evolve-pop-group">
+                <div class="mac-label">手动触发训练</div>
+                <div class="evolve-trigger-stack">
+                  <button class="mac-btn cyan" @click="triggerFactorMiner()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.factor_miner?.active"><svg width="13" height="13"><use href="#i-dna"/></svg>{{evolveStatus.factor_miner?.active ? '因子挖掘中…' : '立即因子挖掘'}}</button>
+                  <button class="mac-btn purple" @click="triggerStrategyDrl()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.strategy_drl?.active"><svg width="13" height="13"><use href="#i-brain"/></svg>{{evolveStatus.strategy_drl?.active ? '策略训练中…' : '立即策略训练'}}</button>
+                  <button class="mac-btn purple" @click="triggerMetaController()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.meta_controller?.active"><svg width="13" height="13"><use href="#i-robot"/></svg>{{evolveStatus.meta_controller?.active ? '元策略训练中…' : '训练元策略'}}</button>
+                </div>
+              </div>
+              <div class="evolve-pop-group" v-if="evolveAnchorIssues.length" :style="{borderColor: evolveAnchorLocked ? 'rgba(245,71,94,.45)' : 'rgba(245,158,10,.3)'}">
+                <div class="mac-label">回退基线（锚点）</div>
+          <div v-for="a in evolveAnchorIssues" :key="a.model" class="evolve-anchor-item"><div class="flex items-center gap-2"><span class="pill" :class="a.tone">{{a.tag}}</span><strong class="text-[length:var(--fs-caption)]">{{a.label}}</strong></div><div class="text-[length:var(--fs-caption)] text-slate-500">fitness={{a.fitness}} · 来源 {{a.source}} · 未接受 {{a.streak}}/{{a.stallRounds}} 轮</div><div class="text-[length:var(--fs-caption)]" style="color:var(--muted)">{{a.reason}}</div><button v-if="a.resettable" class="mac-btn text-[length:var(--fs-caption)] btn-sm" style="padding:3px 10px" @click="resetEvolveAnchor(a.model)">重置锚点</button></div>
+              </div>
+            </div>
+          </Teleport>
         </span>
         <button class="mac-btn" disabled title="进化日志导出尚未提供接口"><svg width="13" height="13"><use href="#i-download"/></svg>导出进化日志</button>
         <button class="mac-btn" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button>
@@ -3494,56 +3540,6 @@
       <!-- 训练配置：标的池 / 周期，可热更新写入 config.yaml -->
       <div class="evolve-layout">
       <div class="evolve-side-column">
-      <div class="mac-window evolve-side-config">
-        <div class="mac-titlebar">
-          
-          <span class="mac-title"><svg><use href="#i-settings"/></svg>训练配置</span>
-          <button class="mac-btn text-[length:var(--fs-caption)] ml-auto btn-sm" @click="saveEvolveConfig()" style="padding:3px 10px">保存配置</button>
-        </div>
-        <div class="mac-body">
-          <div class="grid grid-cols-2 lg:grid-cols-3 gap-3">
-            <div class="col-span-2">
-              <div class="mac-label">训练标的池</div>
-              <div class="menu-drop" :class="{open: formDrop==='evolveSymbols'}" style="width:100%">
-                <button class="mac-input" style="width:100%;display:flex;align-items:center;gap:6px" :data-form-key="'evolveSymbols'"
-                  :aria-expanded="formDrop==='evolveSymbols'?'true':'false'" aria-haspopup="true"
-                  @click.stop="toggleFormDrop('evolveSymbols', $event)">
-                  <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{evolveSymbolsLabel}}</span>
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex:none"><path d="M6 9l6 6 6-6"/></svg>
-                </button>
-                <Teleport to="body">
-                  <div v-if="formDrop==='evolveSymbols'" ref="formDropMenu" class="menu-sub" :style="formDropStyle" @click.stop style="min-width:280px;overflow-y:auto">
-                    <div class="text-[length:var(--fs-caption)] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">可选品种（点击勾选/取消）</div>
-                    <span v-for="s in evolveSymbolOptions" :key="s" class="menu-item sub"
-                      :class="(normSymbols(evolveConfig.symbols)).includes(s)?'active':''"
-                      @click="toggleEvolveSymbol(s)" style="padding:5px 12px;justify-content:space-between">
-                      {{s}}<svg v-if="normSymbols(evolveConfig.symbols).includes(s)" width="11" height="11"><use href="#i-check"/></svg>
-                    </span>
-                    <div class="flex gap-1 mt-1" style="border-top:1px solid var(--border);padding:6px 8px 4px">
-                      <input v-model="evolveSymbolManual" class="mac-input" style="flex:1;min-width:0;padding:4px 8px" placeholder="输入其他交易对（如 DOGE/USDT）"
-                        @keydown.enter.prevent="addEvolveSymbolManual()"/>
-                      <button class="mac-btn btn-sm" style="padding:3px 10px" @click="addEvolveSymbolManual()">添加</button>
-                    </div>
-                  </div>
-                </Teleport>
-              </div>
-            </div>
-            <div>
-              <div class="mac-label">训练时间周期</div>
-              <mac-select v-model="evolveConfig.timeframe" :options="evolveTfOptions" style="width:100%"></mac-select>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="evolveAnchorIssues.length" class="mac-window evolve-side-anchor" :style="{borderColor: evolveAnchorLocked ? 'rgba(245,71,94,.45)' : 'rgba(245,158,10,.3)'}">
-        <div class="mac-titlebar"><span class="mac-title"><svg :style="{color:evolveAnchorLocked ? 'var(--red)':'var(--orange)'}"><use href="#i-alert"/></svg>回退基线（锚点）</span></div>
-        <div class="mac-body">
-          <div v-for="a in evolveAnchorIssues" :key="a.model" class="evolve-anchor-item"><div class="flex items-center gap-2"><span class="pill" :class="a.tone">{{a.tag}}</span><strong class="text-[length:var(--fs-caption)]">{{a.label}}</strong></div><div class="text-[length:var(--fs-caption)] text-slate-500">fitness={{a.fitness}} · 来源 {{a.source}} · 未接受 {{a.streak}}/{{a.stallRounds}} 轮</div><div class="text-[length:var(--fs-caption)]" style="color:var(--muted)">{{a.reason}}</div><button v-if="a.resettable" class="mac-btn text-[length:var(--fs-caption)] btn-sm" style="padding:3px 10px" @click="resetEvolveAnchor(a.model)">重置锚点</button></div>
-        </div>
-      </div>
-      <div class="mac-window evolve-side-trigger"><div class="mac-titlebar"><span class="mac-title"><svg><use href="#i-play"/></svg>手动触发训练</span></div><div class="mac-body evolve-trigger-stack"><button class="mac-btn cyan" @click="triggerFactorMiner()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.factor_miner?.active"><svg width="13" height="13"><use href="#i-dna"/></svg>{{evolveStatus.factor_miner?.active ? '因子挖掘中…' : '立即因子挖掘'}}</button><button class="mac-btn purple" @click="triggerStrategyDrl()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.strategy_drl?.active"><svg width="13" height="13"><use href="#i-brain"/></svg>{{evolveStatus.strategy_drl?.active ? '策略训练中…' : '立即策略训练'}}</button><button class="mac-btn purple" @click="triggerMetaController()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.meta_controller?.active"><svg width="13" height="13"><use href="#i-robot"/></svg>{{evolveStatus.meta_controller?.active ? '元策略训练中…' : '训练元策略'}}</button></div></div>
-
       </div>
 
       <div class="evolve-main-column">
@@ -4318,9 +4314,12 @@ const app = createApp({
     const proxyUrl = ref('');
     const proxyResolved = ref('');
     const proxyAuto = ref(true);
-    const proxySource = ref('');
-    const proxyNodes = ref([]);
-    const proxyScanMsg = ref('');
+    // 网络加速配置自动沿用（2026-09-27）：订阅源文本 + 上次扫描出的节点列表持久化，
+    // 重启/刷新后无需重新粘贴订阅链接即可看到节点并直接选。localStorage 取失败一律回退默认值。
+    const _lsJson = (key, dflt) => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : dflt; } catch(e){ return dflt; } };
+    const proxySource = ref((() => { try { return localStorage.getItem('cat_proxy_source') || ''; } catch(e){ return ''; } })());
+    const proxyNodes = ref(_lsJson('cat_proxy_nodes', []));
+    const proxyScanMsg = ref(proxyNodes.value.length ? ('已恢复上次扫描结果（共 ' + proxyNodes.value.length + ' 个）') : '');
     const proxyScanning = ref(false);
     const hyClient = ref('checking');  // checking/installed/not_installed/downloading/error
 
@@ -5881,6 +5880,11 @@ const app = createApp({
         const r = await api('/proxy/nodes/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source: proxySource.value})});
         proxyNodes.value = r.nodes || [];
         proxyScanMsg.value = r.count ? '共 ' + r.count + ' 个节点' : (r.error || '未解析到节点');
+        // 扫描成功即持久化（沿用到下次打开）；写失败不影响功能
+        try {
+          localStorage.setItem('cat_proxy_source', proxySource.value);
+          localStorage.setItem('cat_proxy_nodes', JSON.stringify(proxyNodes.value));
+        } catch(e){}
       } catch(e){ proxyScanMsg.value = '扫描失败 ' + e; }
       finally { proxyScanning.value = false; }
     }
@@ -7971,6 +7975,9 @@ const app = createApp({
       onDocClick = (e) => {
         if (openMenu.value && !(e.target.closest && e.target.closest('.menu-drop'))) openMenu.value = '';
         if (formDrop.value && !(e.target.closest && e.target.closest('.menu-drop'))) formDrop.value = '';
+        // 配置/触发页头浮层：点外部收起（浮层本体与内部标的池二级菜单都算"内部"）
+        if (evolvePanelOpen.value && e.target.closest &&
+            !e.target.closest('.evolve-panel, .evolve-panel-pop, .evolve-symbols-pop')) evolvePanelOpen.value = false;
       };
       document.addEventListener('click', onDocClick);
       // P1-11 全局 resize：debounce 150ms 遍历全部图表实例（isDisposed 守卫）

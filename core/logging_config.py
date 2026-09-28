@@ -38,6 +38,24 @@ class RedactFilter(logging.Filter):
         return True
 
 
+class ResilientRotatingFileHandler(RotatingFileHandler):
+    """容错轮转文件 handler：轮转失败（多实例并发持锁日志文件）静默降级。
+
+    2026-09-28 真实启动实测：第二个实例起服务时 trader.log 被并行实例持锁，
+    基类 doRollover 抛 PermissionError → logging 的 emit 捕获后调用 handleError，
+    把整段 traceback 打到 stderr，污染启动日志——用户无法分辨是启动失败还是
+    仅"日志轮转没轮成"。这里吞掉轮转异常只记录一次 warning 并降级为继续写
+    当前文件（宁可日志文件不轮转，也不能让日志系统干扰启动/可观测性）。
+    """
+
+    def doRollover(self) -> None:  # noqa: N802（基类同名）
+        try:
+            super().doRollover()
+        except OSError as e:  # PermissionError(32) 文件被占 / FileNotFoundError
+            logging.getLogger("logging_config").warning(
+                "日志轮转失败，继续写当前文件（可能多实例并存）: %s", e)
+
+
 # 交易事件 logger 前缀：下单/成交/撤单/对账/风控熔断/保护止损（GAP-07 日志分级）
 _TRADING_LOGGER_PREFIXES = ("engine.",)
 _TRADING_LOGGER_EXACT = ("core.bus",)
@@ -71,7 +89,7 @@ def uvicorn_log_config(log_dir: str = "./data/logs") -> dict:
         "handlers": {
             "console": {"class": "logging.StreamHandler", "formatter": "default"},
             "server_file": {
-                "class": "logging.handlers.RotatingFileHandler",
+                "class": "core.logging_config.ResilientRotatingFileHandler",
                 "filename": server_log, "maxBytes": 5 * 1024 * 1024, "backupCount": 5,
                 "encoding": "utf-8", "formatter": "default",
             },
@@ -102,7 +120,7 @@ def setup_logging(level: str = "INFO", log_dir: str = "./data/logs") -> None:
             root.removeHandler(h)
             h.close()
 
-    handler = RotatingFileHandler(
+    handler = ResilientRotatingFileHandler(
         Path(log_dir) / "trader.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
     handler.setFormatter(fmt)
@@ -110,7 +128,7 @@ def setup_logging(level: str = "INFO", log_dir: str = "./data/logs") -> None:
     console.setFormatter(fmt)
     # 交易事件单独成文件（GAP-07④）：运维只需盯 trading.log 就能看到
     # 下单/成交/撤单/对账差异/风控熔断，不被 HTTP 轮询日志淹没
-    trading_handler = RotatingFileHandler(
+    trading_handler = ResilientRotatingFileHandler(
         Path(log_dir) / "trading.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
     trading_handler.setFormatter(fmt)

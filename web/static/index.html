@@ -1390,6 +1390,18 @@
   .evolve-legend-dash{display:inline-block;width:12px;height:0;border-top:1.5px dashed var(--orange);opacity:.75}
   .evolve-model-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
   .evolve-model-card{min-width:0;margin:0!important;padding:12px;display:flex;flex-direction:column;gap:6px;background:color-mix(in srgb,var(--bg-2) 35%,transparent)}
+  /* 分区标签（模型状态 · 部署与成果）：计划原漏了 .lab 规则，本任务补录
+     （Task 4 执行期发现类已插入模板但无样式）。限定 .evolve-page 作用域。 */
+  .evolve-page .lab{display:flex;align-items:center;gap:7px;font-size:var(--fs-caption);
+    color:var(--muted);margin-top:2px}
+  .evolve-page .lab::after{content:"";flex:1;height:1px;background:var(--border)}
+  .evolve-model-card.evolve-accent{border-color:rgba(125,59,237,.5);
+    box-shadow:0 0 0 1px rgba(125,59,237,.22), 0 0 16px rgba(125,59,237,.14)}
+  .evolve-lab-modes{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+  .evolve-lab-modes .pill{cursor:pointer;font-family:inherit;padding:2px 9px}
+  .evolve-lab-modes .pill:hover{border-color:var(--border2);color:var(--text)}
+  .evolve-lab-modes .pill.on{background:var(--accent-soft);color:var(--accent-text);border-color:transparent}
+  .evolve-lab .mac-titlebar{flex-wrap:wrap}
   .evolve-model-head,.evolve-model-meta,.evolve-fitness{display:flex;align-items:center;gap:7px;min-width:0}
   .evolve-model-head{justify-content:space-between}
   .evolve-model-head > span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1418,13 +1430,13 @@
   .evolve-lab input,.evolve-lab select{min-width:0}
   .evolve-lab table{min-width:560px}
   @media (max-width:1100px){
+    .evolve-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
     .evolve-model-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
   }
   @media (max-width:700px){
+    .evolve-kpis{grid-template-columns:1fr}
     .evolve-model-grid{grid-template-columns:1fr}
-    .evolve-page-head{flex-direction:row;align-items:flex-start}
-    .evolve-page-head .page-actions{flex:none}
-    /* 大标题移除后不再需要把按钮缩成纯图标来配平，恢复文字标签 */
+    .evolve-page-head .page-actions{flex:none;flex-wrap:wrap;justify-content:flex-end}
     .evolve-page-head .page-actions .mac-btn{padding:5px 11px}
     .evolve-page-head .page-actions .mac-btn svg{margin-right:4px}
     .evolve-curve-foot .ml-auto{margin-left:0!important}
@@ -3558,7 +3570,9 @@
                各模型独有字段（候选/部署、跨标 OOS、锚点不一致、子策略）用 v-if 保留，
                数据里没有这些字段的模型自然不渲染，功能零丢失。 -->
           <div class="evolve-model-grid">
-          <div v-for="m in EVOLVE_MODELS" :key="m.key" class="mac-card mb-3 evolve-model-card" :style="{borderColor:m.border}">
+          <div v-for="m in EVOLVE_MODELS" :key="m.key" class="mac-card mb-3 evolve-model-card"
+            :class="m.key===evolveAccentModel ? 'evolve-accent' : ''"
+            :style="{borderColor: m.key===evolveAccentModel ? 'rgba(125,59,237,.5)' : m.border}">
             <div class="flex items-center gap-2 mb-2 evolve-model-head">
               <span class="text-[length:var(--fs-footnote)] font-semibold"><svg width="14" height="14" :style="{color:m.color,verticalAlign:'-2px',marginRight:'3px'}"><use :href="m.icon"/></svg>{{m.name}} <span class="pill" :style="{background:m.pillBg,color:m.pillColor,marginLeft:'2px'}">PPO</span></span>
               <span v-if="evolveModel(m.key).symbol" class="text-[length:var(--fs-caption)] px-2 py-0.5 rounded" :style="{background:m.chipBg,color:m.chipColor}">{{evolveModel(m.key).symbol}}</span>
@@ -3602,7 +3616,7 @@
             <div v-if="m.key==='factor_miner'" class="mt-1 grid gap-1 text-[length:var(--fs-caption)] text-slate-400">
               <!-- 错误横幅独立展示：空权重/部署异常/回测失败时与「已部署」并存，不被后者隐藏（Task 3 修复轮结论） -->
               <div v-if="evolveModel(m.key).combo_deploy_error || evolveModel(m.key).combo_backtest_error" class="evolve-model-warning">
-                <span>⚠</span>
+                <svg width="11" height="11" style="flex:none;margin-top:2px"><use href="#i-alert"/></svg>
                 <span>{{evolveModel(m.key).combo_deploy_error || evolveModel(m.key).combo_backtest_error}}</span>
               </div>
               <div v-if="evolveModel(m.key).combo_strategy" class="flex items-center gap-2 flex-wrap">
@@ -3672,7 +3686,13 @@
         <div class="mac-titlebar">
           
           <span class="mac-title"><svg><use href="#i-dna"/></svg>手动 DRL 实验台</span>
-          <button class="mac-btn text-[length:var(--fs-caption)] ml-auto btn-sm" @click="drlPanelOpen=!drlPanelOpen" style="padding:3px 10px">{{drlPanelOpen?'收起':'展开'}}</button>
+          <span class="evolve-lab-modes">
+            <button type="button" class="pill" :class="drlMode==='factor'?'on':''" @click="drlMode='factor';drlPanelOpen=true">RL 因子挖掘</button>
+            <button type="button" class="pill" :class="drlMode==='strategy'?'on':''" @click="drlMode='strategy';drlPanelOpen=true">策略训练</button>
+            <button type="button" class="pill" :class="drlMode==='models'?'on':''" @click="drlMode='models';drlPanelOpen=true">模型库</button>
+            <button type="button" class="pill" :class="drlMode==='oos'?'on':''" @click="drlMode='oos';drlPanelOpen=true">跨行情 OOS</button>
+          </span>
+          <button class="mac-btn text-[length:var(--fs-caption)] btn-sm" @click="drlPanelOpen=!drlPanelOpen" style="padding:3px 10px">{{drlPanelOpen?'收起':'展开'}}</button>
         </div>
         <div v-show="drlPanelOpen">
         <div class="mac-body">

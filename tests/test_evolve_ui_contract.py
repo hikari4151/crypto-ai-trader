@@ -162,3 +162,29 @@ def test_chart_height_260():
 
 def test_model_section_label_present():
     assert "模型状态 · 部署与成果" in _evolve_view()
+
+
+def test_accent_binding_on_model_card():
+    v = _evolve_view()
+    assert "evolveAccentModel" in v
+    assert "evolve-accent" in v
+
+
+def test_no_text_warning_glyph_in_view():
+    assert "⚠" not in _evolve_view()
+
+
+def test_lab_mode_pills_clickable():
+    v = _evolve_view()
+    assert 'class="evolve-lab-modes"' in v
+    assert "drlMode='factor';drlPanelOpen=true" in v
+
+
+def test_kpi_breakpoints():
+    assert ".evolve-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}" in HTML
+    assert ".evolve-kpis{grid-template-columns:1fr}" in HTML
+
+
+def test_section_label_styled():
+    # Task 4 执行期发现：计划定义了 .lab 类却没给样式，本任务补录
+    assert ".evolve-page .lab::after" in HTML

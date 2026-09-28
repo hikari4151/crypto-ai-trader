@@ -1,8 +1,9 @@
 {
   "paths": {
-    "backtest_engine_3000": 64.18520000443095,
-    "backtest_fast_3000": 63.377499995112885,
-    "compute_latest_3000": 30.70070000103442,
+    "backtest_engine_3000": 62.84270000469405,
+    "backtest_fast_3000": 64.43399999989197,
+    "compute_latest_3000": 30.785099996137433,
+    "evolve_batch_10x5000": 1092.3782999961986,
     "kline_engine_100": 0.0034999975468963385
   },
   "tolerance": 4.0,

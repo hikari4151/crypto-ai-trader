@@ -64,6 +64,27 @@ def measure() -> dict[str, float]:
               99.0 + i * 0.1, 100.0 + i * 0.1, 1000.0] for i in range(3000)]
     out["compute_latest_3000"] = _median_ms(lambda: compute_latest(ohlcv))
 
+    # 2b) evolve 批量候选评估（combo 策略 × 候选数——历史上"每根全量重算"热点
+    #     被向量化优化后不再是灾难，但批量乘上候选数后仍需防回归）
+    def bench_batch():
+        from strategies.factor_signal import FactorSignalStrategy
+        df2 = generate_demo(n=5000)
+        t0 = time.perf_counter()
+        for i in range(10):
+            st = FactorSignalStrategy()
+            st.update_params({"factor": "combo", "mode": "trend",
+                              "buy_threshold": 0.4 + i * 0.01,
+                              "combo_spec": '{"vol_ratio": 0.8, "mom_10": 0.8, "rsi_14": %.1f}'
+                                            % (0.2 + i * 0.03),
+                              "size_pct": 0.3})
+            cfg2 = BacktestConfig(start_cash=10000.0, fee_rate=0.001, slippage=0.0005,
+                                  strategy_name="factor_signal",
+                                  strategy_params={"spec": st})
+            run_backtest(df2, cfg2)
+        return (time.perf_counter() - t0) * 1000.0
+
+    out["evolve_batch_10x5000"] = bench_batch()
+
     # 3) 实时 K 线处理（引擎 _on_candle 热路径，100 根）
     def bench_klines():
         import asyncio

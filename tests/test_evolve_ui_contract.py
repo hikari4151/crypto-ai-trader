@@ -188,3 +188,20 @@ def test_kpi_breakpoints():
 def test_section_label_styled():
     # Task 4 执行期发现：计划定义了 .lab 类却没给样式，本任务补录
     assert ".evolve-page .lab::after" in HTML
+
+
+def test_doc_click_closes_panel_full_selector():
+    # 三类内部选择器必须完整，防回归时被掏空
+    start = HTML.find("onDocClick = (e)")
+    end = HTML.find("document.addEventListener('click', onDocClick)")
+    body = HTML[start:end]
+    assert "'.evolve-panel, .evolve-panel-pop, .evolve-symbols-pop'" in body
+
+
+def test_final_review_fixes_present():
+    assert ".evolve-panel-btn{border-color:rgba(125,59,237,.5)" in HTML
+    assert "evolve-pop-anchor" in HTML
+    assert "toggleEvolvePanel(true, 'anchor')" in HTML
+    assert "_evolvePanelOffEsc" in HTML and "'Escape'" in HTML
+    assert ".evolve-kpi-dot.purple" in HTML
+    assert ".evolve-kpi.clickable" in HTML

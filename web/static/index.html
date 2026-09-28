@@ -1341,11 +1341,12 @@
   /* ---- KPI 磁贴：等行高 + 三行文字各就各位（nowrap+ellipsis），任何文案不得换行挤压 ---- */
   .evolve-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;grid-auto-rows:1fr}
   .evolve-kpi{display:flex;flex-direction:column;justify-content:space-between;gap:4px;min-width:0;
-    padding:11px 12px;border-radius:8px;text-align:left;cursor:pointer;font-family:inherit;
+    padding:11px 12px;border-radius:8px;text-align:left;font-family:inherit;
     background:var(--bg-1);border:1px solid var(--border);overflow:hidden;
     transition:border-color .15s, box-shadow .15s}
   .evolve-kpi:hover{border-color:var(--border2)}
   .evolve-kpi:focus-visible{outline:2px solid var(--accent-text);outline-offset:1px}
+  .evolve-kpi.clickable{cursor:pointer}
   .evolve-kpi.on-green{border-color:rgba(13,204,130,.45);box-shadow:0 0 14px rgba(13,204,130,.12);
     background:linear-gradient(180deg,rgba(13,204,130,.06),var(--bg-1))}
   .evolve-kpi.on-amber{border-color:rgba(245,158,10,.45);box-shadow:0 0 14px rgba(245,158,10,.10);
@@ -1358,6 +1359,7 @@
   .evolve-kpi-dot.green{background:var(--green)}
   .evolve-kpi-dot.amber{background:var(--orange)}
   .evolve-kpi-dot.red{background:var(--red)}
+  .evolve-kpi-dot.purple{background:var(--purple)}
   .evolve-kpi-val{font-size:16px;font-weight:650;color:var(--text);font-variant-numeric:tabular-nums;
     letter-spacing:-.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:none;line-height:1.25}
   .evolve-kpi-val.pos{color:var(--green)}
@@ -1367,14 +1369,14 @@
     text-overflow:ellipsis;flex:none}
   /* ---- 配置/触发页头按钮与浮层 ---- */
   .evolve-panel{position:relative;display:inline-flex}
+  .evolve-panel-btn{border-color:rgba(125,59,237,.5);color:color-mix(in srgb,var(--accent) 70%,#fff)}
   .evolve-panel-btn.open{border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)}
   .evolve-panel-pop{width:min(330px,92vw);gap:0;padding:11px 12px}
   .evolve-pop-head{display:flex;align-items:center;gap:6px;font-size:var(--fs-body);font-weight:650;
     color:var(--text);padding-bottom:8px}
   .evolve-pop-group{padding:9px 0;border-top:1px solid var(--border);min-width:0}
-  .evolve-pop-group:first-of-type{border-top:0;padding-top:2px}
+  .evolve-pop-head + .evolve-pop-group{border-top:0;padding-top:2px}
   .evolve-pop-group .mac-label{margin-bottom:6px}
-  .evolve-panel .mac-body{min-width:0}
   /* 外壳：右对齐 + 收窄；内部可并排放多个 .mac-seg（模型切换 / 范围切换）。
      ⚠️ 若把 .mac-seg 直接放成块级 flex，它会撑满整行并把按钮拉开 —— 必须由外壳约束宽度。 */
   .evolve-curve-tabs{margin:0 0 10px auto;width:max-content;max-width:100%;overflow:auto;display:flex;gap:8px;align-items:center}
@@ -1418,7 +1420,7 @@
   .evolve-full-input span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .evolve-full-input svg{flex:none}
   .evolve-anchor-item{display:grid;gap:5px;padding:9px 0;border-top:1px solid var(--border);min-width:0}
-  .evolve-anchor-item:first-of-type{border-top:0}
+  .mac-label + .evolve-anchor-item{border-top:0}
   .evolve-anchor-item button{justify-self:start}
   .evolve-trigger-stack{display:grid;gap:8px}
   .evolve-trigger-stack .mac-btn{width:100%;justify-content:center}
@@ -3497,7 +3499,7 @@
                   <button class="mac-btn purple" @click="triggerMetaController()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.meta_controller?.active"><svg width="13" height="13"><use href="#i-robot"/></svg>{{evolveStatus.meta_controller?.active ? '元策略训练中…' : '训练元策略'}}</button>
                 </div>
               </div>
-              <div class="evolve-pop-group" v-if="evolveAnchorIssues.length" :style="{borderColor: evolveAnchorLocked ? 'rgba(245,71,94,.45)' : 'rgba(245,158,10,.3)'}">
+              <div class="evolve-pop-group evolve-pop-anchor" v-if="evolveAnchorIssues.length" :style="{borderColor: evolveAnchorLocked ? 'rgba(245,71,94,.45)' : 'rgba(245,158,10,.3)'}">
                 <div class="mac-label">回退基线（锚点）</div>
           <div v-for="a in evolveAnchorIssues" :key="a.model" class="evolve-anchor-item"><div class="flex items-center gap-2"><span class="pill" :class="a.tone">{{a.tag}}</span><strong class="text-[length:var(--fs-caption)]">{{a.label}}</strong></div><div class="text-[length:var(--fs-caption)] text-slate-500">fitness={{a.fitness}} · 来源 {{a.source}} · 未接受 {{a.streak}}/{{a.stallRounds}} 轮</div><div class="text-[length:var(--fs-caption)]" style="color:var(--muted)">{{a.reason}}</div><button v-if="a.resettable" class="mac-btn text-[length:var(--fs-caption)] btn-sm" style="padding:3px 10px" @click="resetEvolveAnchor(a.model)">重置锚点</button></div>
               </div>
@@ -3510,7 +3512,7 @@
       <!-- KPI 磁贴 ×8（状态光晕）：前三张点按切换曲线模型，锚点磁贴点按开浮层 -->
       <div class="evolve-kpis">
         <button v-for="t in evolveKpiTiles" :key="t.key" type="button" class="evolve-kpi"
-          :class="t.glow!=='plain' ? 'on-'+t.glow : ''"
+          :class="[t.glow!=='plain' ? 'on-'+t.glow : '', (t.model || t.anchor) ? 'clickable' : '']"
           @click="kpiTileClick(t, $event)"
           :title="t.model ? ('切换曲线到'+t.label) : (t.anchor ? '打开配置/触发查看锚点详情' : '')">
           <span class="evolve-kpi-lab"><i v-if="t.dot" class="evolve-kpi-dot" :class="t.dot"></i>{{t.label}}</span>
@@ -5106,7 +5108,7 @@ const app = createApp({
       if (!v.n) return '红点 = 拦截 / 回退轮次';
       // 与图上点数**同源**（同一个 evolveVisual）：不再各算一套，
       // 从根上杜绝"文本 N 与图上点数不符"（旧实现就是这么错的）。
-      return `共 ${v.total} 轮 · 拦截 ${v.stopRounds} · 挑战者 ${v.chalRounds}`;
+      return `共 ${v.total} 轮 | 拦截 ${v.stopRounds} | 挑战者 ${v.chalRounds}`;
     });
     // 事件点被聚合时给一句说明，避免用户以为"点变少了 = 轮次变少了"
     const evolveCurveNote = computed(()=>{
@@ -5124,10 +5126,22 @@ const app = createApp({
       const w = Math.min(330, innerWidth * 0.92);
       return Math.round(Math.max(8, Math.min(r.right - w, innerWidth - 8 - w))) + 'px';
     };
-    function toggleEvolvePanel(force) {
-      const next = force === true ? true : !evolvePanelOpen.value;
+    let _evolveEscHandler = null;
+    function _evolvePanelOffEsc() {
+      if (_evolveEscHandler) { document.removeEventListener('keydown', _evolveEscHandler); _evolveEscHandler = null; }
+    }
+    function _evolvePanelOnEsc() {
+      _evolvePanelOffEsc();
+      _evolveEscHandler = (e) => { if (e.key === 'Escape' && evolvePanelOpen.value) { evolvePanelOpen.value = false; _evolvePanelOffEsc(); } };
+      document.addEventListener('keydown', _evolveEscHandler);
+    }
+    function toggleEvolvePanel(force, target) {
+      const next = force === undefined ? !evolvePanelOpen.value : !!force;
+      // 开/关状态转换都清空标的池二级菜单（formDrop），避免浮层关闭后残留旧坐标
+      formDrop.value = '';
       evolvePanelOpen.value = next;
-      if (!next) return;
+      if (!next) { _evolvePanelOffEsc(); return; }
+      _evolvePanelOnEsc();
       const btn = document.querySelector('[data-form-key="evolvePanel"]');
       if (!btn) return;
       const r = btn.getBoundingClientRect();
@@ -5135,14 +5149,20 @@ const app = createApp({
       nextTick(() => {
         const el = document.querySelector('.evolve-panel-pop');
         if (el && evolvePanelOpen.value) evolvePanelStyle.value = Object.assign(popPos(el, r), { left: _evolvePanelLeft(r) });
+        // KPI 锚点磁贴：开浮层后滚动到锚点段（nextTick 保证该段已渲染，offsetTop 才有效）
+        if (target === 'anchor') {
+          const pop = document.querySelector('.evolve-panel-pop');
+          const grp = pop && pop.querySelector('.evolve-pop-anchor');
+          if (grp) pop.scrollTop = Math.max(0, grp.offsetTop - 8);
+        }
       });
     }
-    // KPI 磁贴统一点击：前三张切曲线模型；锚点磁贴开浮层。
+    // KPI 磁贴统一点击：前三张切曲线模型；锚点磁贴开浮层并滚动到锚点段。
     // 注意：anchor 分支必须 stopPropagation——否则本次点击冒泡到 document 的
     //    onDocClick（此时 evolvePanelOpen 刚变 true）会把浮层立刻关掉，表现为"点了打不开"。
     function kpiTileClick(t, ev) {
       if (t.model) { setEvolveCurveModel(t.model); return; }
-      if (t.anchor) { ev.stopPropagation(); toggleEvolvePanel(true); }
+      if (t.anchor) { ev.stopPropagation(); toggleEvolvePanel(true, 'anchor'); }
     }
     // ---- KPI 磁贴数据层：8 磁贴全部由现有数据前端计算，后端零改动 ----
     // 轮次口径与曲线红点同源（evolveVisual / EVOLVE_STOP_STATUS），杜绝"文本与图不符"。
@@ -5233,7 +5253,8 @@ const app = createApp({
       const passPct = recent.length ? Math.round(passN / recent.length * 100) : null;
       return [
         ...loops,
-        { key:'keepalive', label:'引擎保活', value:kaVal, glow:kaGlow, valueCls:kaCls, sub:kaSub },
+        { key:'keepalive', label:'引擎保活', value:kaVal, glow:kaGlow, valueCls:kaCls, sub:kaSub,
+          dot: (kaGlow === 'red' ? 'red' : 'purple') },
         anchorTile,
         { key:'rounds', label:'累计轮次', value: roundsSum.toLocaleString('en-US'),
           glow:'plain', valueCls:'', sub:`今日（${curLabel}）+${todayN}` },
@@ -7980,7 +8001,7 @@ const app = createApp({
         if (formDrop.value && !(e.target.closest && e.target.closest('.menu-drop'))) formDrop.value = '';
         // 配置/触发页头浮层：点外部收起（浮层本体与内部标的池二级菜单都算"内部"）
         if (evolvePanelOpen.value && e.target.closest &&
-            !e.target.closest('.evolve-panel, .evolve-panel-pop, .evolve-symbols-pop')) evolvePanelOpen.value = false;
+            !e.target.closest('.evolve-panel, .evolve-panel-pop, .evolve-symbols-pop')) toggleEvolvePanel(false);
       };
       document.addEventListener('click', onDocClick);
       // P1-11 全局 resize：debounce 150ms 遍历全部图表实例（isDisposed 守卫）

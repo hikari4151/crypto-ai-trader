@@ -1382,7 +1382,10 @@
   .evolve-curve-tabs{margin:0 0 10px auto;width:max-content;max-width:100%;overflow:auto;display:flex;gap:8px;align-items:center}
   .evolve-curve-stats{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;
     font-size:var(--fs-caption);color:var(--muted)}
-  .evolve-chart-wrap{min-width:0}
+  /* 图表画布质感（方案稿 v4）：紫渐变底 + 虚线描边，事件点仍走底部双轨（用户裁定） */
+  .evolve-chart-wrap{min-width:0;position:relative;
+    background:linear-gradient(180deg,rgba(125,59,237,.05),transparent);
+    border:1px dashed var(--border);border-radius:var(--r-md)}
   .evolve-curve-foot{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:var(--fs-caption)}
   .evolve-curve-foot span{display:inline-flex;align-items:center;gap:5px}
   .evolve-legend-dot{display:inline-block;width:7px;height:7px;border-radius:50%}

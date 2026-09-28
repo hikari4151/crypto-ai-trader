@@ -205,3 +205,9 @@ def test_final_review_fixes_present():
     assert "_evolvePanelOffEsc" in HTML and "'Escape'" in HTML
     assert ".evolve-kpi-dot.purple" in HTML
     assert ".evolve-kpi.clickable" in HTML
+
+
+def test_curve_canvas_texture():
+    # 用户验收反馈：图表画布按方案稿 v4 补紫渐变底+虚线描边；事件点保留底部双轨
+    assert "linear-gradient(180deg,rgba(125,59,237,.05)" in HTML
+    assert "border:1px dashed var(--border);border-radius:var(--r-md)" in HTML

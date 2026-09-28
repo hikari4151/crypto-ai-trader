@@ -51,7 +51,11 @@ def _wait_listening(port: int, timeout: float | None = None) -> bool:
 
 
 def _launch(bin_path: str, cfg_file: Path, scheme: str, port: int) -> tuple[bool, str, str]:
-    """拉起 hysteria 客户端进程并登记（start_local_proxy / rearm 共用）。"""
+    """拉起 hysteria 客户端进程并登记（start_local_proxy / rearm 共用）。
+
+    端口未就绪 = 客户端启动即退（配置不可达/证书失败/端口被占）→ **必须如实报失败**：
+    曾只打 warning 仍返回 ok=True，程序重启时日志说"已恢复本地加速客户端"、实际
+    hysteria 进程已死/端口无人监听，加速静默失效（2026-09-28 用户实测）。"""
     try:
         proc = subprocess.Popen([bin_path, "client", "-c", str(cfg_file)],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -63,8 +67,18 @@ def _launch(bin_path: str, cfg_file: Path, scheme: str, port: int) -> tuple[bool
     # socks5:// 会在本地解析域名再送进隧道，交易所请求必然超时。
     url = f"socks5h://{_LOCAL_SOCKS_HOST}:{int(port)}"
     if not _wait_listening(int(port)):
-        log.warning("[proxy-client] 客户端进程已拉起，但 %ds 内端口 %d 未就绪（可能启动即退，"
-                    "查看 bin/hy2_client_%d.json 对应节点是否可用）", _READY_TIMEOUT, port, port)
+        # 客户端未就绪：终止进程防僵尸占端口，从登记表摘除，如实返回失败。
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+        _procs.pop(scheme, None)
+        _used_ports.discard(int(port))
+        log.warning("[proxy-client] 客户端 %s 启动即退/端口 %d 未就绪（配置不可达？"
+                    "证书失败？端口被占？），查看 %s 对应节点是否可用",
+                    scheme, port, cfg_file.name)
+        return False, url, (f"客户端未就绪：端口 {port} 在 {_READY_TIMEOUT}s 内无人监听"
+                            f"（节点不可达/证书失败/端口被占），查看 {cfg_file.name}")
     log.info("[proxy-client] %s 客户端已启动: %s", scheme, url)
     return True, url, ""
 
@@ -109,9 +123,24 @@ def hy2_client_config(node: dict, listen_port: int) -> dict:
 
 
 def _pick_port() -> int:
+    """选一个空闲端口：跳过本进程已用 + 已被实际监听的端口。
+
+    曾只查 _used_ports（模块级内存集合）：重启后集合是空的，会选中上个会话
+    遗留孤儿 hysteria 仍占着的端口 → 新进程 bind 失败即退，但 _wait_listening
+    探测到孤儿还在监听 → 返回 ok=True，界面显示已切换、实际流量走的是旧节点的
+    孤儿进程（2026-09-28 用户实测"自动开启没做好"的成因之一）。"""
     port = 7891
-    while port in _used_ports and port < 7990:
-        port += 1
+    while port < 7990:
+        if port in _used_ports:
+            port += 1
+            continue
+        # 真实探测：端口已被（孤儿）进程监听则跳过
+        try:
+            with socket.create_connection((_LOCAL_SOCKS_HOST, int(port)), timeout=0.15):
+                port += 1  # 已被占用
+                continue
+        except OSError:
+            return port
     return port
 
 
@@ -167,6 +196,16 @@ def rearm_local_proxy() -> tuple[bool, str, str]:
         return False, "", (f"已保存本地加速配置，但未找到 hysteria 二进制，请到「网络加速」"
                            f"重新下载（放入 {BIN_DIR}）")
     with _lock:
+        # 端口复用：目标 socks 端口已有人监听（上个会话遗留的孤儿客户端仍在/配置
+        # 对应客户端还活着）→ 直接复用，不重复拉起。重复拉起会 bind 失败即退
+        # （端口被占），反而造成"新进程死了、日志却说已恢复"（2026-09-28 实测）。
+        try:
+            with socket.create_connection((_LOCAL_SOCKS_HOST, int(port)), timeout=0.3):
+                log.info("[proxy-client] 端口 %s 已有监听，复用现成客户端（无需重启）",
+                         _LOCAL_SOCKS_HOST + ":" + str(port))
+                return True, f"socks5h://{_LOCAL_SOCKS_HOST}:{int(port)}", ""
+        except OSError:
+            pass  # 端口无人监听 → 正常拉起
         _stop_locked()
         return _launch(bin_path, cfg_file, "hysteria2", port)
 

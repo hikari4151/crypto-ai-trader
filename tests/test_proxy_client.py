@@ -122,6 +122,11 @@ def test_start_local_proxy_success(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(proxy_client.subprocess, "Popen", lambda *a, **k: _Proc())
+    # 端口探测 mock 为空闲：_pick_port 会真实探测孤儿进程占位，真实环境 7891 可能
+    # 已被占（测试断言写死 7891），必须 mock 空闲才能稳定落在 7891。
+    def _free_port(*a, **k):
+        raise OSError("free")
+    monkeypatch.setattr(proxy_client.socket, "create_connection", _free_port)
     ok, url, err = proxy_client.start_local_proxy(_hy_node())
     assert ok is True
     # 2026-09-27：必须是 socks5h（远端 DNS）。本机 DNS 已被污染
@@ -137,6 +142,30 @@ def test_start_local_proxy_missing_bin(monkeypatch, tmp_path):
     ok, url, err = proxy_client.start_local_proxy(_hy_node())
     assert ok is False
     assert "hysteria" in err and "github.com/apernet/hysteria/releases" in err
+
+
+def test_pick_port_skips_occupied_ports(monkeypatch):
+    """端口选择必须跳过已被监听的端口（含上个会话遗留的孤儿进程占位）。
+
+    曾只查进程内 _used_ports：重启后集合为空 → 选中孤儿占着的端口 → 新客户端
+    bind 失败即退，界面却显示已切换（流量实走旧节点孤儿进程）。"""
+    occupied = {7891: True, 7892: False, 7893: False}
+
+    def _fake_conn(*a, **k):
+        class _Sock:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+            def close(self):
+                pass
+        if occupied.get(a[0][1]):
+            return _Sock()
+        raise OSError("free")
+
+    monkeypatch.setattr(proxy_client, "_used_ports", set())
+    monkeypatch.setattr(proxy_client.socket, "create_connection", _fake_conn)
+    assert proxy_client._pick_port() == 7892, "7891 被孤儿占用时必须跳过"
 
 
 def test_select_node_direct_url():
@@ -256,4 +285,103 @@ def test_ca_bundle_refreshes_only_when_stale(monkeypatch, tmp_path):
     p2 = proxy_client.ca_bundle_path()
     assert p1 == p2 == str(cache)
     assert calls["n"] == 1  # 第二次命中缓存，未再导出
+
+
+# ---- 2026-09-28：rearm 假成功根治（用户实测"启动后自动开启网络加速没做好"）----
+# 背景：_launch 曾对"客户端进程拉起但端口未就绪/启动即退"只打 warning 仍返回
+# ok=True。于是程序重启时 rearm 报"已恢复本地加速客户端"，但 hysteria 进程
+# 实际已死/端口无人监听 → 界面显示已配置、实际流量在直连，加速静默失效。
+# 这些测试锁死：客户端未真正就绪必须如实返回 ok=False。
+
+
+def test_launch_reports_failure_when_port_never_listens(monkeypatch, tmp_path):
+    """端口在超时内未就绪（客户端启动即退）→ _launch 必须 ok=False，不得假成功。"""
+    spawned = []
+    class _FakeProc:
+        def __init__(self):
+            spawned.append(self)
+            self._terminated = False
+        def terminate(self):
+            self._terminated = True
+        def poll(self):
+            return 0 if self._terminated else None
+
+    fake = tmp_path / "hysteria-windows-amd64.exe"
+    fake.write_bytes(b"x")
+    cfg = tmp_path / "hy2_client_9999.json"
+    cfg.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(proxy_client, "find_hysteria_bin", lambda: str(fake))
+    monkeypatch.setattr(proxy_client.subprocess, "Popen",
+                        lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(proxy_client, "_wait_listening", lambda port, timeout=None: False)
+
+    ok, url, err = proxy_client._launch(str(fake), cfg, "hysteria2", 9999)
+    assert ok is False, f"端口未就绪必须报失败，实际 ok={ok} url={url}"
+    assert err, "必须带具体错误信息（此前静默假成功：日志说已恢复、实际无加速）"
+    assert "9999" in err or "监听" in err or "就绪" in err or "启动" in err
+    assert spawned and spawned[0]._terminated, "客户端未就绪时应终止已起的进程，防僵尸占用端口"
+
+
+def test_rearm_returns_false_when_client_dies_after_spawn(monkeypatch, tmp_path):
+    """rearm 链路：客户端拉起后端口无监听 → 如实返回 (False, url, err)，
+    供 web/main.py 报"恢复失败"，前端才能显示未生效（不得静默假成功）。"""
+    fake = tmp_path / "hysteria-windows-amd64.exe"
+    fake.write_bytes(b"x")
+    (tmp_path / "hy2_client_7891.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(proxy_client, "BIN_DIR", tmp_path)
+    monkeypatch.setattr(proxy_client, "find_hysteria_bin", lambda: str(fake))
+    monkeypatch.setattr(proxy_client.subprocess, "Popen",
+                        lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(proxy_client, "_wait_listening", lambda port, timeout=None: False)
+    monkeypatch.setattr(_settings(), "proxy_url", "socks5h://127.0.0.1:7891")
+    # 模拟端口空闲（无孤儿在监听）→ 才会真正走 _launch 拉起路径，测到"拉起后死"
+    def _free_port(*a, **k):
+        raise OSError("port free")
+    monkeypatch.setattr(proxy_client.socket, "create_connection", _free_port)
+
+    ok, url, err = proxy_client.rearm_local_proxy()
+    assert ok is False, "客户端未就绪 rearm 必须报失败（此前假成功导致加速静默失效）"
+    assert err, "必须带具体错误"
+
+
+def test_rearm_reuses_alive_port_without_respawning(monkeypatch, tmp_path):
+    """端口已有人监听（上个会话的孤儿客户端还在）→ rearm 复用，不重复拉起新进程。
+
+    重复拉起会因端口被占而 bind 失败即退，反而制造"新进程死了、日志却说已恢复"
+    的假象（2026-09-28 实测：两个孤儿 hysteria 进程同时存活、旧配置顶掉新配置）。"""
+    spawned = {"n": 0}
+    class _FakeProc:
+        def terminate(self):
+            pass
+        def poll(self):
+            return None
+
+    fake = tmp_path / "hysteria-windows-amd64.exe"
+    fake.write_bytes(b"x")
+    (tmp_path / "hy2_client_7891.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(proxy_client, "BIN_DIR", tmp_path)
+    monkeypatch.setattr(proxy_client, "find_hysteria_bin", lambda: str(fake))
+    monkeypatch.setattr(proxy_client.subprocess, "Popen",
+                        lambda *a, **k: spawned.__setitem__("n", spawned["n"] + 1) or _FakeProc())
+    monkeypatch.setattr(proxy_client, "_wait_listening", lambda port, timeout=None: True)
+    monkeypatch.setattr(_settings(), "proxy_url", "socks5h://127.0.0.1:7891")
+    # 模拟端口 7891 已有孤儿在监听
+    def _occupied(*a, **k):
+        class _Sock:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+            def close(self):
+                pass
+        return _Sock()
+    monkeypatch.setattr(proxy_client.socket, "create_connection", _occupied)
+
+    ok, url, err = proxy_client.rearm_local_proxy()
+    assert ok is True
+    assert spawned["n"] == 0, "端口已监听时应复用，不得重复拉起新进程"
+    assert url == "socks5h://127.0.0.1:7891"
 

@@ -82,6 +82,9 @@ jobs:
       - name: 2a) 编码红线门禁（F1/F2：UTF-8 无 BOM / .bat 纯 ASCII）
         run: python scripts/check_encoding.py
 
+      - name: 2b) grep 型红线门禁（B8 禁交易所 symbol 手工拆分、E2 禁 CDN、E7 !important 基线）
+        run: python scripts/check_redlines.py
+
       - name: 3) 前端构建链（只读校验 + 清单漂移门禁）
         run: python scripts/build_frontend.py --check-only --require-manifest
 
@@ -147,8 +150,11 @@ jobs:
       - name: 2a) 编码红线门禁（F1/F2：UTF-8 无 BOM / .bat 纯 ASCII）
         run: python scripts/check_encoding.py
 
-      - name: 3) 前端构建链
-        run: python scripts/build_frontend.py --check-only
+      - name: 2b) grep 型红线门禁（B8 禁交易所 symbol 手工拆分、E2 禁 CDN、E7 !important 基线）
+        run: python scripts/check_redlines.py
+
+      - name: 3) 前端构建链（只读校验 + 清单漂移门禁）
+        run: python scripts/build_frontend.py --check-only --require-manifest
 
       - name: 4) 全包字节码编译
         run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl exchange factors net tests run.py

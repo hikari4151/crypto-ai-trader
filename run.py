@@ -91,11 +91,12 @@ def cmd_portfolio(args: argparse.Namespace) -> None:
               f"夏普={pm['sharpe']:.2f} 回撤={pm['max_drawdown']:.4f}")
         print(f"  基准买入持有={report['benchmark']['buy_hold_ret']:.4f}")
         print("\n标的收益相关性:")
+        from exchange.symbols import base_currency  # B8：统一走 parse_symbol，禁 split("/")
         corr = report["correlation"]
-        print("        " + " ".join(f"{s.split('/')[0]:>9}" for s in symbols))
+        print("        " + " ".join(f"{base_currency(s):>9}" for s in symbols))
         for s1 in symbols:
             row = " ".join(f"{corr[s1].get(s2, 0):>9.3f}" for s2 in symbols)
-            print(f"{s1.split('/')[0]:>7}  {row}")
+            print(f"{base_currency(s1):>7}  {row}")
         out = Path("data") / "portfolio_result.json"
         out.parent.mkdir(exist_ok=True)
         out.write_text(_json.dumps(report, ensure_ascii=False, default=str))

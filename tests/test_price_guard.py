@@ -14,6 +14,8 @@ from core.events import Event, EventType
 from engine.trading_engine import TradingEngine
 from strategies.base import Signal, Strategy
 
+from tests.conftest import make_async
+
 
 class AlwaysBuy(Strategy):
     name = "always_buy_guard"
@@ -30,6 +32,11 @@ def _make_engine() -> tuple[TradingEngine, Database]:
     db = Database("sqlite+aiosqlite:///:memory:")
     bus = EventBus()
     eng = TradingEngine(db, bus)
+    # 本地构造快照，不连网（math_ev 门隔离：联网会拉真实行情负期望误拦买入）
+    eng._current_snapshot = make_async({
+        "symbol": "BTC/USDT", "timeframe": "1h",
+        "candles": [[1700000000000, 50000.0, 50000.0, 50000.0, 50000.0, 100.0]],
+        "closes": [50000.0], "indicators": {"close": 50000.0, "vol_ratio": 1.0}})
     eng.running = True
     eng.paper = True
     eng.symbol = "BTC/USDT"

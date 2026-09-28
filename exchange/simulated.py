@@ -83,9 +83,12 @@ class SimulatedExchange:
         return dict(rec)
 
     def _split(self, symbol: str) -> tuple[str, str]:
-        base, sep, _ = symbol.partition(":")
-        parts = [p for p in base.split("/") if p]
-        return (parts[0] if parts else symbol), (parts[1] if len(parts) > 1 else "USDT")
+        # B8：统一走 parse_symbol（禁自写 split——曾因 `BTC/USDT:USDT` 拆出 "USDT:USDT"
+        # 报价段，余额/下单全部静默失效）。parse_symbol 返回 (base, quote, settle)，
+        # 这里保留历史 quote 兜底 "USDT" 语义（非统一代码如 "BTC" → ("BTC", "USDT")）。
+        from exchange.symbols import parse_symbol
+        base, quote, _settle = parse_symbol(symbol)
+        return base, quote or "USDT"
 
     # ---------- ccxt 兼容接口 ----------
     async def create_order(self, symbol: str, otype: str, side: str, amount: float,

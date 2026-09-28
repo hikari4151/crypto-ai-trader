@@ -23,6 +23,18 @@ from exchange.paper import PaperAccount
 from strategies.base import Signal, Strategy
 
 
+from tests.conftest import make_async
+
+
+
+def _snap_build(candle_close, open_px=None):
+    """测试用快照构造（本地，不连网）；math_ev 门经 _current_snapshot 取数需隔离。"""
+    close = candle_close if open_px is None else open_px
+    return {"symbol": "BTC/USDT", "timeframe": "1h",
+            "candles": [[1000, close, close, close, close, 100.0]],
+            "closes": [close], "indicators": {"close": close, "vol_ratio": 1.0}}
+
+
 def _sqlite_db() -> Database:
     db = Database("sqlite+aiosqlite:///:memory:")
     return db
@@ -104,6 +116,7 @@ async def test_trade_on_open_defers_to_next_open():
     await db.init()
     bus = CollectingBus()
     eng = TradingEngine(db, bus)
+    eng._current_snapshot = make_async(_snap_build(50000.0))  # 隔离 math_ev 门联网
     eng.running = True
     eng.paper = True
     eng.trade_on_open = True
@@ -141,6 +154,7 @@ async def test_trade_on_open_off_immediate():
     await db.init()
     bus = CollectingBus()
     eng = TradingEngine(db, bus)
+    eng._current_snapshot = make_async(_snap_build(50000.0))  # 隔离 math_ev 门联网
     eng.running = True
     eng.paper = True
     eng.trade_on_open = False

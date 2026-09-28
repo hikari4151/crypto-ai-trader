@@ -9,6 +9,19 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
+def make_async(value):
+    """把普通值包成 async 函数（测试隔离用：mock _current_snapshot 等数据源）。
+
+    背景（2026-09-28）：引擎的 math_ev 门在 hub 为空时经 _current_snapshot 联网拉
+    真实行情算期望收益；单元测试构造的 mock K 线若没接到 _current_snapshot，
+    会被实时行情负期望误拦（11 个交易路径测试曾因此全红）。各测试装配引擎后应：
+        eng._current_snapshot = make_async(<本地快照>)
+    """
+    async def _fn(*a, **k):
+        return value
+    return _fn
+
 # 脚本式验证文件（顶层直接执行并 sys.exit），仅手动运行，禁止被 pytest 收集
 collect_ignore = ["test_ai_guards.py"]
 

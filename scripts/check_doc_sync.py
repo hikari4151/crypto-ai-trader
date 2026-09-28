@@ -153,6 +153,12 @@ def check() -> list[str]:
     va_src = VERIFY_ALL.read_text(encoding="utf-8")
     if "check_encoding.py" not in va_src:
         issues.append("verify_all.py 未注册 check_encoding.py（F1/F2 编码红线门禁）")
+
+    # grep 型红线门禁（check_redlines.py：B8/E2/E7）同样必须注册在 ci.yml 与 verify_all。
+    if "check_redlines.py" not in ci:
+        issues.append("ci.yml 未注册 check_redlines.py（B8/E2/E7 grep 型红线门禁）")
+    if "check_redlines.py" not in va_src:
+        issues.append("verify_all.py 未注册 check_redlines.py（B8/E2/E7 grep 型红线门禁）")
     return issues
 
 

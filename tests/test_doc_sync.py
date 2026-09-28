@@ -50,7 +50,8 @@ def test_check_ok_when_all_consistent(tmp_path, monkeypatch):
     ci.write_text(
         f"run: python -m compileall -q {dirs} tests run.py\n"
         f"run: python -m ruff check {dirs} tests\n"
-        "run: python scripts/check_encoding.py\n",
+        "run: python scripts/check_encoding.py\n"
+        "run: python scripts/check_redlines.py\n",
         encoding="utf-8")
     redev = tmp_path / "REDEV_GUIDE.md"
     redev.write_text(f"compileall -q {dirs} run.py", encoding="utf-8")
@@ -136,10 +137,13 @@ def test_main_returns_one_on_drift(monkeypatch, capsys):
     assert "[docsync] FAILED" in capsys.readouterr().out
 
 def test_encoding_gate_registered_in_contract():
-    """F1/F2 编码门禁必须同时注册在 ci.yml 与 verify_all（A5 教训：脚本写了≠接进链）。"""
-    issues = [i for i in cs.check() if "check_encoding" in i]
-    assert issues == [], f"编码门禁未注册: {issues}"
+    """F1/F2 编码门禁与 grep 型红线门禁必须同时注册在 ci.yml 与 verify_all
+    （A5 教训：脚本写了≠接进链）。"""
+    issues = [i for i in cs.check() if "check_encoding" in i or "check_redlines" in i]
+    assert issues == [], f"门禁未注册: {issues}"
     ci = cs.CI.read_text(encoding="utf-8")
     va = cs.VERIFY_ALL.read_text(encoding="utf-8")
     assert "check_encoding.py" in ci
     assert "check_encoding.py" in va
+    assert "check_redlines.py" in ci
+    assert "check_redlines.py" in va

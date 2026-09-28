@@ -60,7 +60,7 @@
 | `strategies/` | 6 内置：dual_ma / grid / price_action / rl_adaptive / factor_signal / meta_controller + `_DYNAMIC` 动态策略表（AI 设计/迭代/DRL/仓库）；动态优先于内置 |
 | `factors/` | `library.py` 因子库、`mining.py`（AI 挖掘 + dynamic_composite 滚动 IC 合成）、`analysis.py` 安检门（IC/ICIR/换手）、`model_factor.py`（监督 MLP + walk-forward）、`cross_section.py`（横截面因子，品种<5 出 warning） |
 | `ai/` | `client.py`（重试/限速/JSON 稳健解析/扩容封顶 8000）、`prompts.py`（动态 schema 注入）、`schemas.py`（JSON Schema，`additionalProperties:false`）、`validator.py`（NaN/Inf/bool 拦截）、`market_analyst.py`、`optimizer.py`、`strategy_designer.py`、`iteration.py`、`evals.py`（提示词 golden set 评测） |
-| `drl/` | `agent.py`（PPO：熵正则符号/GAE 分段）、`env.py`、`factor_env.py`（无前视 z-score + fitness 缓存）、`factor_miner.py`、`model_zoo.py`（版本化模型仓库，≤10 版，flat 兼容）、`evolve_engine.py`（三条训练管线：factor_miner/strategy_drl/meta_controller + 回退/OOS 门/跨标门/增量门）、`pine_export.py`（Actor→Pine v5） |
+| `drl/` | `agent.py`（PPO：熵正则符号/GAE 分段）、`env.py`、`factor_env.py`（无前视 z-score + fitness 缓存）、`factor_miner.py`、`model_zoo.py`（版本化模型仓库，≤10 版，flat 兼容）、`evolve_engine.py`（两条训练管线：factor_miner/strategy_drl + 回退/OOS 门/跨标门/增量门；元策略训练已于 2026-09-28 移除）、`pine_export.py`（Actor→Pine v5） |
 | `backtest/` | `_matching.py` **撮合单一事实来源**、`engine.py` 事件驱动、`fast_engine.py` 向量化、`metrics.py`（含 benchmark 键）、`overfit.py`（walk-forward + CSCV PBO）、`cost_scan.py`、`portfolio.py`（组合回测，研究层）、`binance_history.py`（data.binance.vision 月度 zip）、`kline_store.py`（K 线本地库） |
 | `engine/` | `trading_engine.py`（调度中枢，三把锁）、`risk.py`（检查带顶层兜底 + cooldown/人工解除）、`order_manager.py`（限价单生命周期/对账）、`portfolio.py`、`protective_stop.py`（服务端兜底止损） |
 | `net/` | `proxy_client.py`（代理探测/网络加速客户端：hysteria 检测与下载、本地 SOCKS5 启动、节点选择）、`proxy_nodes.py`（订阅解析：Clash YAML/ss/vmess/trojan/ssr/hysteria2/tuic/wireguard + Quantumult X/Loon + base64 自动解码、节点可达性探测）。**无 `__init__.py`**（与 `config/` 同为隐式命名空间包） |
@@ -98,7 +98,7 @@
 | B5 | 吞掉 risk.check 异常 | `risk.check()` 顶层 try/except 兜底 + bus 连续失败计数 → `/api/health` 的 `degraded` | 静默异常曾使下单/止损全停、"看起来在跑实则已死" | `test_risk_guards.py`；health 含 degraded/bus 键 |
 | B6 | 限价单"轮询超时即弃管" | 超时撤单 + open-order 对账 + 迟到成交回灌 + `filled` 口径（open+None=0） | 弃管=漏计成交、重复开仓 | `test_reconcile.py`、`test_limit_order.py` |
 | B7 | USDT 双计 | USDT 只进 cash，不进 positions_value（web/api/portfolio 与 engine/portfolio 同口径） | 双计使 equity 恒虚高一份 | `test_optimizations_p0p1p2.py` |
-| B8 | `symbol.split("/")` | 统一走 `exchange/symbols.py`（`parse_symbol`） | split 会拆坏合约符号 `BTC/USDT:USDT` | grep 全项目 `split("/")` |
+| B8 | `symbol.split("/")` | 统一走 `exchange/symbols.py`（`parse_symbol`） | split 会拆坏合约符号 `BTC/USDT:USDT` | `python scripts/check_redlines.py`（B8 全项目扫描；`exchange/symbols.py` 本体与 URL 解析豁免表见脚本） |
 | B9 | 保护止损语义 | `protective_stop.py` 三条硬约束：仅 live 生效 / 主动卖出前必撤（`release`）/ 失败只降级告警+SYSTEM 事件 | 破坏任何一条=交易所挂孤单或失去兜底 | `test_protective_stop.py` |
 | B10 | 引擎 start 失败留半初始化 | 失败路径 `exchange.close()` + 状态复位 + 降级告警 | 半初始化残留=后续行为不可预测 | `test_engine_*` |
 | B11 | scheduler 在 `_strategy_lock` 内做网络调用 | 锁内只快照参数，AI 调用在锁外（worker + threadsafe 应用） | 锁内网络调用曾阻塞全部 K 线处理 | 代码审查 trading_engine.py |
@@ -144,7 +144,7 @@
 | E4 | 图表复用已 dispose 实例 | 统一 `initChart()`（isDisposed 检查）+ 全局 resize 防抖 + onUnmounted 清理 | 切页后空白、内存泄漏 | 切页往返后图表正常 |
 | E5 | 轮询无治理 | `loadAll` 按视图门控 + `visibilitychange` 后台暂停 + onUnmounted 清 interval | 无治理=后台标签持续打接口 | 后台标签 DevTools 零请求 |
 | E6 | 裸 `toFixed/Date.parse` | 统一 fmt/pct 守卫（null 安全） | 一个 null 字段渲染异常可中断整个 Vue 渲染 | OKX 切换等边界数据下页面不冻结 |
-| E7 | 删 `!important` 补丁 / <11px 字号 | 主题切换走 `:root[data-theme=light]` token 覆盖；最小字号 11px | Phase 3 UI 重构红线（Apple HIG） | `grep '!important' index.html` ≈ 0 |
+| E7 | 删 `!important` 补丁 / <11px 字号 | 主题切换走 `:root[data-theme=light]` token 覆盖；最小字号 11px；`!important` 只允许带注释说明的有意豁免（2026-09-28 基线 12 处：压 inline padding/毛玻璃退场/evolve 页对齐/media 适配） | Phase 3 UI 重构红线（Apple HIG）；无注释堆补丁=样式失控 | `python scripts/check_redlines.py`（E7：!important 行数 ≤ 基线，超了必须更新基线并说明理由） |
 | E8 | 事件监听不清理 | onUnmounted 清理全部 interval/listener | 单页应用反复挂载泄漏 | 长会话内存 |
 
 ### F. 配置与环境（Windows 专项）
@@ -169,6 +169,7 @@
 | G3 | 入库生成物与源文件不一致 | `web/static/build_manifest.json` 的 `sha256`/`size_bytes` 必须**同按 LF 归一化字节**计算，且与当前 `index.html` 一致（CI 门禁 `--check-only --require-manifest`） | ① 原实现 sha256 用 `read_text`（LF）、size_bytes 用 `stat()`（工作区字节，本仓库 CRLF），两字段不同基底；② **不可**改成"统一用工作区原始字节"——`core.autocrlf=true` 且无 `.gitattributes` 会让该 sha256 变成平台相关，跨平台 CI 必挂；③ 该 sha256 前 8 位是 `web/api/ops.py` 暴露给运维的"部署版本"，清单过期=运维看到假版本号 | `tests/test_build_frontend.py`（含 CRLF/LF 同值用例）；`python scripts/build_frontend.py --check-only --require-manifest` |
 | G4 | 只靠本地 pre-commit 兜质量 | CI 是唯一不可绕过的防线；`.git/hooks/` 不入库，`--no-verify` 可绕过 | 2026-09-27 修的两处 ruff 红灯（F401/W292）正是已入库状态——本地钩子当时没拦住 | `python scripts/install_git_hooks.py --check`（exit 0=已装且与当前 verify_all 内容一致；新克隆仓库默认无钩子会报未安装）；CI 全绿；`git log` 无带红灯的提交 |
 | G5 | 测试改写受版本控制的产物 | 测试不得以写模式改动入库文件（如 `build_manifest.json`）；必须写完还原，或把输出指到 tmp | 曾有测试直接写模式跑 `build_frontend.py`，把入库清单改成"与未提交的 index.html 一致"，等于**本地自动掩盖清单漂移**——CI 才炸 | `grep build_frontend tests/`；跑完 `git status` 看入库产物是否被动过 |
+| G6 | 测试依赖实时网络行情 | 装配引擎的测试必须隔离数据源：`eng._current_snapshot = make_async(<本地快照>)`（helper 在 `tests/conftest.py`）；hub 为空/空 dict 时 `_current_snapshot` 会联网拉真实行情 | 引擎 math_ev 门（`signal_math_ev_gate=True` 默认开）在 hub 空时联网算期望收益；行情负期望会把"买入应成交"的测试全拦（2026-09-28 实测 11 个交易路径测试因此全红，且是**行情/网络侥幸性**——之前全绿只是当时 EV≥0）。单元测试的确定性被实时行情破坏 | 测试装配引擎处必须出现 `make_async`；`git grep -n "TradingEngine(" tests/` 的文件逐一核对；跑一次 `pytest` 全绿不算完——它可能只是行情侥幸 |
 
 ## 4. 验证链（提交前必跑，顺序执行）
 

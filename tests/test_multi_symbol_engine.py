@@ -15,6 +15,8 @@ from core.events import Event, EventType
 from engine.trading_engine import TradingEngine
 from strategies.base import Signal, Strategy
 
+from tests.conftest import make_async
+
 
 class _StubStrategy(Strategy):
     """可控策略：on_candle 返回预设信号（按名称区分实例）。"""
@@ -67,6 +69,13 @@ class _Hub:
 
 async def _make_engine(symbols, db, monkeypatch=None, tmp_path=None):
     eng = TradingEngine(db, EventBus())
+    # 本地构造快照，不连网（_Hub.snapshot 返回 {} 是 falsy → _current_snapshot 回落网络
+    # 拉真实行情，math_ev 门负期望时误拦买入）
+    eng._current_snapshot = make_async({"symbol": symbols[0], "timeframe": "1h",
+                                        "candles": [[1000, 50000.0, 50000.0, 50000.0,
+                                                     50000.0, 100]],
+                                        "closes": [50000.0],
+                                        "indicators": {"close": 50000.0, "vol_ratio": 1.0}})
     if tmp_path is not None:
         eng.monitor.repoint_log_dir(str(tmp_path / "alerts"))  # 测试隔离：不污染生产 alerts.log
     eng.symbols = list(symbols)

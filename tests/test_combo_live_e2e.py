@@ -14,6 +14,8 @@ from core.events import Event, EventType
 from engine.trading_engine import TradingEngine
 from sqlalchemy import select
 
+from tests.conftest import make_async
+
 
 def _combo_strategy():
     """进化产出的组合因子策略（与训练部署同参数形态，因子库真实可重建）。"""
@@ -45,6 +47,8 @@ def _snap(idx: int, price: float, vol: float = 100.0, up: bool = True):
 async def _engine_in_simulated(db):
     bus = EventBus()
     eng = TradingEngine(db, bus)
+    # 本地构造快照，不连网（math_ev 门隔离）
+    eng._current_snapshot = make_async(_snap(1, 50000.0))
     from exchange.simulated import SimulatedExchange
     from engine.order_manager import OrderManager
     from engine.portfolio import PortfolioManager

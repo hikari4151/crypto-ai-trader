@@ -16,6 +16,8 @@ from core.bus import EventBus
 from core.database import Database, Trade
 from core.events import Event, EventType
 from engine.trading_engine import TradingEngine
+from tests.conftest import make_async
+
 from strategies.base import Signal, Strategy
 from sqlalchemy import select
 
@@ -41,6 +43,8 @@ class BuyOnce(Strategy):
             self._entry = price
 
 
+
+
 def _snap(i, price):
     return {"symbol": "BTC/USDT", "timeframe": "1h",
             "candles": [[1700000000000 + i * 3600000, price, price, price, price, 100.0]],
@@ -51,6 +55,9 @@ def _snap(i, price):
 async def _engine_in_simulated(db):
     bus = EventBus()
     eng = TradingEngine(db, bus)
+    # 本地构造快照，不连网（math_ev 门经 _current_snapshot 取数；联网会拉真实行情，
+    # 行情负期望时误拦买入——见 test_ai_scheduler 同款隔离）
+    eng._current_snapshot = make_async(_snap(1, 50000.0))
     # 手动装配 simulated 启动后的状态（等价 _start_locked simulated 分支）
     from exchange.simulated import SimulatedExchange
     eng.exchange = SimulatedExchange(start_cash=10000.0, fee_rate=0.001, slippage=0.0005)
@@ -86,6 +93,8 @@ async def test_simulated_mode_goes_through_place_live():
     await db.init()
     bus = EventBus()
     eng = TradingEngine(db, bus)
+    # 本地构造快照，不连网（math_ev 门隔离）
+    eng._current_snapshot = make_async(_snap(1, 50000.0))
     from exchange.simulated import SimulatedExchange
     eng.exchange = SimulatedExchange(start_cash=10000.0, fee_rate=0.001, slippage=0.0005)
     eng.exchange.set_last_price(50000.0)
@@ -131,6 +140,8 @@ async def test_paper_mode_still_goes_through_place_paper():
     await db.init()
     bus = EventBus()
     eng = TradingEngine(db, bus)
+    # 本地构造快照，不连网（math_ev 门隔离，同 _engine_in_simulated）
+    eng._current_snapshot = make_async(_snap(1, 50000.0))
     eng.paper = True
     eng.running = True
     eng.symbol = "BTC/USDT"

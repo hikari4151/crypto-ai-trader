@@ -19,6 +19,11 @@ ROOT = Path(__file__).resolve().parent.parent
 # 实测（2026-09）：fast vs full → core79.9/80.0、engine80.1/80.1、exchange70.5/70.5、
 # backtest78.3/82.0、strategies58.1/81.2、drl62.6/73.8、ai59.3/59.0、web38.1/42.6、
 # factors60.4/60.5、config86.2/48.6、indicators92.4/92.4、net83.0/83.0（A5）。
+# 2026-09-28 校准修正：indicators 92.4% 曾含"测试联网拉真实行情的意外覆盖"（math_ev 门
+# 拦截前调 _current_snapshot → compute_latest），测试联网隔离后真值跌到 77.5%（technical.py
+# 97%→67%，ema/macd/rsi/atr 从无直接单测）。已补 tests/test_indicators.py 12 例直接单测，
+# 覆盖率回升到 93.7%（fast），85 阈值保持不动。更新此表前先跑：
+#   pytest --cov=indicators --cov-report=term-missing（隔离 COVERAGE_FILE 防并发污染）。
 THRESHOLDS: dict[str, float] = {
     "core": 75.0,
     "engine": 75.0,

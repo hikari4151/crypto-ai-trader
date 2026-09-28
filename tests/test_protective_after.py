@@ -16,6 +16,8 @@ from engine.order_manager import OrderManager
 from engine.portfolio import PortfolioManager
 from engine.trading_engine import TradingEngine
 from exchange.simulated import SimulatedExchange
+from tests.conftest import make_async
+
 from strategies.base import Signal, Strategy
 from sqlalchemy import select
 
@@ -40,6 +42,9 @@ class BuyOnce(Strategy):
             self._entry = price
 
 
+
+
+
 def _snap(i, price):
     return {"symbol": "BTC/USDT", "timeframe": "1h",
             "candles": [[1700000000000 + i * 3600000, price, price, price, price, 100.0]],
@@ -50,6 +55,8 @@ def _snap(i, price):
 async def _engine(db):
     bus = EventBus()
     eng = TradingEngine(db, bus)
+    # 本地构造快照，不连网（math_ev 门隔离）
+    eng._current_snapshot = make_async(_snap(1, 50000.0))
     ex = SimulatedExchange(start_cash=10000.0, fee_rate=0.001, slippage=0.0005)
     ex.set_last_price(50000.0)
     eng.exchange = ex

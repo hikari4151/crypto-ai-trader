@@ -18,6 +18,10 @@ from core.events import Event, EventType
 from exchange.simulated import SimulatedExchange
 
 
+from tests.conftest import make_async
+
+
+
 class FakeHub:
     """替代 MarketDataHub：run 可取消空循环，snapshot 由外部注入。"""
 
@@ -76,6 +80,9 @@ async def test_simulated_real_start_assembly():
     await db.init()
     bus = EventBus()
     eng = te.TradingEngine(db, bus)
+    # 本地构造快照，不连网（FakeHub._snap={} 是 falsy，_current_snapshot 会回落网络拉
+    # 真实行情，math_ev 门负期望时误拦买入——隔离成测试数据）
+    eng._current_snapshot = make_async(_snap(1, 50000.0))
     await db.kv_set("trading_mode", "simulated")
     await db.kv_json_set("live_trading_config", {"exchange": "binance", "symbol": "BTC/USDT",
                                                  "timeframe": "1h", "start_cash": 20000.0,
@@ -116,6 +123,8 @@ async def test_simulated_real_start_end_to_end_fill():
     await db.init()
     bus = EventBus()
     eng = te.TradingEngine(db, bus)
+    # 本地构造快照，不连网（math_ev 门隔离，同 test_simulated_real_start_assembly）
+    eng._current_snapshot = make_async(_snap(1, 50000.0))
     await db.kv_set("trading_mode", "simulated")
     await db.kv_json_set("live_trading_config", {"exchange": "binance", "symbol": "BTC/USDT",
                                                  "timeframe": "1h", "start_cash": 20000.0,

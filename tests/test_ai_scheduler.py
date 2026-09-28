@@ -13,6 +13,8 @@ from core.bus import EventBus
 from core.database import Database
 from engine.trading_engine import TradingEngine
 
+from tests.conftest import make_async
+
 
 def test_ai_scheduler_optimize_outside_lock():
     """优化（慢 AI 调用）进行中，_strategy_lock 可被立即获取（K 线处理不被阻塞）。"""
@@ -62,9 +64,3 @@ def test_ai_scheduler_optimize_outside_lock():
                 setattr(settings, k, v)
 
     assert asyncio.run(run())
-
-
-def make_async(value):
-    async def _fn(*a, **k):
-        return value
-    return _fn

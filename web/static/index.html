@@ -1531,6 +1531,34 @@
   .sb-toggle:hover{background:var(--hover);color:var(--text)}
   .sb-toggle svg{width:13px;height:13px;flex:none;opacity:.85}
 
+  /* ---- B 方案：分组玻璃卡片 + 图标磁贴（2026-09-28，叠加在 C 的折叠/徽标之上）----
+     每个导航分装进独立卡片（组间留白来自 .sb-body 的 gap），图标进 22px 磁贴；
+     选中 = 行底色 + 磁贴实心 + 右缘圆点（三重可辨，不再只靠颜色）。
+     ⚠️ 材质层的 backdrop-filter:none 名单（.mac-card/.settings-sidebar 等）**不含 .sb-group**，
+        玻璃不会被后置规则清掉；若日后收编，记得把它加进那份名单的例外。 */
+  .sb-group{display:flex;flex-direction:column;gap:2px;padding:7px 6px 8px;border-radius:var(--r-sm);
+    background:color-mix(in srgb,var(--bg-2) 72%,transparent);border:1px solid var(--border);
+    backdrop-filter:blur(14px) saturate(150%);-webkit-backdrop-filter:blur(14px) saturate(150%)}
+  .sb-label{padding:0 6px 4px}
+  .sb-item{height:32px;gap:8px}
+  .sb-tile{width:22px;height:22px;flex:none;display:flex;align-items:center;justify-content:center;
+    border-radius:6px;background:var(--bg-3);color:var(--muted);transition:background .15s,color .15s}
+  .sb-tile svg{width:13px;height:13px}
+  .sb-item:hover .sb-tile{background:color-mix(in srgb,var(--bg-3) 60%,var(--hover))}
+  .sb-item.on .sb-tile{background:var(--accent);color:#fff}
+  /* 右缘圆点只在**没有徽标**时出现：两者都在右缘，同时出现会叠在一起 */
+  .sb-item.on.no-dot::after{content:"";position:absolute;right:7px;top:50%;margin-top:-2.5px;
+    width:5px;height:5px;border-radius:50%;background:var(--accent)}
+  /* 底部引擎卡：B 方案的「灯 + 时钟 / 模式徽标」两行 */
+  .sb-clock{margin-left:auto;font-family:var(--mono);font-size:var(--fs-micro);color:var(--text3);
+    font-variant-numeric:tabular-nums}
+  .sb-engine-foot{display:flex;align-items:center;gap:7px}
+  .sb-engine-foot .sb-engine-meta{margin-left:auto}
+  /* rail 态：卡片收紧、右缘圆点让位给徽标圆点、底部只留呼吸灯 */
+  body.sb-rail .sb-group{padding:6px 5px;gap:4px}
+  body.sb-rail .sb-item.on::after{display:none}
+  body.sb-rail .sb-eng-txt,body.sb-rail .sb-clock,body.sb-rail .sb-engine-foot{display:none}
+
   /* 顶栏：底边 1px 即方案A 的 Divider（Topbar fill 与画布同为 bg ⇒ 层次只靠这条线） */
   .topbar{position:fixed;left:var(--sb-w);right:0;top:0;height:var(--top-h);z-index:48;
     display:flex;align-items:center;gap:14px;padding:0 18px 0 20px;
@@ -1550,7 +1578,9 @@
   /* 窄屏降级：侧栏收成 56px 图标轨（导航不消失），顶栏同步左移并收敛芯片 */
   @media (max-width:1180px){
     :root{--sb-w:56px}
-    .sb-name,.sb-label,.sb-item>span,.sb-search,.sb-engine-meta,.sb-tog-txt{display:none}
+    .sb-name,.sb-label,.sb-item>span,.sb-search,.sb-tog-txt,
+    .sb-eng-txt,.sb-clock,.sb-engine-foot,.sb-engine-meta{display:none}   /* 窄屏 rail：底部只留呼吸灯 */
+    .sb-item.on.no-dot::after{display:none}   /* 窄屏也是 rail：右缘圆点会撞徽标圆点 */
     .sb-head,.sb-item{justify-content:center;padding-left:0;padding-right:0}
     .sb-body{padding:10px 8px;gap:10px}
     .sb-foot{padding:8px}
@@ -1828,9 +1858,10 @@
       </label>
       <div class="sb-group" v-for="g in navFiltered" :key="g.label">
         <div class="sb-label">{{g.label}}</div>
-        <button v-for="it in g.items" :key="it.key" class="sb-item" :class="{on: view===it.key}"
+        <button v-for="it in g.items" :key="it.key" class="sb-item"
+          :class="{on: view===it.key, 'no-dot': !navBadge(it.key)}"
           @click="switchView(it.key)">
-          <svg aria-hidden="true"><use :href="it.icon"/></svg><span>{{it.label}}</span>
+          <i class="sb-tile" aria-hidden="true"><svg><use :href="it.icon"/></svg></i><span>{{it.label}}</span>
           <i v-if="navBadge(it.key)" class="sb-badge" :class="{amber: navBadge(it.key).amber}"
              :title="navBadge(it.key).title" aria-hidden="true">{{navBadge(it.key).n}}</i>
         </button>
@@ -1849,9 +1880,13 @@
       <div class="sb-engine">
         <div class="sb-engine-row">
           <span class="status-dot" :class="engineStatus==='running'?'dot-on':'dot-off'"></span>
-          <span>引擎{{engineStatus==='running'?'运行中':'已停止'}}</span>
+          <span class="sb-eng-txt">引擎{{engineStatus==='running'?'运行中':'已停止'}}</span>
+          <span class="sb-clock" title="系统时钟">{{clock}}</span>
         </div>
-        <div class="sb-engine-meta" title="运行模式 · 系统时钟">{{liveStatus?.mode==='live'?'实盘':liveStatus?.mode==='simulated'?'模拟实盘':'纸面模拟'}} · {{clock}}</div>
+        <div class="sb-engine-foot" title="运行模式">
+          <span class="pill" :class="liveStatus?.mode==='live'?'red':liveStatus?.mode==='simulated'?'purple':'blue'">{{liveStatus?.mode==='live'?'实盘':liveStatus?.mode==='simulated'?'模拟实盘':'纸面模拟'}}</span>
+          <span class="sb-engine-meta">运行模式</span>
+        </div>
       </div>
     </div>
   </aside>

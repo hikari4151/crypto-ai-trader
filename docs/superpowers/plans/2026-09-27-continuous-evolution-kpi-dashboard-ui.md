@@ -146,7 +146,7 @@ Expected: FAIL（`const evolveKpiTiles = computed` not found 等，全部红）
       evolvePanelOpen.value = (force === true) ? true : !evolvePanelOpen.value;
     }
     // KPI 磁贴统一点击：前三张切曲线模型；锚点磁贴开浮层。
-    // ⚠️ anchor 分支必须 stopPropagation：否则本次点击冒泡到 document 的
+    // 注意：anchor 分支必须 stopPropagation——否则本次点击冒泡到 document 的
     //    onDocClick（此时 evolvePanelOpen 刚变 true）会把浮层立刻关掉，表现为"点了打不开"。
     function kpiTileClick(t, ev) {
       if (t.model) { setEvolveCurveModel(t.model); return; }
@@ -328,7 +328,9 @@ def test_header_keeps_existing_actions():
 
 def test_evolve_view_has_no_emoji():
     v = _evolve_view()
-    blocked = "📈🧪🧠🤖🧬⏸⚡⌚🚀🎯🔧"
+    # 位码表而非字面表情：断言文件自身也不引入 emoji（实现时与字面量逐字节等价）
+    blocked = "".join(map(chr, (0x1F4C8, 0x1F9EA, 0x1F9E0, 0x1F916, 0x1F9EC,
+                                0x23F8, 0x26A1, 0x231A, 0x1F680, 0x1F3AF, 0x1F527)))
     assert not any(ch in v for ch in blocked)
 
 
@@ -555,6 +557,12 @@ git commit -m "feat(web): 持续进化配置/触发改为页头按钮下拉浮�
 
 ---
 
+### Task 3 addendum（2026-09-27 执行期补录：spec §3.6 锚定）
+
+计划原漏了浮层定位实现。Task 3 修复轮补充：`evolvePanelStyle` ref + `_evolvePanelLeft(r)`（`w=min(330, 92vw)`，`left = clamp(r.right-w, 8, innerWidth-8-w)` 实现按钮下方右对齐）+ `toggleEvolvePanel` 打开时经 `popPos(null, r)` → `nextTick` 后 `popPos(el, r)` 两段定位（top/翻向/maxHeight/视口钳制复用既有全局 `popPos`），模板绑定 `:style="evolvePanelStyle"`，setup return 追加 `evolvePanelStyle`，新增契约测试 `test_panel_pop_anchored_to_button`。
+
+---
+
 ### Task 4: 布局扁平化 + 曲线面板改造（独立统计行 / 260px）
 
 **Files:**
@@ -692,12 +700,17 @@ def test_lab_mode_pills_clickable():
 def test_kpi_breakpoints():
     assert ".evolve-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}" in HTML
     assert ".evolve-kpis{grid-template-columns:1fr}" in HTML
+
+
+def test_section_label_styled():
+    # Task 4 执行期发现：计划定义了 .lab 类却没给样式，本任务补录
+    assert ".evolve-page .lab::after" in HTML
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_evolve_ui_contract.py -v`
-Expected: 新增 4 个 FAIL
+Expected: 新增 5 个 FAIL
 
 - [ ] **Step 3: 模型卡旗舰高亮（模板）**
 
@@ -739,6 +752,11 @@ evolve 视图内定位 `<div class="evolve-model-warning">` 的 `<span>⚠</span
 1. 在 `.evolve-model-card{...}` 规则后插入：
 
 ```css
+  /* 分区标签（模型状态 · 部署与成果）：计划原漏了 .lab 规则，本任务补录
+     （Task 4 执行期发现类已插入模板但无样式）。限定 .evolve-page 作用域。 */
+  .evolve-page .lab{display:flex;align-items:center;gap:7px;font-size:var(--fs-caption);
+    color:var(--muted);margin-top:2px}
+  .evolve-page .lab::after{content:"";flex:1;height:1px;background:var(--border)}
   .evolve-model-card.evolve-accent{border-color:rgba(125,59,237,.5);
     box-shadow:0 0 0 1px rgba(125,59,237,.22), 0 0 16px rgba(125,59,237,.14)}
   .evolve-lab-modes{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}

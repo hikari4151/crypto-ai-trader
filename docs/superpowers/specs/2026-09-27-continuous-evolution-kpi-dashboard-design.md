@@ -53,6 +53,7 @@
   - **配置 / 触发**（新按钮，紫色描边，见 §3.6）；
   - 导出进化日志（维持 disabled + title 提示）；
   - 刷新状态（现有 `fetchEvolveStatus`）。
+- 实现细化（2026-09-27）：页头不再重复放大标题与副标题——顶栏 `.tb-name` 已显示 `viewTitle/viewSub`（持续进化 + 自优化模板 · 轮次迭代 · 版本回退），页头仅保留操作按钮区（右对齐），避免同屏两份标题。
 
 ### 3.2 KPI 磁贴 ×8（新组件）
 
@@ -95,7 +96,7 @@
 
 - 保留 `EVOLVE_MODELS` 配置驱动的 `v-for` 单模板（不回退成三份复制粘贴）；
 - 卡片升级：所有字段/按钮/条件渲染照旧（候选/部署/上轮结论/热加载、锚点不一致、last_error、OOS 拦截、跨标 OOS、子策略、组合因子部署/回测/IC/部署与去回测按钮）；
-- 视觉：**当前部署版卡（`deployed_fitness` 非空且为最新）紫色描边高亮**（`rgba(125,59,237,.5)` + 微光）；fitness 行保留上下边框分隔与大数字（正值绿/负值红）；
+- 视觉：实现细化：**部署旗舰卡紫色描边高亮：`deployed_fitness` 非空且为三模型中最高者（`evolveAccentModel` computed）；均无部署则不高亮**（`rgba(125,59,237,.5)` + 微光）；fitness 行保留上下边框分隔与大数字（正值绿/负值红）；
 - 「查看版本」等按钮改用统一 `mac-btn btn-sm`，不使用内联 padding 拼凑（逐步清理本页内联样式）。
 
 ### 3.5 手动 DRL 实验台
@@ -113,6 +114,7 @@
   3. **回退基线（锚点）**：`evolveAnchorIssues` 列表 + 「重置锚点」（`resetEvolveAnchor`），空态时不渲染该段；
   4. **保存配置**（`saveEvolveConfig`，toast 反馈不变）；
 - 窄屏（≤700px）浮层宽度 `min(330px, 92vw)`。
+- 实现细化（2026-09-27）：浮层定位用既有 `popPos` 两段式（首帧 + nextTick 实测重定位）+ `_evolvePanelLeft` 按钮右缘右对齐覆盖（`w=min(330, innerWidth*0.92)`，8px 视口钳制），`evolvePanelStyle` 经 `:style` 绑定。另：evolve 视图内不再有 `⚠` 文本，警告图标统一 `#i-alert` SVG。
 
 ### 3.7 版本回退弹层
 

@@ -211,3 +211,14 @@ def test_curve_canvas_texture():
     # 用户验收反馈：图表画布按方案稿 v4 补紫渐变底+虚线描边；事件点保留底部双轨
     assert "linear-gradient(180deg,rgba(125,59,237,.05)" in HTML
     assert "border:1px dashed var(--border);border-radius:var(--r-md)" in HTML
+
+
+def test_challenger_dual_grid_split():
+    # 用户验收裁定（方案 A）：挑战者曲线拆到独立 grid + 独立 y 轴，缩放共享
+    start = HTML.find("function renderEvolveCurve")
+    body = HTML[start:HTML.find("function setEvolveRange", start)]
+    assert "gridIndex:1" in body
+    assert "yAxisIndex:2" in body
+    assert "const zoomX = chalLineCount ? [0,1] : 0" in body
+    assert "xAxisIndex: zoomX" in body
+    assert "bottom:88" in body and "height:44" in body

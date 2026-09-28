@@ -5474,8 +5474,10 @@ const app = createApp({
         // 刻度**不等距**，"0 在哪"会读偏。现在：先按 12% 留白定步长，把 min/max **向外**吸附到
         // 步长整数倍（必须向外，否则破坏"0 在量程内"），再把同一个 interval 显式下发
         // ⇒ 刻度必然等距、且 0 一定落在刻度线上。
-        // 取值域取**两条线合并**，否则挑战者值一旦越界会被静默裁掉。
-        const fin = pts.concat(chalPts).filter(v=>v!=null && isFinite(v));
+        // 取值域取**两条线合并**是共轴时代的必需品：挑战者值一旦越界会被静默裁掉，所以必须 concat。
+        // 2026-09-27 方案 A 拆分后挑战者走独立 grid + 独立 y 轴，**永远不再与 grid0 共享量程**，
+        // 该 concat 已过时 ⇒ 主量程只按主线计算（挑战者量程另由 chalMin/chalMax 在 grid1 上定）。
+        const fin = pts.filter(v=>v!=null && isFinite(v));
         const niceStep = (span) => {
           // 在 1/2/5 ×10^n 里挑最小的、能让区间数落进 [3,6] 的步长
           // ⚠️ 必须防 span<=0：log10(0) = -Infinity，后面的 d-- 会变成死循环
@@ -5512,7 +5514,7 @@ const app = createApp({
           if (yMax < 0) yMax = 0;
           if (!(yMax > yMin)) { yMin = R(-step); yMax = R(step); }
         }
-        const yAxisNum = {type:'value', scale:false,
+        const yAxisNum = {type:'value', scale:false, gridIndex:0,
           splitLine:{lineStyle:{color:ct.split}}, axisLabel:{color:ct.axis, fontSize:10}};
         if (yMin != null && yMax != null) { yAxisNum.min = yMin; yAxisNum.max = yMax; yAxisNum.interval = yInterval; }
         // ── 视窗：默认给出**全部**轮次 ────────────────────────────────────────
@@ -5563,6 +5565,7 @@ const app = createApp({
         //    同时保留小符号：某段只剩单个挑战者点时，符号是唯一可见的载体。
         if (chalLineCount) {
           series.push({type:'line', name:'挑战者轮 fitness', data:chalPts,
+            xAxisIndex:1, yAxisIndex:2,
             showSymbol:true, symbol:'circle', symbolSize:3,
             connectNulls:true, smooth:false, z:2,
             lineStyle:{color:ct.orange, width:1.2, opacity:.6, type:'dashed'},
@@ -5603,6 +5606,50 @@ const app = createApp({
                        symbolSize: (v, p) => bucketSize(chalBuckets, p.dataIndex),
                        itemStyle:{color:ct.orange, opacity:.95}});
         }
+        // ── 坐标轴装配（方案 A 拆分，2026-09-27）：grid0=主线 / grid1=挑战者 ─────────
+        // 挑战者 ≈0 需独立量程（用户验收裁定），x / y 轴一律按 gridIndex 拆开；
+        // 数组长度必须与 grid 数自洽（无挑战者时均为 1），否则 ECharts 会引用不存在的轴而报错。
+        // boundaryGap:false —— 类目轴默认 true 会把点摆在刻度带正中间，首末各让出半格空档
+        //（实测绘图区 56..776，而首末刻度标签只到 77.2..754.8，左右各空 21.2px），曲线两端够不到边框。
+        // showMaxLabel —— 末位（最新一轮）的轮次号必须可见，否则"现在跑到第几轮"要靠数格子。
+        const xAxisMain = {type:'category', data:rows.map(r=>r.round_no||r.id), gridIndex:0, boundaryGap:false,
+               axisLine:{lineStyle:{color:ct.line}}, axisTick:{show:false},
+               axisLabel:{color:ct.axis, fontSize:10, hideOverlap:true, showMaxLabel:true, margin:8}};
+        // grid1 对齐轴：类目与主轴同源，只把挑战者点对齐到轮次——标签 / 刻度 / 轴线全关，
+        // 否则挑战者条带里会重复一遍轮次号。
+        const xAxisChal = {type:'category', data:rows.map(r=>r.round_no||r.id), boundaryGap:false,
+               gridIndex:1, axisLabel:{show:false}, axisTick:{show:false}, axisLine:{show:false}};
+        const xAxisArr = [xAxisMain];
+        if (chalLineCount) xAxisArr.push(xAxisChal);
+        // y 轴数组：[0] 主线量程（上方 nice-step 块产出）＋[1] 事件轨 ＋[2] 挑战者独立量程（仅有挑战者时）。
+        // 事件散点仍走 yAxisIndex:1，语义与拆分前一致。
+        const yAxisArr = [yAxisNum,
+          // 事件轨专用轴：不显示，仅给拦截 / 挑战者点一个底部坐标。
+          // 注意：实测结论——ECharts 的散点永远被夹在 grid 矩形内：把副轴 min 抬高（如 0.121）
+          // 会让取值落在轴范围之外，整批点被静默裁掉（画面里一个点都没有）。
+          // 所以只能用 0..1，并通过把事件值设为 0.05 让点精确落在绘图区底边上方 7px。
+          {type:'value', min:0, max:1, show:false, gridIndex:0},
+        ];
+        if (chalLineCount) {
+          // 挑战者独立量程（grid1）：按挑战者自身取值域留白 15%，且 Math.min/max(...,0) 强制含 0，
+          // 全 0 的挑战者线因此落在自己的可读基线上；无有限值或区间退化时兜底 [-0.01, 0.01]。
+          const chalFin = chalPts.filter(v=>v!=null && isFinite(v));
+          let chalMin = -0.01, chalMax = 0.01;
+          if (chalFin.length) {
+            const cLo = Math.min.apply(null, chalFin), cHi = Math.max.apply(null, chalFin);
+            const cSpan = cHi - cLo;
+            const cPad = cSpan > 1e-12 ? cSpan * 0.15 : Math.max(Math.abs(cHi) * 0.2, 0.01);
+            chalMin = Math.min(cLo - cPad, 0);
+            chalMax = Math.max(cHi + cPad, 0);
+            if (!(chalMax > chalMin)) { chalMin = -0.01; chalMax = 0.01; }
+          }
+          yAxisArr.push({type:'value', gridIndex:1, min:chalMin, max:chalMax,
+            axisLabel:{show:false}, axisLine:{show:false}, axisTick:{show:false},
+            splitLine:{show:false}});
+        }
+        // dataZoom 两 grid 共享：无挑战者时若下发 [0,1] 会引用不存在的第 2 根 x 轴 ⇒ ECharts 报错，
+        // 故按 chalLineCount 降为标量 0（该路径下 grid / x 轴数组长度均为 1，下标自洽）
+        const zoomX = chalLineCount ? [0,1] : 0;
         // ⚠️ notMerge 必须作为 setOption 的**第二个入参**下发，不能写成 option 里的字段。
         // 实测 vendor/echarts.min.js 5.5.0：`setOption(t,e,n)` 内部 `q(e)&&(... ,e=e.notMerge)`——
         // 它只从第二个入参读 notMerge。写成 `setOption({notMerge:true, ...})` 是**完全无效**的，
@@ -5643,27 +5690,22 @@ const app = createApp({
                             `状态:${st} (${r.data_source})` +
                             `<br/>谱系:${lin}`;
                    }},
-          grid:{left:56,right:18,top:16,bottom:58},
-          // boundaryGap:false —— 类目轴默认 true 会把点摆在刻度带正中间，首末各让出半格空档
-          //（实测绘图区 56..776，而首末刻度标签只到 77.2..754.8，左右各空 21.2px），曲线两端够不到边框。
-          // showMaxLabel —— 末位（最新一轮）的轮次号必须可见，否则"现在跑到第几轮"要靠数格子。
-          xAxis:{type:'category', data:rows.map(r=>r.round_no||r.id), boundaryGap:false,
-                 axisLine:{lineStyle:{color:ct.line}}, axisTick:{show:false},
-                 axisLabel:{color:ct.axis, fontSize:10, hideOverlap:true, showMaxLabel:true, margin:8}},
-          yAxis:[
-            yAxisNum,
-            // 事件轨专用轴：不显示，仅给拦截 / 挑战者点一个底部坐标。
-            // ⚠️ 实测结论：ECharts 的散点永远被夹在 grid 矩形内——把副轴 min 抬高（如 0.121）
-            // 会让取值落在轴范围之外，整批点被静默裁掉（画面里一个点都没有）。
-            // 所以只能用 0..1，并通过把事件值设为 0.05 让点精确落在绘图区底边上方 7px。
-            {type:'value', min:0, max:1, show:false},
-          ],
+          // ── 2026-09-27 用户验收裁定（方案 A）：单实例双 grid 纵向布局（容器高 260px）──
+          // 挑战者 ≈0 需独立量程 ⇒ 拆独立 grid + 独立 y 轴（与主线共轴会被压成贴底碎线）。
+          // 主 grid top:16 .. 底边 172px（bottom:88），主 x 轴轮次号标签落在 172..190 的 18px 缝隙；
+          // 挑战者条带 190..234px（bottom:26 + height:44）；dataZoom 滑块（bottom:4, height:14）
+          // 在 242..256px，压在最下方、不与任何绘图区重叠。无挑战者时退回单 grid（数组长度 1）。
+          grid: chalLineCount
+            ? [{left:56,right:18,top:16,bottom:88},{left:56,right:18,height:44,bottom:26}]
+            : [{left:56,right:18,top:16,bottom:58}],
+          xAxis: xAxisArr,
+          yAxis: yAxisArr,
           dataZoom:[
             // filterMode:'none' —— 缩放只改窗口、**不重新过滤数据**。
             // 默认的 'filter' 会在每次缩放时重算全部 series 的可见数据与轴范围，
             // 是"拖拽 / 缩放卡"的直接来源之一；'none' 视觉等价、开销显著更低。
-            {type:'inside', xAxisIndex:0, start:dzStart, end:dzEnd, throttle:40, filterMode:'none'},
-            {type:'slider', xAxisIndex:0, start:dzStart, end:dzEnd, height:14, bottom:4,
+            {type:'inside', xAxisIndex: zoomX, start:dzStart, end:dzEnd, throttle:40, filterMode:'none'},
+            {type:'slider', xAxisIndex: zoomX, start:dzStart, end:dzEnd, height:14, bottom:4,
              filterMode:'none',
              brushSelect:false, showDetail:false,
              borderColor:'transparent', backgroundColor:'transparent',

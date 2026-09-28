@@ -8,6 +8,7 @@ import logging
 
 from fastapi import APIRouter, Depends
 
+from config.settings import settings
 from web.deps import get_db, get_engine
 
 log = logging.getLogger(__name__)
@@ -16,6 +17,22 @@ router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 # 实盘钱包缓存（5 秒）：避免前端轮询时反复连交易所
 _live_cache: dict = {"ts": 0.0, "data": None}
 _live_cache_lock = asyncio.Lock()
+
+# 瞬时网络错误的重试退避（秒）。测试置 0；实测节点首连偶发 Host unreachable。
+_RETRY_BACKOFF = 0.6
+
+_NET_ERR_MARKERS = ("timeout", "unreachable", "connection", "proxy", "network",
+                    "ssleof", "reset", "temporarily", "host down", "eof")
+
+
+def _is_transient_net_error(err: str, exc_name: str) -> bool:
+    """判断异常是否为瞬时网络类（值得重试）；认证/参数类错误不重试。"""
+    low = (err or "").lower()
+    if any(m in low for m in _NET_ERR_MARKERS):
+        return True
+    return any(k in exc_name for k in (
+        "NetworkError", "RequestTimeout", "ConnectionError", "ProxyError",
+        "SSLError", "TimeoutError", "ExchangeNotAvailable"))
 
 
 @router.get("/summary")
@@ -55,36 +72,57 @@ async def _fetch_live_balance(exchange_id: str, api_key: str, secret: str, passw
 
     先做 socket 层快速可达性探测（~1s），连不通立即返回友好提示；
     之后才发起真正的钱包请求（总时长限制）。
+
+    2026-09-28：加一次**瞬时网络错误重试**——实测重启后首次经节点拉取偶发
+    `Host unreachable`（节点首连未热），而失败结果还会被 5 秒缓存 ⇒ 用户重启后
+    第一眼必然看到红条「无网络」。认证类错误不重试（避免 4xx 拖成两倍时延）。
     """
     from exchange.manager import ExchangeManager
     # socket 层探测：快速判断交易所网络是否可达（避免 aiohttp 长阻塞）
     if not await _socket_probe(exchange_id):
-        log.warning("[portfolio] 实盘交易所不可达: %s", exchange_id)
+        proxy = settings.resolved_proxy or ""
+        if proxy:
+            # 走代理时探测的是代理端口 ⇒ 失败=代理本身没起来，提示指向内置加速
+            hint = f"本地代理 {proxy} 不可达，请到「系统设置 → 网络加速」检查"
+        else:
+            hint = (f"{exchange_id} 直连不可达，可在「系统设置 → 网络加速」配置代理"
+                    "（或开启 FlClash/Clash）")
+        log.warning("[portfolio] 实盘交易所探测失败: %s", hint)
         return {"equity": None, "cash": None, "positions_value": None,
                 "positions": [],
-                "error": f"{exchange_id} 网络不可达，请确认本地代理（FlClash/Clash）已开启"}
-    mgr = ExchangeManager(exchange_id, timeout_ms=5000)
-    try:
-        return await asyncio.wait_for(
-            _do_fetch(mgr, api_key, secret, password), timeout=8.0)
-    except asyncio.TimeoutError:
-        log.warning("[portfolio] 实盘钱包拉取超时")
-        return {"equity": None, "cash": None, "positions_value": None,
-                "positions": [], "error": "实盘钱包拉取超时（请确认本地代理已开启）"}
-    except Exception as e:  # noqa: BLE001
-        err = str(e)
-        hint = "网络受限，请确认本地代理（FlClash/Clash）已开启" if (
-            "timeout" in err.lower() or "RequestTimeout" in type(e).__name__
-            or "proxy" in err.lower() or "Connection" in err
-        ) else f"拉取失败: {err[:120]}"
-        log.warning("[portfolio] 实盘钱包拉取失败: %s", err)
-        return {"equity": None, "cash": None, "positions_value": None,
-                "positions": [], "error": hint}
-    finally:
+                "error": hint}
+
+    for attempt in range(2):
+        mgr = ExchangeManager(exchange_id, timeout_ms=5000)
         try:
-            await mgr.close()
-        except Exception:  # noqa: BLE001
-            pass
+            return await asyncio.wait_for(
+                _do_fetch(mgr, api_key, secret, password), timeout=8.0)
+        except asyncio.TimeoutError:
+            log.warning("[portfolio] 实盘钱包拉取超时")
+            return {"equity": None, "cash": None, "positions_value": None,
+                    "positions": [],
+                    "error": "实盘钱包拉取超时（请到「系统设置 → 网络加速」确认代理生效）"}
+        except Exception as e:  # noqa: BLE001
+            err = str(e)
+            transient = _is_transient_net_error(err, type(e).__name__)
+            if transient and attempt == 0:
+                log.warning("[portfolio] 第1次拉取瞬时失败（%s），%.1fs 后重试",
+                            err[:80], _RETRY_BACKOFF)
+                await asyncio.sleep(_RETRY_BACKOFF)
+                continue                      # finally 会先关掉本轮的 mgr
+            hint = ("网络受限，请到「系统设置 → 网络加速」确认代理生效" if transient
+                    else f"拉取失败: {err[:120]}")
+            log.warning("[portfolio] 实盘钱包拉取失败: %s", err)
+            return {"equity": None, "cash": None, "positions_value": None,
+                    "positions": [], "error": hint}
+        finally:
+            try:
+                await mgr.close()
+            except Exception:  # noqa: BLE001
+                pass
+    # 防御性兜底：两轮瞬时失败都会在 attempt==1 落到上面的 return，正常到不了这里
+    return {"equity": None, "cash": None, "positions_value": None,
+            "positions": [], "error": "实盘钱包拉取失败（重试后仍不可达）"}
 
 
 _HOST_MAP = {
@@ -96,11 +134,32 @@ _HOST_MAP = {
 
 
 async def _socket_probe(exchange_id: str) -> bool:
-    """用 socket 快速探测交易所 host:443 连通性（1s 超时）。"""
-    host, port = _HOST_MAP.get(exchange_id, (f"api.{exchange_id}.com", 443))
+    """用 socket 快速探测可达性（~1s 超时）。
+
+    2026-09-28 修复：应用配置了代理（系统设置 → 网络加速）时，流量**走代理而非直连**。
+    原实现裸连 exchange host:443 —— 被墙网络必然超时 ⇒ 探测恒 False ⇒ 实盘仪表盘
+    误报「okx 网络不可达」，而真正走代理的钱包请求**根本没被发起**
+    （同机实测：直连 www.okx.com:443 超时 1521ms；经 socks5h 代理 500~900ms 通）。
+
+    改为：有代理 → 探**代理 host:port**（1s 快失败的价值保留：代理挂了照样立刻报）；
+    无代理 → 维持原直连探测。代理串解析不出 host/port 时不拦截，交给真实请求报具体错误。
+    """
+    proxy = settings.resolved_proxy or ""
+    if proxy:
+        from urllib.parse import urlsplit
+        try:
+            parts = urlsplit(proxy)
+            host, port = parts.hostname, parts.port
+        except ValueError:
+            return True
+        if not host or not port:
+            return True
+    else:
+        host, port = _HOST_MAP.get(exchange_id, (f"api.{exchange_id}.com", 443))
     loop = asyncio.get_event_loop()
     try:
-        await asyncio.wait_for(loop.run_in_executor(None, _socket_connect, host, port), timeout=1.2)
+        await asyncio.wait_for(loop.run_in_executor(None, _socket_connect, host, port),
+                               timeout=1.2)
         return True
     except Exception:  # noqa: BLE001
         return False

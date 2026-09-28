@@ -1490,7 +1490,8 @@
     font-family:inherit;font-size:var(--fs-caption);font-weight:500;text-align:left;cursor:pointer;
     white-space:nowrap;transition:background .15s,color .15s}
   .sb-item>svg{width:14px;height:14px;flex:none;opacity:.85}
-  .sb-item>span{overflow:hidden;text-overflow:ellipsis}
+  .sb-item{position:relative}   /* 徽标与 rail 态左缘指示条的定位锚点 */
+  .sb-item>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
   .sb-item:hover{background:var(--hover);color:var(--text)}
   .sb-item.on{background:var(--accent-soft);color:var(--accent-text);font-weight:600}
   .sb-item.on>svg{opacity:1}
@@ -1502,6 +1503,33 @@
   .sb-engine-row .status-dot{margin-right:0;width:6px;height:6px}
   .sb-engine-meta{font-family:var(--mono);font-size:var(--fs-micro);color:var(--text3);
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  /* ---- C 方案：可折叠双态 + 徽标（2026-09-28，用户点选）----
+     折叠态把 --sb-w 降到 56px（变量驱动 ⇒ .topbar{left:var(--sb-w)} 与主区自动让位），
+     与 ≤1180px 窄屏规则**同构**：只收宽度、不删导航。状态存 localStorage['cat_sb_rail']，
+     快捷键 Ctrl/Cmd + \。徽标用 <i> 而非 <span> —— 窄屏规则隐藏的是 .sb-item>span（文字），
+     徽标必须在两种 rail 态下都活下来，缩成 6px 圆点继续可见。 */
+  body.sb-rail{--sb-w:56px}
+  body.sb-rail .sb-name,body.sb-rail .sb-label,body.sb-rail .sb-item>span,
+  body.sb-rail .sb-search,body.sb-rail .sb-engine-meta,body.sb-rail .sb-tog-txt{display:none}
+  body.sb-rail .sb-head,body.sb-rail .sb-item{justify-content:center;padding-left:0;padding-right:0}
+  body.sb-rail .sb-body{padding:10px 8px;gap:10px}
+  body.sb-rail .sb-foot{padding:8px}
+  body.sb-rail .sb-engine{padding:8px;align-items:center}
+  body.sb-rail .sb-toggle{justify-content:center;padding-left:0;padding-right:0;border-style:solid}
+  .sb-badge{margin-left:auto;min-width:16px;height:15px;padding:0 4px;flex:none;font-style:normal;
+    border-radius:999px;background:var(--red);color:#fff;
+    font-size:9.5px;font-weight:700;line-height:1;display:inline-flex;align-items:center;justify-content:center}
+  .sb-badge.amber{background:var(--orange);color:#241300}
+  body.sb-rail .sb-badge{position:absolute;top:3px;right:3px;min-width:6px;width:6px;height:6px;padding:0;font-size:0}
+  body.sb-rail .sb-item.on::before{content:"";position:absolute;left:-7px;top:7px;width:3px;height:16px;
+    border-radius:0 3px 3px 0;background:var(--accent)}
+  .sb-toggle{display:flex;align-items:center;gap:8px;width:100%;height:28px;margin-bottom:8px;padding:0 8px;
+    border:1px dashed var(--border2);border-radius:var(--r-xs);background:transparent;
+    color:var(--muted);font-family:inherit;font-size:var(--fs-micro);cursor:pointer;
+    transition:background .15s,color .15s}
+  .sb-toggle:hover{background:var(--hover);color:var(--text)}
+  .sb-toggle svg{width:13px;height:13px;flex:none;opacity:.85}
 
   /* 顶栏：底边 1px 即方案A 的 Divider（Topbar fill 与画布同为 bg ⇒ 层次只靠这条线） */
   .topbar{position:fixed;left:var(--sb-w);right:0;top:0;height:var(--top-h);z-index:48;
@@ -1522,7 +1550,7 @@
   /* 窄屏降级：侧栏收成 56px 图标轨（导航不消失），顶栏同步左移并收敛芯片 */
   @media (max-width:1180px){
     :root{--sb-w:56px}
-    .sb-name,.sb-label,.sb-item>span,.sb-search,.sb-engine-meta{display:none}
+    .sb-name,.sb-label,.sb-item>span,.sb-search,.sb-engine-meta,.sb-tog-txt{display:none}
     .sb-head,.sb-item{justify-content:center;padding-left:0;padding-right:0}
     .sb-body{padding:10px 8px;gap:10px}
     .sb-foot{padding:8px}
@@ -1803,11 +1831,21 @@
         <button v-for="it in g.items" :key="it.key" class="sb-item" :class="{on: view===it.key}"
           @click="switchView(it.key)">
           <svg aria-hidden="true"><use :href="it.icon"/></svg><span>{{it.label}}</span>
+          <i v-if="navBadge(it.key)" class="sb-badge" :class="{amber: navBadge(it.key).amber}"
+             :title="navBadge(it.key).title" aria-hidden="true">{{navBadge(it.key).n}}</i>
         </button>
       </div>
       <div v-if="!navFiltered.length" class="sb-empty">没有匹配的视图</div>
     </div>
     <div class="sb-foot">
+      <button type="button" class="sb-toggle" @click="toggleSbRail()"
+              :title="sbRail ? '展开侧栏 (Ctrl+\\)' : '折叠侧栏 (Ctrl+\\)'"
+              :aria-label="sbRail ? '展开侧栏' : '折叠侧栏'" :aria-expanded="!sbRail">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <path v-if="!sbRail" d="M15 5l-7 7 7 7"/><path v-else d="M9 5l7 7-7 7"/>
+        </svg>
+        <span class="sb-tog-txt">{{sbRail ? '展开侧栏' : '折叠侧栏'}}</span>
+      </button>
       <div class="sb-engine">
         <div class="sb-engine-row">
           <span class="status-dot" :class="engineStatus==='running'?'dot-on':'dot-off'"></span>
@@ -4392,6 +4430,32 @@ const app = createApp({
     };
     onMounted(() => document.addEventListener('keydown', _navKey));
     onUnmounted(() => document.removeEventListener('keydown', _navKey));
+    /* ---- C 方案：侧栏折叠态 + 导航徽标（2026-09-28 用户点选）----
+       折叠态挂 body 类：--sb-w 变量驱动 ⇒ .topbar{left:var(--sb-w)} 与主区同步让位，
+       与 ≤1180px 窄屏规则同构（只收宽度、不删导航）；状态跨会话记住。
+       徽标复用既有 ref（告警数 / 未保存风控项），不新增任何轮询或接口。 */
+    const sbRail = ref((() => { try { return localStorage.getItem('cat_sb_rail') === '1'; } catch (e) { return false; } })());
+    function _applySbRail() { document.body.classList.toggle('sb-rail', !!sbRail.value); }
+    function toggleSbRail() {
+      sbRail.value = !sbRail.value;
+      try { localStorage.setItem('cat_sb_rail', sbRail.value ? '1' : '0'); } catch (e) { /* 隐私模式禁用存储时忽略 */ }
+      _applySbRail();
+    }
+    const _sbKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === '\\' || e.code === 'Backslash')) { e.preventDefault(); toggleSbRail(); }
+    };
+    onMounted(() => { _applySbRail(); document.addEventListener('keydown', _sbKey); });
+    onUnmounted(() => document.removeEventListener('keydown', _sbKey));
+    /* 导航徽标：全量态是数字药丸，rail 态由 CSS 缩成 6px 圆点；返回 null = 不显示 */
+    function navBadge(key) {
+      if (key === 'live' && alertCritical.value > 0) {
+        return { n: alertCritical.value, amber: false, title: '未处理严重告警 ' + alertCritical.value + ' 条' };
+      }
+      if (key === 'settings' && riskDirtySet.value && riskDirtySet.value.size) {
+        return { n: riskDirtySet.value.size, amber: true, title: '风控规则有 ' + riskDirtySet.value.size + ' 项未保存' };
+      }
+      return null;
+    }
     /* 顶栏标题 / 副标题（方案A Topbar：15px 主标题 + 下行小字说明） */
     const viewMeta = {
       dashboard:{t:'仪表盘', s:'账户总览 · 实时行情 · AI 解读'},
@@ -8021,6 +8085,7 @@ const app = createApp({
 
     return {view, settingsTab, perfSort, perfCols, sortByPerf, perfSortCls, perfTradesView, clock, toasts, views,
       navGroups, navFiltered, navQuery, navSearchEl, focusNavSearch, viewTitle, viewSub,
+      sbRail, toggleSbRail, navBadge,
       engineStatus, portfolio, perfSummary, trades, perfTrades, pnlStats,
       analysis, analysisLoading, currentStrategy, strategyList, filteredStrategyList, paramSchema, strategyParams, riskRules, riskCooldown, optLogs, analyses, clearCooldown,
       analysisFull, openAnalysisFull, openAnalysisHistory, analysisPreview,

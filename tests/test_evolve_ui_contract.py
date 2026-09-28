@@ -133,3 +133,32 @@ def test_panel_pop_anchored_to_button():
     # spec §3.6：浮层必须按页头按钮位置锚定（popPos + 右对齐覆盖），不能裸 fixed
     assert "evolvePanelStyle" in _setup_return()
     assert ':style="evolvePanelStyle"' in _evolve_view()
+
+
+def test_dual_column_layout_retired():
+    assert ".evolve-layout" not in HTML
+    assert ".evolve-main-column" not in HTML
+    assert ".evolve-side-column" not in HTML
+    v = _evolve_view()
+    assert "evolve-layout" not in v
+    assert "evolve-main-column" not in v
+    assert "evolve-side-column" not in v
+
+
+def test_curve_stats_row_standalone():
+    v = _evolve_view()
+    assert 'class="evolve-curve-stats"' in v
+    assert "{{evolveCurveStat}}" in v
+    # 统计文案不得再挤在标题栏里
+    titlebar = v[v.find("训练轮次曲线"):v.find("evolve-curve-tabs")]
+    assert "evolveCurveStat" not in titlebar
+
+
+def test_chart_height_260():
+    v = _evolve_view()
+    assert v.count("height:260px") >= 2
+    assert "height:220px" not in v
+
+
+def test_model_section_label_present():
+    assert "模型状态 · 部署与成果" in _evolve_view()

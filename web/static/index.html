@@ -1374,32 +1374,12 @@
   .evolve-pop-group{padding:9px 0;border-top:1px solid var(--border);min-width:0}
   .evolve-pop-group:first-of-type{border-top:0;padding-top:2px}
   .evolve-pop-group .mac-label{margin-bottom:6px}
-  .evolve-layout{display:grid;grid-template-columns:minmax(0,1fr) 370px;gap:14px;align-items:start}
-  /* 左右两列各自独立成栅格。
-     曾把 5 个窗口直接挂在外层网格上、用 grid-row 把它们定位到左右列——但外层网格的
-     行高是两列【共享】的（行高 = 该行较高者），而两列窗口数不同（左 2 / 右 3）：
-     第 1 行左列是 220px 图表的「训练轮次曲线」、右列只是百余像素的「训练配置」，
-     共享行高后右列在配置窗下方被撑出约 200px 空洞，「回退基线 / 手动触发训练」
-     被迫从左侧「模型状态」卡的下沿才开始——这就是右侧内容整体"没对齐"的根因。
-     改成列容器后，两列各自 16px 等距紧密堆叠，互不牵连（DOM 顺序保持右列在前，
-     900px 单列断点下的排列顺序不变）。
-
-     ⚠️ grid-row:1 必须显式写出，不能只给 grid-column —— 只给列不给行时两个列容器
-     都落进「自动放置」流程，行号由 DOM 顺序决定：光标初始在 (row1,col1)，先排
-     side-column（列 2，不触发换行 → 落在 row1/col2）；再排 main-column 时列号从 2
-     回退到 1，变小 → 按 CSS Grid 规范 §8.5 会把光标行 +1，main-column 被放到
-     【row2/col1】。后果：第一行高度 = 右列（三窗约 470px），整个左列（训练轮次曲线）
-     被推到 470+16px 之下，顶栏与曲线之间出现约 490px 空档。
-     加了 grid-row:1 后两列钉在同一行，行高取较高者（左列），互不产生位移。
-     推演脚本：.optim/ui_check/grid_place.py */
-  .evolve-main-column,.evolve-side-column{min-width:0;display:grid;gap:16px;align-content:start;grid-row:1}
-  .evolve-main-column{grid-column:1}
-  .evolve-side-column{grid-column:2}
-  .evolve-main-column > *,.evolve-side-column > *{min-width:0}
   .evolve-panel .mac-body{min-width:0}
   /* 外壳：右对齐 + 收窄；内部可并排放多个 .mac-seg（模型切换 / 范围切换）。
      ⚠️ 若把 .mac-seg 直接放成块级 flex，它会撑满整行并把按钮拉开 —— 必须由外壳约束宽度。 */
   .evolve-curve-tabs{margin:0 0 10px auto;width:max-content;max-width:100%;overflow:auto;display:flex;gap:8px;align-items:center}
+  .evolve-curve-stats{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;
+    font-size:var(--fs-caption);color:var(--muted)}
   .evolve-chart-wrap{min-width:0}
   .evolve-curve-foot{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:var(--fs-caption)}
   .evolve-curve-foot span{display:inline-flex;align-items:center;gap:5px}
@@ -1438,14 +1418,7 @@
   .evolve-lab input,.evolve-lab select{min-width:0}
   .evolve-lab table{min-width:560px}
   @media (max-width:1100px){
-    .evolve-layout{grid-template-columns:minmax(0,1fr) minmax(280px,34%)}
     .evolve-model-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
-  }
-  @media (max-width:900px){
-    .evolve-layout{grid-template-columns:1fr}
-    /* 单列断点：列号归 1、行号必须归 auto，否则两列会被 grid-row:1 叠在同一格上。
-       行号交给自动放置，DOM 顺序（右列窗口在前）即视觉顺序，与改动前一致。 */
-    .evolve-main-column,.evolve-side-column{grid-column:1;grid-row:auto}
   }
   @media (max-width:700px){
     .evolve-model-grid{grid-template-columns:1fr}
@@ -3465,7 +3438,7 @@
 
       <!-- ========== 持续进化引擎 ========== -->
 <transition name="page" mode="out-in">  <!-- view: evolve -->
-    <section v-if="view==='evolve'" class="space-y-3.5 evolve-page">
+    <section v-if="view==='evolve'" class="evolve-page">
       <div class="page-head evolve-page-head"><div class="page-actions">
         <button class="mac-btn" v-if="!evolveStatus.paused" @click="evolvePause()" :disabled="!evolveStatus.running || !evolveStatus.enabled" title="暂停持续训练（不停止进程）"><svg width="13" height="13"><use href="#i-pause"/></svg>暂停</button>
         <button class="mac-btn primary" v-else @click="evolveResume()" :disabled="!evolveStatus.running || !evolveStatus.enabled" title="恢复持续训练"><svg width="13" height="13"><use href="#i-play"/></svg>恢复</button>
@@ -3537,18 +3510,11 @@
            高频控制（暂停/恢复、启用）移入页头操作区，避免同一屏出现两套状态与两组按钮。
            「立即训练」入口已并入页头「配置 / 触发」浮层（2026-09-27）。 -->
 
-      <!-- 训练配置：标的池 / 周期，可热更新写入 config.yaml -->
-      <div class="evolve-layout">
-      <div class="evolve-side-column">
-      </div>
-
-      <div class="evolve-main-column">
       <!-- 训练轮次曲线：红点为拦截/回退轮次 -->
       <div class="mac-window evolve-main-curve">
         <div class="mac-titlebar">
           
           <span class="mac-title"><svg><use href="#i-chart"/></svg>训练轮次曲线</span>
-          <span class="text-[length:var(--fs-caption)] text-slate-500 ml-auto">{{evolveCurveStat}}</span>
         </div>
         <div class="mac-body">
             <div class="evolve-curve-tabs">
@@ -3564,9 +3530,10 @@
                 <button class="mac-seg-btn" @click="setEvolveRange(50)">最近 50</button>
               </div>
             </div>
-          <div class="relative evolve-chart-wrap" style="height:220px">
-            <div id="evolveCurveChart" v-if="evolveCurveHasData" style="height:220px"></div>
-            <div v-else class="flex items-center justify-center text-[length:var(--fs-footnote)] text-slate-500" style="height:220px;border:1px dashed var(--border2);border-radius:var(--r-md)">{{evolveRoundsErr ? '训练轮次加载失败，请稍后重试' : '暂无训练轮次记录——点击「立即因子挖掘 / 立即策略训练」运行一轮后在此绘制曲线'}}</div>
+          <div class="evolve-curve-stats"><span>{{evolveCurveStat}}</span></div>
+          <div class="relative evolve-chart-wrap" style="height:260px">
+            <div id="evolveCurveChart" v-if="evolveCurveHasData" style="height:260px"></div>
+            <div v-else class="flex items-center justify-center text-[length:var(--fs-footnote)] text-slate-500" style="height:260px;border:1px dashed var(--border2);border-radius:var(--r-md)">{{evolveRoundsErr ? '训练轮次加载失败，请稍后重试' : '暂无训练轮次记录——点击「立即因子挖掘 / 立即策略训练」运行一轮后在此绘制曲线'}}</div>
           </div>
           <div class="evolve-curve-foot">
             <span><i class="evolve-legend-dot blue"></i>fitness（每轮训练目标）</span>
@@ -3585,6 +3552,7 @@
           <span class="mac-title"><svg><use href="#i-dna"/></svg>模型状态</span>
         </div>
         <div class="mac-body">
+          <div class="lab">模型状态 · 部署与成果</div>
           <!-- 三张模型状态卡：结构完全一致，此前是三份复制粘贴（约 140 行），
                改一处要改三处且极易漏。现抽成配置数组 + v-for 单模板（约 60 行）。
                各模型独有字段（候选/部署、跨标 OOS、锚点不一致、子策略）用 v-if 保留，
@@ -3665,8 +3633,6 @@
           </div>
           </div>
         </div>
-      </div>
-      </div>
       </div>
       <!-- 版本列表弹层：原先插在模型卡内部，展开瞬间卡片高度翻倍、下方内容整体下跳。
            改为独立弹层后零布局跳动；且某模型暂无版本时也能给出空态，而不是点了没反应。 -->

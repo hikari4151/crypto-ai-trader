@@ -99,6 +99,9 @@ jobs:
           python -m coverage json -o .optim/coverage_gate.json
           python scripts/coverage_gate.py --json .optim/coverage_gate.json
 
+      - name: 5b) 性能基线门禁（关键路径耗时防灾难性回归）
+        run: python scripts/perf_baseline.py
+
       - name: 上传测试产物（覆盖率 HTML + JUnit XML）
         if: always()
         uses: actions/upload-artifact@v4
@@ -166,6 +169,9 @@ jobs:
         run: |
           python -m coverage json -o .optim/coverage_gate.json
           python scripts/coverage_gate.py --json .optim/coverage_gate.json
+
+      - name: 5b) 性能基线门禁（关键路径耗时防灾难性回归）
+        run: python scripts/perf_baseline.py
 
       - name: 上传测试产物
         if: always()

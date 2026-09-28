@@ -51,7 +51,8 @@ def test_check_ok_when_all_consistent(tmp_path, monkeypatch):
         f"run: python -m compileall -q {dirs} tests run.py\n"
         f"run: python -m ruff check {dirs} tests\n"
         "run: python scripts/check_encoding.py\n"
-        "run: python scripts/check_redlines.py\n",
+        "run: python scripts/check_redlines.py\n"
+        "run: python scripts/perf_baseline.py\n",
         encoding="utf-8")
     redev = tmp_path / "REDEV_GUIDE.md"
     redev.write_text(f"compileall -q {dirs} run.py", encoding="utf-8")
@@ -68,7 +69,8 @@ def test_check_reports_missing_exchange_in_ci(tmp_path, monkeypatch):
     dirs = " ".join(sorted(cs.CORE_DIRS - {"exchange"}))
     ci.write_text(
         f"run: python -m compileall -q {dirs} tests run.py\n"
-        f"run: python -m ruff check {dirs} tests\n",
+        f"run: python -m ruff check {dirs} tests\n"
+        "run: python scripts/perf_baseline.py\n",
         encoding="utf-8")
     redev = tmp_path / "REDEV_GUIDE.md"
     redev.write_text("compileall -q " + " ".join(sorted(cs.CORE_DIRS)) + " run.py\n",
@@ -89,7 +91,8 @@ def test_check_reports_unregistered_new_package(tmp_path, monkeypatch):
     dirs = " ".join(sorted(cs.CORE_DIRS))
     ci.write_text(
         f"run: python -m compileall -q {dirs} tests run.py\n"
-        f"run: python -m ruff check {dirs} tests\n",
+        f"run: python -m ruff check {dirs} tests\n"
+        "run: python scripts/perf_baseline.py\n",
         encoding="utf-8")
     redev = tmp_path / "REDEV_GUIDE.md"
     redev.write_text(f"compileall -q {dirs} run.py", encoding="utf-8")
@@ -108,7 +111,8 @@ def test_check_reports_verify_all_drift(tmp_path, monkeypatch):
     dirs = " ".join(sorted(cs.CORE_DIRS))
     ci.write_text(
         f"run: python -m compileall -q {dirs} tests run.py\n"
-        f"run: python -m ruff check {dirs} tests\n",
+        f"run: python -m ruff check {dirs} tests\n"
+        "run: python scripts/perf_baseline.py\n",
         encoding="utf-8")
     redev = tmp_path / "REDEV_GUIDE.md"
     redev.write_text(f"compileall -q {dirs} run.py", encoding="utf-8")
@@ -147,3 +151,5 @@ def test_encoding_gate_registered_in_contract():
     assert "check_encoding.py" in va
     assert "check_redlines.py" in ci
     assert "check_redlines.py" in va
+    assert "perf_baseline.py" in ci
+    assert "perf_baseline.py" in va

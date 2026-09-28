@@ -159,6 +159,12 @@ def check() -> list[str]:
         issues.append("ci.yml 未注册 check_redlines.py（B8/E2/E7 grep 型红线门禁）")
     if "check_redlines.py" not in va_src:
         issues.append("verify_all.py 未注册 check_redlines.py（B8/E2/E7 grep 型红线门禁）")
+
+    # 性能基线门禁（perf_baseline.py）同样必须注册（否则又是"脚本写了没接链"）。
+    if "perf_baseline.py" not in ci:
+        issues.append("ci.yml 未注册 perf_baseline.py（性能基线门禁）")
+    if "perf_baseline.py" not in va_src:
+        issues.append("verify_all.py 未注册 perf_baseline.py（性能基线门禁）")
     return issues
 
 

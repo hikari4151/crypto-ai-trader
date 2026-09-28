@@ -9,7 +9,8 @@ def test_build_steps_fast_has_core_gates():
     labels = [label for label, _ in steps]
     assert labels == ["check_lock", "ruff", "mypy_pilot", "validate_config",
                       "check_doc_sync", "check_js", "check_encoding",
-                      "check_redlines", "build_frontend", "compileall"]
+                      "check_redlines", "build_frontend", "compileall",
+                      "perf_baseline"]
 
 
 def test_build_steps_full_has_pytest_and_backtest():
@@ -78,7 +79,7 @@ def test_main_returns_zero_when_all_steps_pass(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "[verify] ALL PASS" in out
-    assert len(calls) == 10  # 8 步 + check_encoding + check_redlines
+    assert len(calls) == 11  # 8 步 + check_encoding + check_redlines + perf_baseline
     assert calls[1][0] == va.PY  # ruff 第一步首元素是 python
     assert calls[2][-1] == "mypy"
     assert any("check_doc_sync.py" in c for c in calls[4])

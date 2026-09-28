@@ -1,0 +1,10 @@
+{
+  "paths": {
+    "backtest_engine_3000": 64.18520000443095,
+    "backtest_fast_3000": 63.377499995112885,
+    "compute_latest_3000": 30.70070000103442,
+    "kline_engine_100": 0.0034999975468963385
+  },
+  "tolerance": 4.0,
+  "note": "2026-09-28 实测校准（median × tolerance 作为阈值，防灾难性回归）"
+}

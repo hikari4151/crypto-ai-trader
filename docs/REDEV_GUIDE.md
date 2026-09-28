@@ -178,6 +178,8 @@
 ```bat
 .venv\Scripts\python scripts\verify_all.py                       :: 完整链（门禁 + pytest + 覆盖率 + 基线回测）
 .venv\Scripts\python scripts\verify_all.py --skip-pytest --skip-backtest   :: 快速门禁（提交前/pre-commit 用）
+.venv\Scripts\python scripts\perf_baseline.py --report          :: 性能基线（关键路径耗时报告，不执行门禁）
+.venv\Scripts\python scripts\perf_baseline.py --update          :: 重新校准性能基线（谨慎：确认真实优化后再动）
 ```
 
 下面保留手工分步版本（排查单点失败时用）：

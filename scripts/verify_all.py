@@ -36,6 +36,12 @@ def run(cmd: list[str], label: str) -> bool:
 
 
 def build_steps(skip_pytest: bool = False, skip_backtest: bool = False) -> list[tuple[str, list[str]]]:
+    # 性能基线门禁：fast 链（本地/pre-commit）用 --quick——跳过 100k/批量两条
+    # 重量级路径（合计 ~2.3s，曾占门禁链耗时 66%）；完整链/CI 全量兜底复杂度
+    # 回归（O(n²) 化必须靠 100k 档才能暴露）。
+    perf_cmd = [PY, str(ROOT / "scripts" / "perf_baseline.py")]
+    if skip_pytest:
+        perf_cmd.append("--quick")
     steps: list[tuple[str, list[str]]] = [
         ("check_lock", [PY, str(ROOT / "scripts" / "check_lock.py")]),
         ("ruff", [PY, "-m", "ruff", "check", *RUFF_DIRS]),
@@ -53,9 +59,7 @@ def build_steps(skip_pytest: bool = False, skip_backtest: bool = False) -> list[
         # CI 用 `--check-only --require-manifest`（干净检出 ⇒ 等价于"清单必须描述已提交的 index.html"）
         ("build_frontend", [PY, str(ROOT / "scripts" / "build_frontend.py"), "--check-only"]),
         ("compileall", [PY, "-m", "compileall", "-q", *COMPILE_DIRS]),
-        # 性能基线门禁：关键路径耗时防灾难性回归（回测/compute_latest/K线处理）。
-        # 阈值=基线中位数×4 且 ≥25ms 下限，CI 抖动不误报，只拦数量级回归。
-        ("perf_baseline", [PY, str(ROOT / "scripts" / "perf_baseline.py")]),
+        ("perf_baseline", perf_cmd),
     ]
     if not skip_pytest:
         steps.append(("pytest_cov", [PY, "-m", "pytest", "-q", "--cov", "--cov-fail-under=65"]))

@@ -44,8 +44,13 @@ def _median_ms(fn, repeat: int = 3) -> float:
     return statistics.median(ts)
 
 
-def measure() -> dict[str, float]:
-    """测量全部关键路径耗时（ms）。每项独立 import，避免互相污染缓存。"""
+def measure(quick: bool = False) -> dict[str, float]:
+    """测量全部关键路径耗时（ms）。每项独立 import，避免互相污染缓存。
+
+    quick=True（本地 fast 链/pre-commit）：跳过两条重量级路径
+    （backtest_engine_100k / evolve_batch_10x5000）——它们合计 ~2.3s，
+    门禁链 66% 耗时都在这（2026-09-28 第九轮实测）。复杂度回归（O(n²) 化）
+    由 CI 全量档兜底：本地快路径只防常数回归，避免每次提交多等 2 秒。"""
     out: dict[str, float] = {}
 
     # 1) 回测引擎（双引擎基线同款 demo 数据）
@@ -58,11 +63,13 @@ def measure() -> dict[str, float]:
     out["backtest_engine_3000"] = _median_ms(lambda: run_backtest(df, cfg))
     out["backtest_fast_3000"] = _median_ms(lambda: run_backtest_fast(df, cfg))
 
-    # 1b) 10 万根大样本（专拦超线性缩放回归）：3k 测不出 O(n²) 化
-    #     （n=3k 时可能仍平缓，n=100k 时爆炸）——大样本档把"复杂度退化"
-    #     与"常数变慢"区分开。实测 100k ~1.1s，门禁内单跑一次可接受。
-    df100k = generate_demo(n=100000)
-    out["backtest_engine_100k"] = _median_ms(lambda: run_backtest(df100k, cfg), repeat=1)
+    # 1b) + 2b) 重量级路径（~2.3s）：本地 quick 档跳过，CI 全量档兜底复杂度回归。
+    if not quick:
+        # 1b) 10 万根大样本（专拦超线性缩放回归）：3k 测不出 O(n²) 化
+        #     （n=3k 时可能仍平缓，n=100k 时爆炸）——大样本档把"复杂度退化"
+        #     与"常数变慢"区分开。实测 100k ~1.2s，门禁内单跑一次可接受。
+        df100k = generate_demo(n=100000)
+        out["backtest_engine_100k"] = _median_ms(lambda: run_backtest(df100k, cfg), repeat=1)
 
     # 2) 指标 compute_latest（AI 解读 / 实时快照共用）
     from indicators.technical import compute_latest
@@ -71,25 +78,27 @@ def measure() -> dict[str, float]:
     out["compute_latest_3000"] = _median_ms(lambda: compute_latest(ohlcv))
 
     # 2b) evolve 批量候选评估（combo 策略 × 候选数——历史上"每根全量重算"热点
-    #     被向量化优化后不再是灾难，但批量乘上候选数后仍需防回归）
-    def bench_batch():
-        from strategies.factor_signal import FactorSignalStrategy
-        df2 = generate_demo(n=5000)
-        t0 = time.perf_counter()
-        for i in range(10):
-            st = FactorSignalStrategy()
-            st.update_params({"factor": "combo", "mode": "trend",
-                              "buy_threshold": 0.4 + i * 0.01,
-                              "combo_spec": '{"vol_ratio": 0.8, "mom_10": 0.8, "rsi_14": %.1f}'
-                                            % (0.2 + i * 0.03),
-                              "size_pct": 0.3})
-            cfg2 = BacktestConfig(start_cash=10000.0, fee_rate=0.001, slippage=0.0005,
-                                  strategy_name="factor_signal",
-                                  strategy_params={"spec": st})
-            run_backtest(df2, cfg2)
-        return (time.perf_counter() - t0) * 1000.0
+    #     被向量化优化后不再是灾难，但批量乘上候选数后仍需防回归）。
+    #     重量级（10 候选 ~1.1s）：本地 quick 档跳过，CI 全量档兜底。
+    if not quick:
+        def bench_batch():
+            from strategies.factor_signal import FactorSignalStrategy
+            df2 = generate_demo(n=5000)
+            t0 = time.perf_counter()
+            for i in range(10):
+                st = FactorSignalStrategy()
+                st.update_params({"factor": "combo", "mode": "trend",
+                                  "buy_threshold": 0.4 + i * 0.01,
+                                  "combo_spec": '{"vol_ratio": 0.8, "mom_10": 0.8, "rsi_14": %.1f}'
+                                                % (0.2 + i * 0.03),
+                                  "size_pct": 0.3})
+                cfg2 = BacktestConfig(start_cash=10000.0, fee_rate=0.001, slippage=0.0005,
+                                      strategy_name="factor_signal",
+                                      strategy_params={"spec": st})
+                run_backtest(df2, cfg2)
+            return (time.perf_counter() - t0) * 1000.0
 
-    out["evolve_batch_10x5000"] = bench_batch()
+        out["evolve_batch_10x5000"] = bench_batch()
 
     # 3) 实时 K 线处理（引擎 _on_candle 热路径，100 根）
     def bench_klines():
@@ -193,6 +202,9 @@ def load_baseline() -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="性能基线门禁（防灾难性回归）")
     ap.add_argument("--report", action="store_true", help="只打印测量结果，不执行门禁")
+    ap.add_argument("--quick", action="store_true",
+                    help="跳过重量级路径（100k/批量，合计~2.3s）——本地 fast 链/pre-commit 用，"
+                         "复杂度回归由 CI 全量档兜底")
     ap.add_argument("--update", action="store_true",
                     help="重新校准基线文件（谨慎：确认是真实优化而非掩盖回归）")
     ap.add_argument("--tolerance", type=float, default=DEFAULT_TOLERANCE,
@@ -200,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     print("[perf] 测量关键路径耗时…", flush=True)
-    measured = measure()
+    measured = measure(quick=args.quick)
     baseline = load_baseline()
 
     if args.update:

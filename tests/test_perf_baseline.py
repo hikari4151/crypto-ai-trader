@@ -61,7 +61,7 @@ def test_main_passes_within_tolerance(monkeypatch, capsys):
                       "kline_engine_100": 0.0, "startup_composite": 60.0},
             "tolerance": 4.0}
     monkeypatch.setattr(pb, "load_baseline", lambda: fake)
-    monkeypatch.setattr(pb, "measure", lambda: {"backtest_engine_3000": 65.0,
+    monkeypatch.setattr(pb, "measure", lambda quick=False: {"backtest_engine_3000": 65.0,
                                                 "backtest_fast_3000": 66.0,
                                                 "backtest_engine_100k": 1200.0,
                                                 "compute_latest_3000": 32.0,
@@ -80,7 +80,7 @@ def test_main_fails_on_order_of_magnitude_regression(monkeypatch, capsys):
                       "kline_engine_100": 0.0, "startup_composite": 60.0},
             "tolerance": 4.0}
     monkeypatch.setattr(pb, "load_baseline", lambda: fake)
-    monkeypatch.setattr(pb, "measure", lambda: {"backtest_engine_3000": 900.0,
+    monkeypatch.setattr(pb, "measure", lambda quick=False: {"backtest_engine_3000": 900.0,
                                                 "backtest_fast_3000": 64.0,
                                                 "backtest_engine_100k": 1200.0,
                                                 "compute_latest_3000": 31.0,

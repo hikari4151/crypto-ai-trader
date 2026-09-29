@@ -4766,6 +4766,30 @@ const app = createApp({
     // 回测结果改为右栏内联展示，不再使用结果浮层。
     const btLive = ref({running:false, done:false, pct:0, last_price:null, position:0, cash:0, kline_history:[], recent_trades:[], last_trade:null});
     const btStep = ref('config');
+    // ---- 回测页 Tab 工作区（2026-09-29 重设计，spec §3.4）----
+    const btTab = ref('result');        // result | monitor | tools | history
+    const btToolTab = ref('overfit');   // overfit | gridscan | compare（分析工具内层子 Tab）
+    const btConfigDirty = ref(false);   // 「配置已改」徽标：配置相对上次开跑有变化
+    // 基线快照：开跑时重置；deep watch 对比序列化值，避免逐字段监听漏项
+    let btBaseline = JSON.stringify(bt);
+    function btMarkClean() {
+      nextTick(() => { btBaseline = JSON.stringify(bt); btConfigDirty.value = false; });
+    }
+    watch(bt, () => {
+      try { btConfigDirty.value = JSON.stringify(bt) !== btBaseline; } catch (e) { /* 序列化失败不阻塞 */ }
+    }, {deep:true});
+    // 指标磁贴光晕（spec §3.6）：总收益(正)绿光晕 / 最大回撤红光晕 / 其余素色
+    function btTileGlow(c) {
+      if (!c) return '';
+      if (c.label === '总收益' && c.cls === 'pos') return 'glow-g';
+      if (c.label === '最大回撤') return 'glow-r';
+      return '';
+    }
+    // section → Tab 映射（btGoto 与自动切换共用一份，防两处口径漂移）
+    const BT_TAB_OF_SECTION = {
+      config:'result', result:'result', monitor:'monitor',
+      overfit:'tools', gridscan:'tools', compare:'tools', history:'history',
+    };
     const overfitLoading = ref(false);
     const overfitResult = ref(null);
     const gridScanLoading = ref(false);
@@ -7298,6 +7322,7 @@ const app = createApp({
 
     // ---------- 回测 ----------
     async function runOverfit() {
+      btTab.value = 'tools'; btToolTab.value = 'overfit';   // spec §3.4②
       overfitLoading.value = true; overfitResult.value = null;
       try {
         const d = await api('/backtest/overfit', {method:'POST', body:JSON.stringify(bt)});
@@ -7407,6 +7432,7 @@ const app = createApp({
       });
     }
     async function runGridScan() {
+      btTab.value = 'tools'; btToolTab.value = 'gridscan';
       gridScanLoading.value = true; gridScanResult.value = null;
       const grid = buildParamGrid();
       const baseParams = { ...strategyParams.value };
@@ -7437,6 +7463,7 @@ const app = createApp({
       await runOverfit();
     }
     async function compareStrategies() {
+      btTab.value = 'tools'; btToolTab.value = 'compare';
       compareLoading.value = true; compareResult.value = null;
       try {
         const d = await api('/backtest/compare', {method:'POST', body:JSON.stringify({
@@ -7502,8 +7529,8 @@ const app = createApp({
     async function runBacktest() {
       btRunning.value=true; btResult.value=null;
       btLive.value = {running:true, done:false, pct:0, last_price:null, position:0, cash:0, kline_history:[], recent_trades:[], last_trade:null};
-      btStep.value = 'monitor';
-      nextTick(()=>btGoto('monitor'));
+      btTab.value = 'result';   // spec §3.4①：开跑即停在结果 Tab，跑完直接可见
+      btMarkClean();            // 基线 = 本次开跑时的配置
       try {
         const d = await api('/backtest/run', {method:'POST', body:JSON.stringify(bt)});
         await new Promise(r=>setTimeout(r,300));
@@ -7559,11 +7586,13 @@ const app = createApp({
       if (!r.metrics.error && r.metrics.status!=='running') {
         btLive.value.done=true; btLive.value.running=false;
         openBtResult(r);
+        btConfigDirty.value = false;   // spec §3.4 徽标：加载结果后清除（不改基线）
       }
     }
     // ---- 回测结果右栏内联展示：范围切换、绩效卡、成交筛选与方案保存 ----
     function openBtResult(r){
       btResult.value = r;
+      btTab.value = 'result';   // spec §3.4③：历史加载/跑完统一回结果 Tab
       btRange.value = 'all';
       btTradeSearch.value = '';
       btTradeShowAll.value = false;
@@ -7676,9 +7705,14 @@ const app = createApp({
     function delBtPlan(i){ btPlans.value.splice(i,1); localStorage.setItem(BT_PLAN_KEY,JSON.stringify(btPlans.value)); }
     loadBtPlans();
     function btGoto(key){
-      btStep.value=key;
-      const ids={config:'bt-config',monitor:'bt-monitor',result:'bt-result',history:'bt-history'}, el=document.getElementById(ids[key]);
-      if (el) el.scrollIntoView({behavior:'smooth',block:'start'});
+      // Tab 工作区：先切到 section 所属 Tab，渲染完成后再滚动（v-if 容器 nextTick 才存在）
+      btStep.value = key;
+      btTab.value = BT_TAB_OF_SECTION[key] || 'result';
+      if (key === 'overfit' || key === 'gridscan' || key === 'compare') btToolTab.value = key;
+      nextTick(() => {
+        const el = document.getElementById('bt-' + key);
+        if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
+      });
     }
 
     async function loadDashTickers() {
@@ -8054,6 +8088,9 @@ const app = createApp({
     let onVis = null;
     let onResize = null;
     let onDocClick = null;
+    let onKeyEsc = null;
+    // spec §3.2：浮层 Esc 关闭（复用 menu-drop 单槽——Esc 清空即全部收起）
+    onKeyEsc = (e) => { if (e.key === 'Escape' && formDrop.value) formDrop.value = ''; };
     onUnmounted(()=>{
       clearInterval(clockTimer);
       while (pollTimers.length) clearInterval(pollTimers.pop());
@@ -8061,6 +8098,7 @@ const app = createApp({
       if (onVis) document.removeEventListener('visibilitychange', onVis);
       if (onResize) window.removeEventListener('resize', onResize);
       if (onDocClick) document.removeEventListener('click', onDocClick);
+      if (onKeyEsc) document.removeEventListener('keydown', onKeyEsc);
     });
     onMounted(async ()=>{
       tick(); clockTimer = setInterval(tick, 1000);
@@ -8147,6 +8185,7 @@ const app = createApp({
         if (evolvePanelOpen.value && e.target.closest &&
             !e.target.closest('.evolve-panel, .evolve-panel-pop, .evolve-symbols-pop')) toggleEvolvePanel(false);
       };
+      document.addEventListener('keydown', onKeyEsc);
       document.addEventListener('click', onDocClick);
       // P1-11 全局 resize：debounce 150ms 遍历全部图表实例（isDisposed 守卫）
       onResize = debounce(()=>{
@@ -8171,6 +8210,7 @@ const app = createApp({
       riskGroups: RISK_GROUPS, riskDirtySet, riskRowCls, riskOff, riskSub, revertRisk,
       ai, aiMsg, aiMsgOk, aiTesting, aiFeatureParams, featureParamLabel, autoAnalysis, toggleAutoAnalysis, exKeys, notifyCfg, notifyTesting, notifyMsg, notifyMsgOk, loadNotifyConfig, saveNotifyConfig, testNotify,
       bt, btRunning, btResult, btHistory, btHistoryGroups, btHistoryLoading, btHistoryError, loadBtHistory, btLive, btStep, btGoto, openBtResult, btMetrics, btAdvice, btLegend, btRange, setBtRange, btTradeSearch, btTradeShowAll, btTradesAll, btTradesShown, exportBtTradesCsv, btLocalCoverage, btPlans, saveBtPlan, applyBtPlan, delBtPlan,
+      btTab, btToolTab, btConfigDirty, btTileGlow,
       overfitLoading, overfitResult, runOverfit,
       gridScanLoading, gridScanResult, runGridScan, useGridBest, runOverfitForBest, plateauInfo, renderPlateauChart,
       compareLoading, compareResult, compareStrategies,

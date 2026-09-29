@@ -24,3 +24,57 @@ def test_context_bar_is_transparent_and_menu_bar_is_untouched():
     assert ".menubar{backdrop-filter:blur" in HTML
     assert "background:color-mix" in HTML
     assert "var(--glass-edge)" in HTML
+
+
+def _bt_view():
+    start = HTML.find("<!-- ========== 历史回测 ========== -->")
+    assert start != -1, "回测视图模板起点丢失"
+    return HTML[start:HTML.find("</section>", start)]
+
+
+def test_bt_tab_state_defined_and_exported():
+    assert "const btTab = ref('result')" in HTML
+    assert "const btToolTab = ref('overfit')" in HTML
+    assert "const btConfigDirty = ref(false)" in HTML
+    anchor = HTML.find("return {view, settingsTab")
+    assert anchor != -1
+    ret = HTML[anchor:]
+    for name in ("btTab", "btToolTab", "btConfigDirty", "btTileGlow"):
+        assert name in ret, name + " 未从 setup 导出"
+
+
+def test_bt_goto_switches_tab():
+    body = HTML[HTML.find("function btGoto"):]
+    body = body[:body.find("}", body.find("function btGoto")) + 1]
+    assert "BT_TAB_OF_SECTION" in body
+    assert "btTab.value" in body
+
+
+def test_bt_auto_switch_wiring():
+    # 开跑→结果；工具发起→工具对应子 Tab；结果打开→结果 Tab
+    assert "btTab.value = 'result'" in HTML
+    assert "btToolTab.value = 'gridscan'" in HTML
+    assert "btToolTab.value = 'compare'" in HTML
+    assert "btToolTab.value = 'overfit'" in HTML
+
+
+def test_bt_config_dirty_watch():
+    start = HTML.find("let btBaseline")
+    assert start != -1
+    body = HTML[start:HTML.find("async function runOverfit", start)]
+    assert "watch(bt," in body or "watch(bt ," in body
+    assert "{deep:true}" in body or "{ deep: true }" in body
+
+
+def test_bt_esc_closes_formdrop():
+    start = HTML.find("onKeyEsc")
+    assert start != -1
+    body = HTML[start:start + 400]
+    assert "'Escape'" in body and "formDrop.value = ''" in body
+
+
+def test_bt_tile_glow_rule():
+    start = HTML.find("function btTileGlow")
+    assert start != -1
+    body = HTML[start:start + 500]
+    assert "'总收益'" in body and "'最大回撤'" in body

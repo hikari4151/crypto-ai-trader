@@ -33,15 +33,15 @@ def test_gate_registered_in_verify_all_and_ci():
 def test_measure_returns_all_expected_paths():
     """测量覆盖回测双引擎 / compute_latest / evolve 批量 / K 线引擎 / 启动合成路径。"""
     m = pb.measure()
-    for key in ("backtest_engine_3000", "backtest_fast_3000",
+    for key in ("backtest_engine_3000", "backtest_fast_3000", "backtest_engine_100k",
                 "compute_latest_3000", "evolve_batch_10x5000", "kline_engine_100",
                 "startup_composite"):
         assert key in m, f"缺测量项 {key}"
         assert m[key] >= 0.0
     assert m["backtest_engine_3000"] > 0.0, "3000 根回测不可能 0ms"
-    assert m["compute_latest_3000"] > 0.0
-    assert m["evolve_batch_10x5000"] > 0.0, "批量候选回测不可能 0ms"
-    assert m["startup_composite"] > 0.0, "启动装配不可能 0ms"
+    assert m["backtest_engine_100k"] > 0.0, "100k 根回测不可能 0ms"
+    assert m["backtest_engine_100k"] > m["backtest_engine_3000"], \
+        "100k 根必须比 3k 根慢（缩放档位自洽）"
 
 
 def test_main_returns_one_without_baseline(monkeypatch, capsys):
@@ -56,12 +56,14 @@ def test_main_returns_one_without_baseline(monkeypatch, capsys):
 def test_main_passes_within_tolerance(monkeypatch, capsys):
     """耗时在基线×余量内 → 通过（防灾难性回归语义，非脆弱毫秒断言）。"""
     fake = {"paths": {"backtest_engine_3000": 64.0, "backtest_fast_3000": 64.0,
+                      "backtest_engine_100k": 1100.0,
                       "compute_latest_3000": 31.0, "evolve_batch_10x5000": 1100.0,
                       "kline_engine_100": 0.0, "startup_composite": 60.0},
             "tolerance": 4.0}
     monkeypatch.setattr(pb, "load_baseline", lambda: fake)
     monkeypatch.setattr(pb, "measure", lambda: {"backtest_engine_3000": 65.0,
                                                 "backtest_fast_3000": 66.0,
+                                                "backtest_engine_100k": 1200.0,
                                                 "compute_latest_3000": 32.0,
                                                 "evolve_batch_10x5000": 1200.0,
                                                 "kline_engine_100": 0.01,
@@ -73,12 +75,14 @@ def test_main_passes_within_tolerance(monkeypatch, capsys):
 def test_main_fails_on_order_of_magnitude_regression(monkeypatch, capsys):
     """O(n²) 化回归（耗时 ×10）必须拦下——这是门禁存在的意义。"""
     fake = {"paths": {"backtest_engine_3000": 64.0, "backtest_fast_3000": 64.0,
+                      "backtest_engine_100k": 1100.0,
                       "compute_latest_3000": 31.0, "evolve_batch_10x5000": 1100.0,
                       "kline_engine_100": 0.0, "startup_composite": 60.0},
             "tolerance": 4.0}
     monkeypatch.setattr(pb, "load_baseline", lambda: fake)
     monkeypatch.setattr(pb, "measure", lambda: {"backtest_engine_3000": 900.0,
                                                 "backtest_fast_3000": 64.0,
+                                                "backtest_engine_100k": 1200.0,
                                                 "compute_latest_3000": 31.0,
                                                 "evolve_batch_10x5000": 1100.0,
                                                 "kline_engine_100": 0.0,

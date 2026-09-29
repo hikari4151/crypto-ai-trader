@@ -58,6 +58,12 @@ def measure() -> dict[str, float]:
     out["backtest_engine_3000"] = _median_ms(lambda: run_backtest(df, cfg))
     out["backtest_fast_3000"] = _median_ms(lambda: run_backtest_fast(df, cfg))
 
+    # 1b) 10 万根大样本（专拦超线性缩放回归）：3k 测不出 O(n²) 化
+    #     （n=3k 时可能仍平缓，n=100k 时爆炸）——大样本档把"复杂度退化"
+    #     与"常数变慢"区分开。实测 100k ~1.1s，门禁内单跑一次可接受。
+    df100k = generate_demo(n=100000)
+    out["backtest_engine_100k"] = _median_ms(lambda: run_backtest(df100k, cfg), repeat=1)
+
     # 2) 指标 compute_latest（AI 解读 / 实时快照共用）
     from indicators.technical import compute_latest
     ohlcv = [[1700000000000 + i * 3600000, 100.0 + i * 0.1, 101.0 + i * 0.1,

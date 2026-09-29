@@ -1,10 +1,11 @@
 {
   "paths": {
-    "backtest_engine_3000": 62.84270000469405,
-    "backtest_fast_3000": 64.43399999989197,
-    "compute_latest_3000": 30.785099996137433,
-    "evolve_batch_10x5000": 1092.3782999961986,
-    "kline_engine_100": 0.0034999975468963385
+    "backtest_engine_3000": 64.97489999946993,
+    "backtest_fast_3000": 65.62189999931434,
+    "compute_latest_3000": 31.041000000186614,
+    "evolve_batch_10x5000": 1118.1492000005164,
+    "kline_engine_100": 0.003499999365885742,
+    "startup_composite": 53.72850000003382
   },
   "tolerance": 4.0,
   "note": "2026-09-28 实测校准（median × tolerance 作为阈值，防灾难性回归）"

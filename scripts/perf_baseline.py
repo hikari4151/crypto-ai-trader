@@ -140,6 +140,38 @@ def measure() -> dict[str, float]:
         return asyncio.run(run())
 
     out["kline_engine_100"] = bench_klines()
+
+    # 4) 启动合成路径（db.init → 动态策略恢复 → 引擎构造 → evolve 装配）：
+    #    与真实 run.py web lifespan 一致但用内存库+空库，不 spawn 服务
+    #    （门禁链保持轻量）。三者叠加防"启动整体变慢"的回归。
+    def bench_startup():
+        import asyncio
+
+        async def run():
+            from core.bus import EventBus
+            from core.database import Database
+            from engine.trading_engine import TradingEngine
+            from strategies.dynamic_store import restore_from_db
+
+            t0 = time.perf_counter()
+            db = Database("sqlite+aiosqlite:///:memory:")
+            await db.init()
+            await restore_from_db(db)
+            eng = TradingEngine(db, EventBus())
+            try:
+                await eng.evolve.start()
+            except Exception:  # noqa: BLE001  # evolve 装配失败不影响启动测量
+                pass
+            try:
+                await eng.evolve.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            await db.close()
+            return (time.perf_counter() - t0) * 1000.0
+
+        return asyncio.run(run())
+
+    out["startup_composite"] = bench_startup()
     return out
 
 

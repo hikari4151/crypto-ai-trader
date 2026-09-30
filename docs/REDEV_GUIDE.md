@@ -65,7 +65,7 @@
 | `engine/` | `trading_engine.py`（调度中枢，三把锁）、`risk.py`（检查带顶层兜底 + cooldown/人工解除）、`order_manager.py`（限价单生命周期/对账）、`portfolio.py`、`protective_stop.py`（服务端兜底止损） |
 | `net/` | `proxy_client.py`（代理探测/网络加速客户端：hysteria 检测与下载、本地 SOCKS5 启动、节点选择）、`proxy_nodes.py`（订阅解析：Clash YAML/ss/vmess/trojan/ssr/hysteria2/tuic/wireguard + Quantumult X/Loon + base64 自动解码、节点可达性探测）。**无 `__init__.py`**（与 `config/` 同为隐式命名空间包） |
 | `web/api/` | 15 个路由：ai / backtest / data（K 线库+下载）/ drl / **evolve** / exchanges / factors / live / market / notify / performance / portfolio / risk / strategy_repo / trading + `tasks_cache.py`（进度缓存 TTL 清理） |
-| `web/static/` | `index.html` 单体 + `vendor/`（vue.global.prod.js / tailwind.js / echarts.min.js，带 SRI）。**无拆分 js/css** |
+| `web/static/` | `index.html` 单体 + `vendor/`（vue.global.prod.js / tailwind.js / **echarts.custom.min.js** 按需打包，带 SRI）。**无拆分 js/css**。echarts 自定义包由 `scripts/build_echarts_custom.py` 构建（体积/传输 -35%+，与完整包渲染等价） |
 
 ### 引擎内部结构（trading_engine）
 `__init__` 创建 OrderManager / PortfolioManager / RiskManager / AIClient / MarketAnalyst / ParamOptimizer / TradeReviewer / StrategyDesigner / StrategyIteration / EvolveEngine；三把锁 `_lifecycle_lock` / `_candle_lock`（K 线串行防重复下单）/ `_strategy_lock`（热切换）。订阅 MARKET_CANDLE / MARKET_TICKER / ORDER_FILL。

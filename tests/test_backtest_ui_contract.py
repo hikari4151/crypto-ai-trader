@@ -78,3 +78,36 @@ def test_bt_tile_glow_rule():
     assert start != -1
     body = HTML[start:start + 500]
     assert "'总收益'" in body and "'最大回撤'" in body
+
+
+def _bt_script_body():
+    start = HTML.find("async function runOverfit")
+    return HTML[start:]
+
+
+def test_bt_configbar_fields():
+    v = _bt_view()
+    assert 'class="bt-configbar"' in v
+    assert 'id="bt-config"' in v          # btGoto('config') 的锚点落在配置条
+    for binding in ("bt.data_source", "bt.symbol", "bt.timeframe", "bt.strategy_name",
+                    "bt.since", "bt.until"):
+        assert binding in v, binding
+    # 工具三键必须位于配置条内（严格包含断言）
+    bar = v[v.find('bt-configbar'):]
+    for call in ("runGridScan()", "compareStrategies()", "runOverfit()"):
+        assert call in bar, call + " 不在配置条内"
+    # 周期数组字面量不得改写（既有测试同源，双保险）
+    assert "['5m','15m','30m','1h','4h','1d']" in v
+
+
+def test_bt_advanced_popup():
+    v = _bt_view()
+    assert "formDrop==='btAdvanced'" in v
+    for binding in ("bt.start_cash", "bt.fee_rate", "bt.slippage", "bt.limit", "bt.use_gpu"):
+        assert binding in v, binding
+
+
+def test_bt_config_sections_retired():
+    v = _bt_view()
+    assert "mac-form-section" not in v          # 旧四段堆叠容器全部迁走
+    assert 'id="bt-config" class="mac-window"' not in v

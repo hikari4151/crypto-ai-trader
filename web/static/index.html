@@ -37,7 +37,7 @@
      tailwind.js 为 Tailwind Play CDN 运行时脚本（本地化后的等价物）。 -->
 <script src="/static/vendor/tailwind.js" integrity="sha384-igm5BeiBt36UU4gqwWS7imYmelpTsZlQ45FZf+XBn9MuJbn4nQr7yx1yFydocC/K" crossorigin="anonymous"></script>
 <script src="/static/vendor/vue.global.prod.js" integrity="sha384-6pS1WSZJY7wOk6qQTa9C9U2W1/qzqL7iYoMil7qn9KFeN5fZDAwIExgCd7U5AH+X" crossorigin="anonymous"></script>
-<script src="/static/vendor/echarts.min.js" integrity="sha384-o5uz97et3bErHvpKfD4Jz4n0JfhJDWABFuF4NP+iEEDxE1VwMWJ19QGR0lqFZnr6" crossorigin="anonymous"></script>
+<script src="/static/vendor/echarts.custom.min.js" integrity="sha384-fS5iCmEnouMVpnj0eVi+hjx2nABl2hJ9tTvdf0tt7kY3mx4qieK+L9uBTQbqkeWt" crossorigin="anonymous"></script>
 <style>
   html{scroll-behavior:smooth;scrollbar-gutter:stable}
   /* ⚠️ 不要在 * 上写 overscroll-behavior:contain（2026-09-19 修）——
@@ -562,6 +562,21 @@
   @media (max-width:1100px){.bt-layout{grid-template-columns:1fr}}
   .bt-tools{display:flex;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
   .bt-tools .mac-btn{flex:1;justify-content:center;min-width:0;padding-left:8px;padding-right:8px}
+  /* ---- 紧凑配置条（spec §3.2）：开跑所需字段常驻一行，窄屏换行 ---- */
+  .bt-configbar{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;
+    background:var(--bg-1);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+  .bt-cb-group{display:flex;flex-direction:column;gap:5px;min-width:0}
+  .bt-cb-lb{font-size:var(--fs-micro);color:var(--text3);font-weight:600;letter-spacing:var(--fs-micro-ls)}
+  .bt-cb-group .mac-seg{width:auto}
+  .bt-cb-dates{display:flex;align-items:center;gap:6px}
+  .bt-cb-dates .mac-input{width:130px}
+  .bt-cb-sep{color:var(--text3)}
+  .bt-cb-hint{font-size:var(--fs-caption);color:var(--muted);max-width:320px;line-height:1.5}
+  .bt-cb-tools{display:flex;gap:8px;margin-left:auto;align-items:center;flex-wrap:wrap}
+  /* ---- 高级参数浮层（menu-drop 同族） ---- */
+  .bt-advpop{flex-direction:column;gap:8px;padding:11px 12px;max-height:70vh}
+  .bt-advpop-title{font-size:var(--fs-body);font-weight:650;color:var(--text)}
+  .bt-advpop .mac-field-row{align-items:center}
   .stat-card .sub{font-size:var(--fs-caption);color:var(--muted);margin-top:3px;letter-spacing:.1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .bt-advice{display:flex;align-items:flex-start;gap:10px;padding:12px 16px;border-radius:var(--r-lg);background:color-mix(in srgb,var(--orange) 10%,transparent);border:1px solid color-mix(in srgb,var(--orange) 38%,transparent);color:color-mix(in srgb,var(--orange) 88%,var(--text));font-size:var(--fs-footnote);line-height:var(--lh-body)}
   .bt-advice svg{width:15px;height:15px;flex:none;margin-top:1px}
@@ -3046,118 +3061,15 @@
 <transition name="page" mode="out-in">  <!-- view: backtest -->
     <section v-if="view==='backtest'" class="space-y-3.5">
       <div class="page-head">
-        <div>
-          
-        </div>
+        <div></div>
         <div class="page-actions">
-          <div class="menu-drop" :class="{open: formDrop==='btPlan'}">
-            <button class="mac-btn" data-form-key="btPlan" :aria-expanded="formDrop==='btPlan'?'true':'false'" aria-haspopup="true" @click.stop="toggleFormDrop('btPlan', $event)">
-              <svg width="13" height="13"><use href="#i-save"/></svg>保存方案<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:2px"><path d="M6 9l6 6 6-6"/></svg>
+          <div class="menu-drop" :class="{open: formDrop==='btAdvanced'}">
+            <button class="mac-btn" data-form-key="btAdvanced" :aria-expanded="formDrop==='btAdvanced'?'true':'false'" aria-haspopup="true" @click.stop="toggleFormDrop('btAdvanced', $event)">
+              <svg width="13" height="13"><use href="#i-sliders"/></svg>高级参数<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:2px"><path d="M6 9l6 6 6-6"/></svg>
             </button>
             <Teleport to="body">
-              <div v-if="formDrop==='btPlan'" ref="formDropMenu" class="menu-sub" :style="formDropStyle" @click.stop style="min-width:260px;overflow-y:auto">
-                <div class="text-[length:var(--fs-caption)] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">已保存的回测方案</div>
-                <!-- 二级选项只留名称：原 {{p.at}} 时间戳副标题属「描述」，按要求移除 -->
-                <span v-for="(p,i) in btPlans" :key="p.at+i" class="menu-item sub" style="justify-content:space-between;gap:8px" @click="applyBtPlan(i)">
-                  <span class="font-mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{p.name}}</span>
-                  <button class="mac-btn" style="padding:0 7px;font-size:var(--fs-caption);flex:none" title="删除方案" @click.stop="delBtPlan(i)">✕</button>
-                </span>
-                <div style="border-top:1px solid var(--border);padding:6px 8px 4px">
-                  <button class="mac-btn" style="width:100%;padding:4px 10px" @click="saveBtPlan()"><svg width="12" height="12"><use href="#i-save"/></svg>保存当前配置为方案</button>
-                </div>
-              </div>
-            </Teleport>
-          </div>
-          <button class="mac-btn primary" @click="runBacktest()" :disabled="btRunning">
-            <svg v-if="!btRunning" width="13" height="13"><use href="#i-play"/></svg>{{btRunning?'回测中…':'开始回测'}}
-          </button>
-        </div>
-      </div>
-
-      <div class="bt-layout">
-        <div class="mac-window" id="bt-config">
-          <div class="mac-body" style="padding:14px">
-            <div class="mac-form-section">
-              <div class="mac-form-section-title"><svg><use href="#i-inbox"/></svg>数据来源</div>
-              <div class="mac-form-body">
-                <div class="mac-seg" style="width:100%">
-                  <button :class="bt.data_source==='demo'?'active':''" @click="bt.data_source='demo'">演示数据</button>
-                  <button :class="bt.data_source==='exchange'?'active':''" @click="bt.data_source='exchange'">交易所</button>
-                  <button :class="bt.data_source==='csv'?'active':''" @click="bt.data_source='csv'">CSV 文件</button>
-                </div>
-                <div v-if="bt.data_source==='exchange'" style="margin-top:12px">
-                  <label class="mac-label">交易所</label>
-                  <mac-select v-model="bt.exchange" :options="exchangeOptions" style="width:100%"></mac-select>
-                </div>
-                <div v-if="bt.data_source==='csv'" style="margin-top:12px">
-                  <label class="mac-label" for="btCsvPath">CSV 路径</label>
-                  <input id="btCsvPath" v-model="bt.csv_path" class="mac-input" style="width:100%" placeholder="/path/to/btc_usdt_1h.csv"/>
-                </div>
-              </div>
-            </div>
-
-            <div class="mac-form-section">
-              <div class="mac-form-section-title"><svg><use href="#i-coins"/></svg>标的与周期</div>
-              <div class="mac-form-body">
-                <div><label class="mac-label" for="btSymbol">交易对</label>
-                  <div class="menu-drop" :class="{open: formDrop==='btSymbol'}" style="width:100%">
-                    <button id="btSymbol" class="mac-input" style="width:100%;display:flex;align-items:center;gap:6px" :data-form-key="'btSymbol'" :aria-expanded="formDrop==='btSymbol'?'true':'false'" aria-haspopup="true" @click.stop="toggleFormDrop('btSymbol', $event)">
-                      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{bt.symbol}}</span>
-                      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex:none"><path d="M6 9l6 6 6-6"/></svg>
-                    </button>
-                    <Teleport to="body">
-                      <div v-if="formDrop==='btSymbol'" ref="formDropMenu" class="menu-sub" :style="formDropStyle" @click.stop style="min-width:230px;overflow-y:auto">
-                        <div class="text-[length:var(--fs-caption)] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">选择交易对</div>
-                        <span v-for="s in btSymbolOptions" :key="s" class="menu-item sub" :class="bt.symbol===s?'active':''" @click="setBtSymbol(s)" style="padding:5px 12px;justify-content:space-between">{{s}}<svg v-if="bt.symbol===s" width="11" height="11"><use href="#i-check"/></svg></span>
-                        <div class="flex gap-1 mt-1" style="border-top:1px solid var(--border);padding:6px 8px 4px">
-                          <input v-model="btSymbolManual" class="mac-input" style="flex:1;min-width:0;padding:4px 8px" placeholder="输入其他交易对（如 DOGE/USDT）" @keydown.enter.prevent="addBtSymbolManual()"/>
-                          <button class="mac-btn btn-sm" style="padding:3px 10px" @click="addBtSymbolManual()">确定</button>
-                        </div>
-                      </div>
-                    </Teleport>
-                  </div>
-                </div>
-                <div style="margin-top:12px"><label class="mac-label">K 线周期</label>
-                  <div class="mac-seg" style="width:100%">
-                    <button v-for="tf in ['5m','15m','30m','1h','4h','1d']" :key="tf" :class="bt.timeframe===tf?'active':''" @click="bt.timeframe=tf">{{tf}}</button>
-                  </div>
-                </div>
-                <div style="margin-top:12px"><label class="mac-label" for="btStrategy">策略</label>
-                  <div class="menu-drop" :class="{open: formDrop==='btStrategy'}" style="width:100%">
-                    <button id="btStrategy" class="mac-input" style="width:100%;display:flex;align-items:center;gap:6px" :data-form-key="'btStrategy'" :aria-expanded="formDrop==='btStrategy'?'true':'false'" aria-haspopup="true" @click.stop="toggleFormDrop('btStrategy', $event)">
-                      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{bt.strategy_name || '选择策略…'}}</span>
-                      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex:none"><path d="M6 9l6 6 6-6"/></svg>
-                    </button>
-                    <Teleport to="body">
-                      <div v-if="formDrop==='btStrategy'" ref="formDropMenu" class="menu-sub" :style="formDropStyle" @click.stop style="min-width:240px;overflow-y:auto">
-                        <div class="text-[length:var(--fs-caption)] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">选择回测策略</div>
-                        <span v-for="s in btStrategyOptions" :key="s.name" class="menu-item sub" :class="bt.strategy_name===s.name?'active':''" @click="setBtStrategy(s.name)" style="padding:5px 12px;justify-content:space-between">
-                          <span style="display:flex;align-items:center;gap:6px;min-width:0"><span class="font-mono" style="overflow:hidden;text-overflow:ellipsis">{{s.name}}</span><span v-if="kindLabel(strategyKindMap[s.name])" class="pill" :class="kindPill(strategyKindMap[s.name])" style="padding:0 6px;flex:none">{{kindLabel(strategyKindMap[s.name])}}</span></span>
-                          <svg v-if="bt.strategy_name===s.name" width="11" height="11" style="flex:none"><use href="#i-check"/></svg>
-                        </span>
-                      </div>
-                    </Teleport>
-                  </div>
-                  <div class="mac-form-hint" style="margin-top:5px">参数跟随策略默认值，可在策略工坊中调整</div>
-                </div>
-              </div>
-            </div>
-
-            <div class="mac-form-section">
-              <div class="mac-form-section-title"><svg><use href="#i-clock"/></svg>时间范围</div>
-              <div class="mac-form-body">
-                <div class="grid grid-cols-2 gap-3">
-                  <div><label class="mac-label" for="btSince">开始</label><input id="btSince" type="date" v-model="bt.since" class="mac-input" style="width:100%"/></div>
-                  <div><label class="mac-label" for="btUntil">结束</label><input id="btUntil" type="date" v-model="bt.until" class="mac-input" style="width:100%"/></div>
-                </div>
-                <div class="text-[length:var(--fs-caption)] text-slate-500" style="margin-top:8px" v-if="btLocalCoverage">{{btLocalCoverage}}</div>
-                <div class="text-[length:var(--fs-caption)] text-slate-500" style="margin-top:8px" v-else>留空则使用最新 K 线；批量下载历史数据请前往 <button class="mac-btn btn-sm" style="padding:1px 8px" @click="switchView('settings'); settingsTab='data'">系统设置 · 数据管理</button></div>
-              </div>
-            </div>
-
-            <div class="mac-form-section">
-              <div class="mac-form-section-title"><svg><use href="#i-sliders"/></svg>高级参数</div>
-              <div class="mac-form-body">
+              <div v-if="formDrop==='btAdvanced'" ref="formDropMenu" class="menu-sub bt-advpop" :style="formDropStyle" @click.stop style="min-width:320px;overflow-y:auto">
+                <div class="bt-advpop-title">高级参数</div>
                 <div class="mac-field-row">
                   <label class="fr-label" for="btStartCash">初始资金</label>
                   <div class="fr-ctrl"><input id="btStartCash" v-model.number="bt.start_cash" class="mac-input" type="number" min="0"/><span class="fr-unit">USDT</span></div>
@@ -3179,15 +3091,111 @@
                   <div class="fr-ctrl"><div id="btGpuToggle" class="mac-toggle" role="switch" aria-label="回测 GPU 加速" :aria-checked="bt.use_gpu?true:false" tabindex="0" :class="bt.use_gpu?'on':''" @click="bt.use_gpu=!bt.use_gpu" @keydown.enter.prevent="bt.use_gpu=!bt.use_gpu" @keydown.space.prevent="bt.use_gpu=!bt.use_gpu"></div><span class="text-[length:var(--fs-caption)]" :class="bt.use_gpu?'pos':'text-slate-500'">{{bt.use_gpu?'已启用':'未启用'}}</span></div>
                 </div>
               </div>
-            </div>
+            </Teleport>
+          </div>
+          <!-- 保存方案 menu-drop：原块原样剪切至此（含 Teleport 与方案列表/删除/保存按钮，零改动） -->
+          <div class="menu-drop" :class="{open: formDrop==='btPlan'}">
+            <button class="mac-btn" data-form-key="btPlan" :aria-expanded="formDrop==='btPlan'?'true':'false'" aria-haspopup="true" @click.stop="toggleFormDrop('btPlan', $event)">
+              <svg width="13" height="13"><use href="#i-save"/></svg>保存方案<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:2px"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <Teleport to="body">
+              <div v-if="formDrop==='btPlan'" ref="formDropMenu" class="menu-sub" :style="formDropStyle" @click.stop style="min-width:260px;overflow-y:auto">
+                <div class="text-[length:var(--fs-caption)] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">已保存的回测方案</div>
+                <!-- 二级选项只留名称：原 {{p.at}} 时间戳副标题属「描述」，按要求移除 -->
+                <span v-for="(p,i) in btPlans" :key="p.at+i" class="menu-item sub" style="justify-content:space-between;gap:8px" @click="applyBtPlan(i)">
+                  <span class="font-mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{p.name}}</span>
+                  <button class="mac-btn" style="padding:0 7px;font-size:var(--fs-caption);flex:none" title="删除方案" @click.stop="delBtPlan(i)">✕</button>
+                </span>
+                <div style="border-top:1px solid var(--border);padding:6px 8px 4px">
+                  <button class="mac-btn" style="width:100%;padding:4px 10px" @click="saveBtPlan()"><svg width="12" height="12"><use href="#i-save"/></svg>保存当前配置为方案</button>
+                </div>
+              </div>
+            </Teleport>
+          </div>
+          <!-- 开始回测按钮：原块原样剪切至此（runBacktest 调用与 disabled/文案不变） -->
+          <button class="mac-btn primary" @click="runBacktest()" :disabled="btRunning">
+            <svg v-if="!btRunning" width="13" height="13"><use href="#i-play"/></svg>{{btRunning?'回测中…':'开始回测'}}
+          </button>
+        </div>
+      </div>
 
-            <div class="bt-tools">
-              <button class="mac-btn" @click="runGridScan()" :disabled="gridScanLoading">{{gridScanLoading?'扫描中…':'参数扫描'}}</button>
-              <button class="mac-btn" @click="compareStrategies()" :disabled="compareLoading">{{compareLoading?'对比中…':'策略对比'}}</button>
-              <button class="mac-btn" @click="runOverfit()" :disabled="overfitLoading">{{overfitLoading?'检测中…':'过拟合检测'}}</button>
-            </div>
+      <div class="bt-configbar" id="bt-config">
+        <div class="bt-cb-group">
+          <div class="bt-cb-lb">数据来源</div>
+          <div class="mac-seg">
+            <button :class="bt.data_source==='demo'?'active':''" @click="bt.data_source='demo'">演示数据</button>
+            <button :class="bt.data_source==='exchange'?'active':''" @click="bt.data_source='exchange'">交易所</button>
+            <button :class="bt.data_source==='csv'?'active':''" @click="bt.data_source='csv'">CSV 文件</button>
+          </div>
+          <template v-if="bt.data_source==='exchange'">
+            <mac-select v-model="bt.exchange" :options="exchangeOptions" style="width:120px"></mac-select>
+          </template>
+          <template v-if="bt.data_source==='csv'">
+            <input id="btCsvPath" v-model="bt.csv_path" class="mac-input" style="width:170px" placeholder="/path/to/btc_usdt_1h.csv"/>
+          </template>
+        </div>
+        <div class="bt-cb-group">
+          <div class="bt-cb-lb">交易对</div>
+          <div class="menu-drop" :class="{open: formDrop==='btSymbol'}" style="width:auto">
+            <button id="btSymbol" class="mac-input" style="width:100%;display:flex;align-items:center;gap:6px" :data-form-key="'btSymbol'" :aria-expanded="formDrop==='btSymbol'?'true':'false'" aria-haspopup="true" @click.stop="toggleFormDrop('btSymbol', $event)">
+              <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{bt.symbol}}</span>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex:none"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <Teleport to="body">
+              <div v-if="formDrop==='btSymbol'" ref="formDropMenu" class="menu-sub" :style="formDropStyle" @click.stop style="min-width:230px;overflow-y:auto">
+                <div class="text-[length:var(--fs-caption)] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">选择交易对</div>
+                <span v-for="s in btSymbolOptions" :key="s" class="menu-item sub" :class="bt.symbol===s?'active':''" @click="setBtSymbol(s)" style="padding:5px 12px;justify-content:space-between">{{s}}<svg v-if="bt.symbol===s" width="11" height="11"><use href="#i-check"/></svg></span>
+                <div class="flex gap-1 mt-1" style="border-top:1px solid var(--border);padding:6px 8px 4px">
+                  <input v-model="btSymbolManual" class="mac-input" style="flex:1;min-width:0;padding:4px 8px" placeholder="输入其他交易对（如 DOGE/USDT）" @keydown.enter.prevent="addBtSymbolManual()"/>
+                  <button class="mac-btn btn-sm" style="padding:3px 10px" @click="addBtSymbolManual()">确定</button>
+                </div>
+              </div>
+            </Teleport>
           </div>
         </div>
+        <div class="bt-cb-group">
+          <div class="bt-cb-lb">周期</div>
+          <div class="mac-seg" style="width:100%">
+            <button v-for="tf in ['5m','15m','30m','1h','4h','1d']" :key="tf" :class="bt.timeframe===tf?'active':''" @click="bt.timeframe=tf">{{tf}}</button>
+          </div>
+        </div>
+        <div class="bt-cb-group">
+          <div class="bt-cb-lb">策略</div>
+          <div class="menu-drop" :class="{open: formDrop==='btStrategy'}" style="width:auto">
+            <button id="btStrategy" class="mac-input" style="width:100%;display:flex;align-items:center;gap:6px" :data-form-key="'btStrategy'" :aria-expanded="formDrop==='btStrategy'?'true':'false'" aria-haspopup="true" @click.stop="toggleFormDrop('btStrategy', $event)">
+              <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left">{{bt.strategy_name || '选择策略…'}}</span>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex:none"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <Teleport to="body">
+              <div v-if="formDrop==='btStrategy'" ref="formDropMenu" class="menu-sub" :style="formDropStyle" @click.stop style="min-width:240px;overflow-y:auto">
+                <div class="text-[length:var(--fs-caption)] font-semibold px-2 pt-1 pb-1" style="color:var(--muted)">选择回测策略</div>
+                <span v-for="s in btStrategyOptions" :key="s.name" class="menu-item sub" :class="bt.strategy_name===s.name?'active':''" @click="setBtStrategy(s.name)" style="padding:5px 12px;justify-content:space-between">
+                  <span style="display:flex;align-items:center;gap:6px;min-width:0"><span class="font-mono" style="overflow:hidden;text-overflow:ellipsis">{{s.name}}</span><span v-if="kindLabel(strategyKindMap[s.name])" class="pill" :class="kindPill(strategyKindMap[s.name])" style="padding:0 6px;flex:none">{{kindLabel(strategyKindMap[s.name])}}</span></span>
+                  <svg v-if="bt.strategy_name===s.name" width="11" height="11" style="flex:none"><use href="#i-check"/></svg>
+                </span>
+              </div>
+            </Teleport>
+          </div>
+          <div class="mac-form-hint" style="margin-top:5px">参数跟随策略默认值，可在策略工坊中调整</div>
+        </div>
+        <div class="bt-cb-group">
+          <div class="bt-cb-lb">时间范围</div>
+          <div class="bt-cb-dates">
+            <input id="btSince" type="date" v-model="bt.since" class="mac-input" aria-label="开始日期"/>
+            <span class="bt-cb-sep">→</span>
+            <input id="btUntil" type="date" v-model="bt.until" class="mac-input" aria-label="结束日期"/>
+          </div>
+          <div class="bt-cb-hint" v-if="btLocalCoverage">{{btLocalCoverage}}</div>
+          <div class="bt-cb-hint" v-else>留空则使用最新 K 线；批量下载前往 <button class="mac-btn btn-sm" style="padding:1px 8px" @click="switchView('settings'); settingsTab='data'">系统设置 · 数据管理</button></div>
+        </div>
+        <div class="bt-cb-tools">
+          <button class="mac-btn" @click="runGridScan()" :disabled="gridScanLoading">{{gridScanLoading?'扫描中…':'参数扫描'}}</button>
+          <button class="mac-btn" @click="compareStrategies()" :disabled="compareLoading">{{compareLoading?'对比中…':'策略对比'}}</button>
+          <button class="mac-btn" @click="runOverfit()" :disabled="overfitLoading">{{overfitLoading?'检测中…':'过拟合检测'}}</button>
+        </div>
+      </div>
+
+      <div class="bt-layout">
 
         <div class="space-y-4 bt-section" id="bt-result">
           <template v-if="btResult && btMetrics">
@@ -3572,7 +3580,6 @@
                 <div class="evolve-trigger-stack">
                   <button class="mac-btn cyan" @click="triggerFactorMiner()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.factor_miner?.active"><svg width="13" height="13"><use href="#i-dna"/></svg>{{evolveStatus.factor_miner?.active ? '因子挖掘中…' : '立即因子挖掘'}}</button>
                   <button class="mac-btn purple" @click="triggerStrategyDrl()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.strategy_drl?.active"><svg width="13" height="13"><use href="#i-brain"/></svg>{{evolveStatus.strategy_drl?.active ? '策略训练中…' : '立即策略训练'}}</button>
-                  <button class="mac-btn purple" @click="triggerMetaController()" :disabled="!evolveStatus.running || !evolveStatus.enabled || evolveStatus.meta_controller?.active"><svg width="13" height="13"><use href="#i-robot"/></svg>{{evolveStatus.meta_controller?.active ? '元策略训练中…' : '训练元策略'}}</button>
                 </div>
               </div>
               <div class="evolve-pop-group evolve-pop-anchor" v-if="evolveAnchorIssues.length" :style="{borderColor: evolveAnchorLocked ? 'rgba(245,71,94,.45)' : 'rgba(245,158,10,.3)'}">
@@ -3585,7 +3592,7 @@
         <button class="mac-btn" disabled title="进化日志导出尚未提供接口"><svg width="13" height="13"><use href="#i-download"/></svg>导出进化日志</button>
         <button class="mac-btn" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button>
       </div></div>
-      <!-- KPI 磁贴 ×8（状态光晕）：前三张点按切换曲线模型，锚点磁贴点按开浮层 -->
+      <!-- KPI 磁贴（状态光晕）：模型类磁贴点按切换曲线模型，锚点磁贴点按开浮层 -->
       <div class="evolve-kpis">
         <button v-for="t in evolveKpiTiles" :key="t.key" type="button" class="evolve-kpi"
           :class="[t.glow!=='plain' ? 'on-'+t.glow : '', (t.model || t.anchor) ? 'clickable' : '']"
@@ -3611,7 +3618,6 @@
               <div class="mac-seg">
                 <button class="mac-seg-btn" :class="evolveCurveModel==='factor_miner'?'active':''" @click="setEvolveCurveModel('factor_miner')">因子挖掘</button>
                 <button class="mac-seg-btn" :class="evolveCurveModel==='strategy_drl'?'active':''" @click="setEvolveCurveModel('strategy_drl')">策略 DRL</button>
-                <button class="mac-seg-btn" :class="evolveCurveModel==='meta_controller'?'active':''" @click="setEvolveCurveModel('meta_controller')">元策略</button>
               </div>
               <!-- 快捷范围：默认已是全量，这里给"快速回到最近一段"的入口 -->
               <div class="mac-seg">
@@ -3635,7 +3641,7 @@
         </div>
       </div>
 
-      <!-- 模型状态：三张卡由 EVOLVE_MODELS 配置驱动（见脚本区） -->
+      <!-- 模型状态：各卡由 EVOLVE_MODELS 配置驱动（见脚本区） -->
       <div class="mac-window evolve-main-models">
         <div class="mac-titlebar">
           
@@ -3643,8 +3649,8 @@
         </div>
         <div class="mac-body">
           <div class="lab">模型状态 · 部署与成果</div>
-          <!-- 三张模型状态卡：结构完全一致，此前是三份复制粘贴（约 140 行），
-               改一处要改三处且极易漏。现抽成配置数组 + v-for 单模板（约 60 行）。
+          <!-- 模型状态卡：结构完全一致，此前是逐份复制粘贴（约 140 行/卡），
+               改一处要改多处且极易漏。现抽成配置数组 + v-for 单模板（约 60 行）。
                各模型独有字段（候选/部署、跨标 OOS、锚点不一致、子策略）用 v-if 保留，
                数据里没有这些字段的模型自然不渲染，功能零丢失。 -->
           <div class="evolve-model-grid">
@@ -3682,10 +3688,6 @@
             </div>
             <div v-if="evolveModel(m.key).cross_oos" class="text-[length:var(--fs-caption)] mt-1" :class="(evolveModel(m.key).cross_oos.ret||0)>=0?'text-slate-500':'text-orange-400'">
               跨标OOS：{{evolveModel(m.key).cross_oos.symbol}} 收益 {{evolveModel(m.key).cross_oos.ret?.toFixed(4)}} (仓位 {{evolveModel(m.key).cross_oos.position_ratio?.toFixed(3)||'-'}})
-            </div>
-            <!-- 元策略控制器独有：子策略与训练间隔 -->
-            <div v-if="m.key==='meta_controller'" class="mt-2 text-[length:var(--fs-caption)] text-slate-400">
-              子策略：{{(evolveModel(m.key).sub_strategies||'dual_ma,factor_signal,price_action').split(',').join(' / ')}} · 间隔 {{evolveStatus.meta_controller_interval||600}}s
             </div>
             <div v-if="evolveModel(m.key).next_run" class="text-[length:var(--fs-caption)] text-slate-500 mt-1">
               下次训练：{{fmtTs(evolveModel(m.key).next_run * 1000)}}
@@ -4859,8 +4861,7 @@ const app = createApp({
       running:false, paused:false, enabled:true,
       factor_miner:{active:false, last_run:0, episode:0, fitness:0, symbol:''},
       strategy_drl:{active:false, last_run:0, episode:0, fitness:0, symbol:''},
-      meta_controller:{active:false, last_run:0, episode:0, fitness:0, symbol:''},
-      factor_miner_interval:60, strategy_drl_interval:60, meta_controller_interval:600,
+      factor_miner_interval:60, strategy_drl_interval:60,
       rolling_window:5000, rollback_threshold:0.95,
       symbols:["BTC/USDT","ETH/USDT","SOL/USDT"], current_symbol:"BTC/USDT",
       supervisor:null,   // 保活监督状态（巡检心跳/自愈次数/降级判定），由 /evolve/status 注入
@@ -4868,8 +4869,9 @@ const app = createApp({
     const evolveVersions = ref([]);
     const evolveVersionName = ref('');
     const evolveBestVersion = ref(0);
-    // 三张模型状态卡的差异只有「名称/图标/配色/个别文案」，数据与字段级差异交给 v-if。
+    // 两张模型状态卡的差异只有「名称/图标/配色/个别文案」，数据与字段级差异交给 v-if。
     // 新增一个训练模型只需在此加一项配置，模板零改动。
+    // 注：元策略训练管线已移除（2026-09-28），现存两张卡。
     const EVOLVE_MODELS = [
       { key:'factor_miner', name:'因子挖掘', icon:'#i-dna', color:'var(--accent)',
         pillBg:'rgba(13,204,130,.15)', pillColor:'#0DCC82',
@@ -4881,15 +4883,10 @@ const app = createApp({
         chipBg:'rgba(139,92,246,.15)', chipColor:'rgba(139,92,246,.9)',
         border:'rgba(139,92,246,.3)', fitnessLabel:'当前收益',
         versionTitle:'策略 DRL 版本列表', rejectedLabel:'OOS 拦截：' },
-      { key:'meta_controller', name:'元策略控制器', icon:'#i-robot', color:'var(--purple)',
-        pillBg:'rgba(191,90,242,.18)', pillColor:'#e0b0ff',
-        chipBg:'rgba(191,90,242,.15)', chipColor:'rgba(191,90,242,.9)',
-        border:'rgba(191,90,242,.3)', fitnessLabel:'当前收益',
-        versionTitle:'元策略控制器版本列表', rejectedLabel:'OOS 拦截：' },
     ];
     function evolveModel(key) { return evolveStatus[key] || {}; }
     function evolveNextRun() {
-      const runs = ['factor_miner', 'strategy_drl', 'meta_controller']
+      const runs = ['factor_miner', 'strategy_drl']
         .map(key => Number(evolveStatus[key]?.next_run || 0))
         .filter(value => value > 0);
       return runs.length ? fmtTs(Math.min(...runs) * 1000) : '按计划运行';
@@ -4984,14 +4981,10 @@ const app = createApp({
       try { toast('开始策略 DRL 训练（约数秒~1分钟）…','info'); await api('/evolve/trigger/strategy-drl', {method:'POST'}); await fetchEvolveStatus(); toast('策略训练完成','ok'); }
       catch(e) { toast('策略训练失败：'+(e.message||e),'error'); }
     }
-    async function triggerMetaController() {
-      try { toast('开始元策略控制器训练（统一子策略，约数秒~1分钟）…','info'); await api('/evolve/trigger/meta-controller', {method:'POST'}); await fetchEvolveStatus(); toast('元策略训练完成','ok'); }
-      catch(e) { toast('元策略训练失败：'+(e.message||e),'error'); }
-    }
     // ---- 持续进化：回退基线（锚点）健康度 ----
     // 只有「不可比锚点 + 连续拒绝」才该给重置按钮：同口径下的连续拒绝是正常保护，
     // 无锚点时回退守卫根本不生效（streak 只是重置前的历史），重置都只会放行更差的模型。
-    const EVOLVE_MODEL_LABELS = {factor_miner:'因子挖掘', strategy_drl:'策略DRL', meta_controller:'元策略'};
+    const EVOLVE_MODEL_LABELS = {factor_miner:'因子挖掘', strategy_drl:'策略DRL'};
     const evolveAnchorIssues = computed(() => {
       const anchors = evolveStatus.anchor || {};
       const rows = [];
@@ -5032,7 +5025,7 @@ const app = createApp({
       symbols:["BTC/USDT","ETH/USDT","SOL/USDT"],
       timeframe:'', factor_miner_interval:60, strategy_drl_interval:60,
       rolling_window:5000, rollback_threshold:0.95,
-      factor_miner_episodes:8, strategy_drl_episodes:8, meta_episodes:8,
+      factor_miner_episodes:8, strategy_drl_episodes:8,
       vol_penalty:20, oos_min_bars:250, cross_symbol_oos:true, min_new_bars:50,
     });
     async function fetchEvolveConfig() {
@@ -5141,8 +5134,8 @@ const app = createApp({
       if (v === 'settings' && t === 'syslog' && (pv !== v || pt !== t)) refreshLogs();
     });
     // ---- 持续进化：训练轮次曲线（P2-13） ----
-    const evolveRounds = reactive({factor_miner:[], strategy_drl:[], meta_controller:[]});
-    const evolveRoundsTotal = reactive({factor_miner:0, strategy_drl:0, meta_controller:0});
+    const evolveRounds = reactive({factor_miner:[], strategy_drl:[]});
+    const evolveRoundsTotal = reactive({factor_miner:0, strategy_drl:0});
     const evolveCurveModel = ref('strategy_drl');
     const evolveCurveHasData = computed(()=> (evolveRounds[evolveCurveModel.value]||[]).length > 0);
     // 轮次状态语义（两级，取自 drl/evolve_engine.py 的实际判定，不混为一色）：
@@ -5176,7 +5169,7 @@ const app = createApp({
     // ── 单一派生源（2026-09-24 重构）──────────────────────────────────────────
     // 图表（折线 / 事件点）与标题栏统计**必须**来自同一次计算，否则必然分叉
     //（旧实现图上点数与「拦截 N」文本对不上，就是这么来的）。
-    // 另外轮次一多，事件点会密铺成一条实带（meta_controller 实测 120/120 全是拦截），
+    // 另外轮次一多，事件点会密铺成一条实带（历史上全拦截的模型实测 120/120 全是拦截），
     // 因此事件轨按**密度分桶**：桶内多轮被拦只画一个点，点径随桶内数量放大，
     // 悬浮可看到该桶覆盖的轮次区间与原因分布。桶大小由轮次总数推导，点数上限约 140。
     function evolveVisual(model) {
@@ -5283,7 +5276,7 @@ const app = createApp({
         }
       });
     }
-    // KPI 磁贴统一点击：前三张切曲线模型；锚点磁贴开浮层并滚动到锚点段。
+    // KPI 磁贴统一点击：模型类磁贴切曲线模型；锚点磁贴开浮层并滚动到锚点段。
     // 注意：anchor 分支必须 stopPropagation——否则本次点击冒泡到 document 的
     //    onDocClick（此时 evolvePanelOpen 刚变 true）会把浮层立刻关掉，表现为"点了打不开"。
     function kpiTileClick(t, ev) {
@@ -5299,7 +5292,6 @@ const app = createApp({
       const defs = [
         { key:'factor_miner', label:'因子挖掘', intKey:'factor_miner_interval' },
         { key:'strategy_drl', label:'策略 DRL', intKey:'strategy_drl_interval' },
-        { key:'meta_controller', label:'元策略', intKey:'meta_controller_interval' },
       ];
       return defs.map(d => {
         const p = evolveStatus[d.key] || {};
@@ -5346,22 +5338,22 @@ const app = createApp({
         const rs = Object.values(sup.restarts_by_loop || {}).reduce((s, n) => s + (Number(n) || 0), 0);
         kaSub = (hb != null ? `心跳 ${hb}s 前` : '心跳未知') + ` · 自愈 ${rs} 次`;
       }
-      // ⑤ 锚点健康：复用现有 evolveAnchorIssues（3 - 告警数）
+      // ⑤ 锚点健康：复用现有 evolveAnchorIssues（模型数 - 告警数）
       const issues = evolveAnchorIssues.value;
       const anchorTile = {
-        key:'anchor', label:'锚点健康', value:(3 - issues.length) + ' / 3',
+        key:'anchor', label:'锚点健康', value:(EVOLVE_MODELS.length - issues.length) + ' / ' + EVOLVE_MODELS.length,
         glow: issues.length ? 'red' : 'green', valueCls:'',
-        sub: issues.length ? (issues[0].label + ' · ' + issues[0].tag) : '三模型基线正常',
+        sub: issues.length ? (issues[0].label + ' · ' + issues[0].tag) : '各模型基线正常',
         anchor: true,
       };
-      // ⑥ 累计轮次：_pipeline_view.rounds_total 三模型合计（status 同源，零额外请求）
+      // ⑥ 累计轮次：_pipeline_view.rounds_total 各模型合计（status 同源，零额外请求）
       const roundsSum = EVOLVE_MODELS.reduce(
         (s, m) => s + (Number(evolveStatus[m.key] && evolveStatus[m.key].rounds_total) || 0), 0);
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const curRows = evolveRounds[evolveCurveModel.value] || [];
       const todayN = curRows.filter(r => r.ts && r.ts * 1000 >= todayStart.getTime()).length;
       const curLabel = EVOLVE_MODEL_LABELS[evolveCurveModel.value] || evolveCurveModel.value;
-      // ⑦ 最佳 fitness：三模型最大者，数值色按正负
+      // ⑦ 最佳 fitness：各模型最大者，数值色按正负
       let best = null;
       for (const m of EVOLVE_MODELS) {
         const f = Number(evolveStatus[m.key] && evolveStatus[m.key].fitness);
@@ -5678,7 +5670,7 @@ const app = createApp({
         // 实测 vendor/echarts.min.js 5.5.0：`setOption(t,e,n)` 内部 `q(e)&&(... ,e=e.notMerge)`——
         // 它只从第二个入参读 notMerge。写成 `setOption({notMerge:true, ...})` 是**完全无效**的，
         // 会走合并分支；而合并分支按 series.name 匹配 ⇒「本模型没有的系列」会从上一个模型
-        // 整条残留下来。实测：切到 因子挖掘 / 元策略 后，图上仍留着 strategy_drl 的挑战者线与
+        // 整条残留下来。实测：切到 因子挖掘 后，图上仍留着 strategy_drl 的挑战者线与
         // 挑战者点（17 个点、344~629 个橙色像素），而这两个模型的挑战者数本应为 0。
         evolveCurveChart.setOption({
           animation:false, backgroundColor:'transparent',
@@ -6433,8 +6425,8 @@ const app = createApp({
       toast('已创建统一策略：'+subs+' ('+mode+'模式)','ok');
       unifiedPickerOpen.value = false;
       loadStrategy();
-      // 参数保存后再训练，DRL 才会用新选定的子策略池
-      if (mode === 'drl') { triggerMetaController(); }
+      // 元策略训练已移除（2026-09-28）：DRL 模式不再自动触发训练，
+      // 使用既有的已训练模型（model_path）加载运行。
     }
     async function loadAllStrategies() {
       try {
@@ -8109,7 +8101,7 @@ const app = createApp({
       fetchEvolveStatus();
       fetchEvolveConfig();
       loadEvolveFactorStrategies();
-      fetchEvolveRounds('factor_miner'); fetchEvolveRounds('strategy_drl'); fetchEvolveRounds('meta_controller');
+      fetchEvolveRounds('factor_miner'); fetchEvolveRounds('strategy_drl');
       if (view.value==='evolve') renderEvolveCurve();
       // ?view=settings&tab=syslog 直达：挂载时补齐日志页数据（watch 只在切换时触发）
       if (view.value==='settings' && settingsTab.value==='syslog') refreshLogs();
@@ -8250,7 +8242,7 @@ const app = createApp({
       fetchEvolveStatus, evolvePause, evolveResume, showEvolveVersions, evolveRollback,
       deployEvolveFactor, goEvolveComboBacktest,
       EVOLVE_MODELS, evolveModel, evolveNextRun, evolveVersionsOpen, evolveVersionTitle, closeEvolveVersions,
-      evolveEnable, evolveDisable, triggerFactorMiner, triggerStrategyDrl, triggerMetaController,
+      evolveEnable, evolveDisable, triggerFactorMiner, triggerStrategyDrl,
       evolveAnchorIssues, evolveAnchorLocked, resetEvolveAnchor,
       evolveConfig, fetchEvolveConfig, saveEvolveConfig,
       evolveFailStreak, evolveRoundsErr,

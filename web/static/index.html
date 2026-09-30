@@ -34,8 +34,10 @@
 </script>
 <!-- F-20 依赖本地化：断网/局域网部署可用（曾 CDN 三依赖断网即白屏）。
      SRI 完整性校验：更新 vendor 文件后须同步重算 sha384（scripts 见 docs/plans/module_E.md T6）。
-     tailwind.js 为 Tailwind Play CDN 运行时脚本（本地化后的等价物）。 -->
-<script src="/static/vendor/tailwind.js" integrity="sha384-igm5BeiBt36UU4gqwWS7imYmelpTsZlQ45FZf+XBn9MuJbn4nQr7yx1yFydocC/K" crossorigin="anonymous"></script>
+     第十四轮（2026-09-30）：tailwind 由 Play CDN 运行时（tailwind.js 397.7KB/gzip 120KB + 浏览器 JIT）
+     → 构建期静态化 tailwind.static.css（22.7KB/gzip 5.3KB，含全部用到的工具类，零运行时开销）。
+     重新生成：scripts/build_tailwind_css.py（扫描 index.html + safelist 动态 class）。 -->
+<link rel="stylesheet" href="/static/vendor/tailwind.static.css" integrity="sha384-VteAyi5Pn+fGCfyIqpBcgS9gSHPeFFpk+Ku8JPjEaGTujKgo+sKIj7uDO4KLsp9y" crossorigin="anonymous">
 <script src="/static/vendor/vue.global.prod.js" integrity="sha384-6pS1WSZJY7wOk6qQTa9C9U2W1/qzqL7iYoMil7qn9KFeN5fZDAwIExgCd7U5AH+X" crossorigin="anonymous"></script>
 <script src="/static/vendor/echarts.custom.min.js" integrity="sha384-fS5iCmEnouMVpnj0eVi+hjx2nABl2hJ9tTvdf0tt7kY3mx4qieK+L9uBTQbqkeWt" crossorigin="anonymous"></script>
 <style>
@@ -3875,6 +3877,10 @@
             <div class="mac-field-row">
               <label class="fr-label" for="drlEarlyStop" title="验证收益连续 N 次无改善则提前停止，0 = 关闭">早停保护</label>
               <div class="fr-ctrl"><input id="drlEarlyStop" v-model.number="drlCfg.early_stop_patience" class="mac-input" type="number" min="0"/><span class="fr-unit">次</span></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlHidden" title="隐藏层维度（逗号分隔，如 32,32）。注意：超过约 [16,16] 的模型装不进 TradingView Pine 脚本（体积门 64KB），只能软件内运行、无法导出 Pine 自动交易代码">网络大小</label>
+              <div class="fr-ctrl"><input id="drlHidden" v-model="drlCfg.hidden_text" class="mac-input" type="text" placeholder="16,16（装得进 Pine）"/></div>
             </div>
           </div>
 

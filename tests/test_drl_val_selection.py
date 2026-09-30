@@ -98,7 +98,7 @@ def _make_engine(tmp_path, monkeypatch, result_extras):
     }
     result.update(result_extras)
 
-    def _fake_train(df_, cfg_, on_progress=None):
+    def _fake_train(df_, cfg_, on_progress=None, extra_dfs=None):
         return result
     monkeypatch.setattr(ev, "train_drl", _fake_train)
     return eng

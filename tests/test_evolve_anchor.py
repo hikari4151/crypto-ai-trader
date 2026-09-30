@@ -227,7 +227,7 @@ def engine(tmp_path, monkeypatch):
     monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
     holder = {"result": None}
     monkeypatch.setattr(ev, "train_drl",
-                        lambda df_, cfg_, on_progress=None: holder["result"])
+                        lambda df_, cfg_, on_progress=None, extra_dfs=None: holder["result"])
     registered: list = []
     monkeypatch.setattr(ev, "register_dynamic", lambda name, spec: registered.append(name))
     monkeypatch.setattr(eng, "_register_rl_evolve", lambda: _noop_register(registered))
@@ -279,6 +279,8 @@ async def test_comparable_exchange_anchor_still_protects(engine):
     tf = eng._effective_timeframe()
     sym = eng._symbols[eng._symbol_idx % len(eng._symbols)]  # 不推进轮换索引
     cfg = _strategy_drl_train_cfg(8)
+    # P0 多标的：身份指纹须含 multi_symbol 键（引擎多标模式产出与单标不可比）；
+    # 本用例是单标轮（_result 无 multi_extra_names → []），锚点必须同口径构造。
     identity = _training_identity(
         "strategy_drl", sym, tf,
         state_window=int(cfg["state_window"]),
@@ -286,6 +288,8 @@ async def test_comparable_exchange_anchor_still_protects(engine):
             "episodes": int(getattr(settings, "evolve_strategy_drl_episodes", 8)),
             "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 20.0)),
             "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
+            "multi_symbol": False,
+            "multi_extra_names": [],
         })
     _seed_anchor(eng, 9.0, "exchange", oos_ret=0.12, identity=identity)
     holder["result"] = _result(best_ret=0.30, oos_ret=0.01)

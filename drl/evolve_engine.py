@@ -32,21 +32,15 @@ from config.settings import settings
 from core.bus import EventBus
 from core.database import Database
 from core.events import Event, EventType
-from drl.agent import train_drl
+from drl.agent import ReplayBuffer, train_drl
 from drl.factor_miner import train_factor_miner
 from factors.engine import compute_factor_matrix
-from strategies.meta import train_meta_controller
 from strategies import get_dynamic, register_dynamic
 from strategies.rl_adaptive import RLAdaptiveStrategy
 
 from .model_zoo import ModelZoo
 
 log = logging.getLogger(__name__)
-
-# 元控制器默认子策略池（用户未在「统一策略」中指定时）。
-# P2-9：默认含 rl_evolve（策略DRL 的持续进化产出）——让
-# "因子→策略DRL→元控制器"进化链路默认闭合，而非只在三个内置策略间组合。
-DEFAULT_META_SUBS = "dual_ma,factor_signal,price_action,rl_evolve"
 
 # P4-E1：K线数据缓存键上限（symbol×timeframe 组合只增不减，超限淘汰最旧）
 _DATA_CACHE_MAX_KEYS = 16
@@ -172,25 +166,6 @@ def _strategy_deploy_gate(result: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def resolve_meta_sub_strategies(spec_params: dict | None) -> str:
-    """解析元控制器的子策略池：用户选定优先，剔除 meta_controller 自身与
-    不存在的策略，空则回退默认池（同样过滤未注册项）。
-
-    剔除自身是硬约束——元控制器把自己当子策略会无限递归。
-    P2-9：默认池含 rl_evolve，若 rl_evolve 尚未注册（首启）则自动过滤。
-    """
-    from strategies import list_strategies
-    available = {s["name"] for s in list_strategies()}
-    raw = str((spec_params or {}).get("sub_strategies") or "")
-    names = [n.strip() for n in raw.split(",")
-             if n.strip() and n.strip() != "meta_controller" and n.strip() in available]
-    if names:
-        return ",".join(dict.fromkeys(names))
-    defaults = [n for n in DEFAULT_META_SUBS.split(",")
-                if n in available and n != "meta_controller"]
-    return ",".join(dict.fromkeys(defaults)) or "dual_ma,factor_signal"
-
-
 def _reject_downshift_retry(base_interval: int, reject_streak: int, floor: int) -> int:
     """连续 OOS 被拒降频（第2项完善）：被拒轮数达到阈值后训练间隔放大 5 倍。
 
@@ -228,6 +203,14 @@ def _training_identity(model: str, symbol: str, timeframe: str, *,
     }
 
 
+def _fitness_mode_conv(v) -> str:
+    """因子训练目标口径校验：仅允许 ic / net（2026-09-29 成本对齐修复）。"""
+    s = str(v).strip().lower()
+    if s not in ("ic", "net"):
+        raise ValueError(f"fitness_mode 只能是 ic 或 net，收到: {v!r}")
+    return s
+
+
 def _identity_mismatch(anchor_meta: dict, identity: dict) -> Optional[str]:
     """锚点与候选的身份差异。返回 None 表示可比；否则给出不可比原因。
 
@@ -262,8 +245,7 @@ class EvolveEngine(EvolveObservationsMixin):
         # 循环体之外逸出，那条 asyncio 任务会直接结束，而 _running/_enabled 仍是
         # True——引擎对外依然显示"运行中"，实际已永久停训，只能重启进程或手动
         # 关开一次开关。下面这组状态供 _supervise_loop 周期巡检并重建死循环。
-        self._loop_names = ("evolve_factor_miner", "evolve_strategy_drl",
-                            "evolve_meta_controller")
+        self._loop_names = ("evolve_factor_miner", "evolve_strategy_drl")
         self._restarts: dict[str, int] = {n: 0 for n in self._loop_names}
         self._last_restart: dict[str, float] = {n: 0.0 for n in self._loop_names}
         self._supervise_interval = 30.0
@@ -274,7 +256,7 @@ class EvolveEngine(EvolveObservationsMixin):
             "interval": self._supervise_interval, "last_restart_at": 0.0,
             "last_restart_name": "",
         }
-        # P2-10：全局训练锁——三条训练管线串行执行（因子挖掘/策略DRL/元策略
+        # P2-10：全局训练锁——两条训练管线串行执行（因子挖掘/策略DRL
         # 同时训练会吃满 CPU 拖垮实时引擎），手动触发与周期循环共用同一把锁。
         self._train_lock = asyncio.Lock()
         # 部署后后台回测摘要任务引用（防 GC；done 回调里弹出）
@@ -303,16 +285,21 @@ class EvolveEngine(EvolveObservationsMixin):
                                      "oos_rejected": "", "_demo_streak": 0,
                                      "loop_beat": 0.0, "restarts": 0,
                                      # P0-族群：冠军/挑战者轮次计数与当前谱系（展示用）
-                                     "_pop_round": 0, "lineage": "main"}
-        self._meta_controller_status = {"active": False, "last_run": 0, "episode": 0, "fitness": 0.0,
-                                        "last_error": "", "next_run": 0, "last_success": False,
-                                        "oos_rejected": "", "_demo_streak": 0,
-                                        "loop_beat": 0.0, "restarts": 0,
-                                        "sub_strategies": DEFAULT_META_SUBS}
+                                     "_pop_round": 0, "lineage": "main",
+                                     # P0 多标的混合训练状态（[]=本轮单标的）
+                                     "multi_symbol": []}
+        # 策略 DRL 经验回放缓冲区（跨训练轮存活）：每轮只训 8ep，若缓冲每轮重建，
+        # 旧行情经验在轮间被完全丢弃（灾难性遗忘的加速器）。持有实例后，上一轮
+        # 乃至更早窗口的轨迹会参与本轮 PPO 更新（旧轨迹经重要性比率自然衰减）。
+        # capacity 由 settings.evolve_strategy_drl_replay_capacity 决定（0=禁用）。
+        self._strategy_drl_replay: Optional[ReplayBuffer] = None
+        self._strategy_drl_replay_capacity = 0
+        self._strategy_drl_replay_symbol = ""   # 缓冲区当前服务的训练标的（轮换时重建）
         # 锁死自检：连续多少轮没有任何模型被接受。进化引擎只看 episode/fitness 时
         # "一直在训"和"训了但全被锚点拒绝"长得一模一样（实测 72/72 全 rollback，
         # 前端毫无异常提示），所以这里按管线记连续拒绝数，供 status 判 stalled。
-        self._models = ("factor_miner", "strategy_drl", "meta_controller")
+        # 注：元策略训练管线已移除（2026-09-28），现存两管线。
+        self._models = ("factor_miner", "strategy_drl")
         self._reject_streak: dict[str, int] = {m: 0 for m in self._models}
         # GAP-01 连续 FAIL 计数（2026-09-20，软信号）：连续 N 轮 FAIL 触发
         # 冠军轮 from-scratch 重学（evolve_gap01_fail_reset_after，0=关闭）。
@@ -333,13 +320,13 @@ class EvolveEngine(EvolveObservationsMixin):
         self._symbols = list(getattr(settings, "evolve_symbols", ["BTC/USDT", "ETH/USDT", "SOL/USDT"]))
         if not self._symbols:
             self._symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-        # P4-A1：三管线共享同一个"当前训练标的"（不再各自轮换）。
-        # 此前 factor_miner/strategy_drl/meta_controller 各自调用 _next_symbol 独立递增，
+        # P4-A1：两管线共享同一个"当前训练标的"（不再各自轮换）。
+        # 此前 factor_miner/strategy_drl 各自调用 _next_symbol 独立递增，
         # 导致级联因子（BTC 上挖出）被注入 ETH 训练——长度校验通过但语义错配，
-        # 整个"因子→策略DRL→元策略"链路断裂。现在：三管线同标训练，
+        # 整个"因子→策略DRL"链路断裂。现在：两管线同标训练，
         # 全部完成一个 cycle 后才切换到下一标的。
         self._symbol_idx = 0
-        # 当前标的已训练完成的管线集合（三管线齐全后切换标的）
+        # 当前标的已训练完成的管线集合（两管线齐全后切换标的）
         self._cycle_pipelines_done: set[str] = set()
         # 专用训练线程池（单 worker）：训练本体串行执行；stop/set_enabled(False)
         # 通过 _training_done 事件等待在跑的训练跑完——取消协程只会中断 await，
@@ -348,7 +335,7 @@ class EvolveEngine(EvolveObservationsMixin):
             max_workers=1, thread_name_prefix="evolve-train")
         self._training_done = threading.Event()
         self._training_done.set()
-        # 拉数串行锁：三管线 + 跨标 OOS 并发打交易所会放大 429，统一串行化
+        # 拉数串行锁：两管线 + 跨标 OOS 并发打交易所会放大 429，统一串行化
         self._fetch_lock = asyncio.Lock()
         # 部署编排：可选的运行时 reload 回调（由 TradingEngine 注入）。
         # 未配置时部署仍完成文件与注册表层，runtime_reload 标记 skipped。
@@ -362,7 +349,7 @@ class EvolveEngine(EvolveObservationsMixin):
                 "deployed_version": None, "deployed_source": "",
                 "last_outcome": "", "anchor_mismatch": "",
                 "runtime_reload": "skipped",
-            } for m in ("factor_miner", "strategy_drl", "meta_controller")
+            } for m in ("factor_miner", "strategy_drl")
         }
 
     def set_deployment_reload(
@@ -399,13 +386,12 @@ class EvolveEngine(EvolveObservationsMixin):
         if self._enabled:
             # 首次训练在启动 15s 后进行（等待系统初始化完成），之后按间隔定期训练
             self._spawn_loops()
-            # 保活监督：三条循环任一条意外退出，都由巡检发现并重建
+            # 保活监督：两条循环任一条意外退出，都由巡检发现并重建
             self._spawn_supervisor()
             self._supervise_status["alive"] = True
-            log.info("[evolve] 持续进化引擎已启动（因子挖掘=%ds，策略DRL=%ds，元策略=%ds，"
+            log.info("[evolve] 持续进化引擎已启动（因子挖掘=%ds，策略DRL=%ds，"
                      "首次训练将在15s后开始；保活巡检间隔=%ds）",
                      self._factor_miner_interval, self._strategy_drl_interval,
-                     getattr(settings, "evolve_meta_interval", 600),
                      int(self._supervise_interval))
         else:
             log.info("[evolve] 持续进化引擎已禁用（evolve_enabled=false）")
@@ -729,7 +715,6 @@ class EvolveEngine(EvolveObservationsMixin):
         counts = {model: (max_round or 0) for model, max_round in rows}
         self._factor_miner_status["episode"] = counts.get("factor_miner", 0)
         self._strategy_drl_status["episode"] = counts.get("strategy_drl", 0)
-        self._meta_controller_status["episode"] = counts.get("meta_controller", 0)
         # 连续拒绝数同样要跨重启接续：锁死是"上一轮还没解开"的状态，
         # 重启不该让它看起来像刚恢复正常
         try:
@@ -777,11 +762,10 @@ class EvolveEngine(EvolveObservationsMixin):
             self._reject_streak.update(streaks)
         except Exception as e:  # noqa: BLE001
             log.warning("[evolve] 读取连续拒绝历史失败: %s", e)
-        log.info("[evolve] 已恢复训练轮次: 因子挖掘=%d 策略DRL=%d 元策略=%d"
+        log.info("[evolve] 已恢复训练轮次: 因子挖掘=%d 策略DRL=%d"
                  "（连续未接受: %s）",
                  self._factor_miner_status["episode"],
                  self._strategy_drl_status["episode"],
-                 self._meta_controller_status["episode"],
                  "/".join(str(self._reject_streak.get(m, 0)) for m in self._models))
 
     async def set_enabled(self, enabled: bool) -> None:
@@ -791,8 +775,8 @@ class EvolveEngine(EvolveObservationsMixin):
         self._enabled = enabled
         if enabled and self._running:
             # 从禁用状态切换为启用：补齐缺失的训练循环。
-            # P4-A2：三条管线都要恢复（此前遗漏 meta_controller_loop → 热切换后
-            # 元策略控制器永久停训，直到进程重启）。现在改为"缺哪条补哪条"，
+            # P4-A2：两条管线都要恢复（此前遗漏一条 → 热切换后
+            # 该管线永久停训，直到进程重启）。现在改为"缺哪条补哪条"，
             # 判定不再依赖 `not self._tasks`——保活监督自身也占一个任务槽，
             # 拿列表空否当开关会让热切换漏建整组循环。
             created = self._spawn_loops()
@@ -878,31 +862,6 @@ class EvolveEngine(EvolveObservationsMixin):
             finally:
                 self._strategy_drl_status["active"] = False
 
-    async def trigger_meta_controller(self) -> dict:
-        """手动触发一次元策略控制器训练（同步执行）。"""
-        if not self._running:
-            return {"ok": False, "reason": "持续进化引擎未运行"}
-        # P2：忙态守卫——另一条训练正在进行时直接拒绝（防连点排队执行多轮）
-        if self._train_lock.locked():
-            return {"ok": False, "busy": True, "reason": "另一条训练正在进行中，请稍后再试"}
-        async with self._train_lock:
-            self._meta_controller_status["active"] = True
-            try:
-                self._meta_controller_status["last_error"] = ""
-                _res = await self._train_meta_controller_once(force=True)
-                self._meta_controller_status["last_run"] = time.time()
-                self._meta_controller_status["last_success"] = _res is not False
-                return {"ok": True, "model": "meta_controller"}
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                err = str(e)[:200]
-                self._meta_controller_status["last_error"] = err
-                self._meta_controller_status["last_success"] = False
-                return {"ok": False, "error": err}
-            finally:
-                self._meta_controller_status["active"] = False
-
     def _pipeline_view(self, model: str, base: dict, anchor: dict) -> dict:
         """管线状态 + 锁死自检（episode 只说明"训了几轮"，不说明"有没有一轮被接受"）。
 
@@ -972,38 +931,14 @@ class EvolveEngine(EvolveObservationsMixin):
         status["deployed_source"] = info.get("data_source") or ""
 
     async def _register_deployed_model(self, name: str) -> None:
-        """注册当前部署模型为动态策略（与部署快照同源）。"""
+        """注册当前部署模型为动态策略（与部署快照同源）。
+
+        注：元策略训练/部署分支已移除（2026-09-28）——meta_controller 不再是
+        进化模型（deploy_model 按 _models 拦截），既有的已注册策略与模型文件
+        不受影响，运行时仍可按 model_path 加载使用。
+        """
         if name == "strategy_drl":
             await self._register_rl_evolve()
-        elif name == "meta_controller":
-            from strategies import get_dynamic
-            sub_strategies = resolve_meta_sub_strategies(
-                (get_dynamic("meta_controller") or {}).get("params"))
-            from strategies.meta import MetaController as _MetaControllerCls
-            spec = {
-                "name": "meta_controller",
-                "title": "元策略控制器",
-                "description": "DRL 元控制器：在子策略间按学习到的置信度动态选择",
-                "logic": "元级 PPO，状态含子策略信号+置信度+历史胜率",
-                "executor": "meta_controller",
-                "param_schema": _MetaControllerCls.param_schema,
-                "params": {
-                    "sub_strategies": sub_strategies,
-                    "mode": ((get_dynamic("meta_controller") or {})
-                             .get("params") or {}).get("mode") or "drl",
-                    "model_path": str(self.zoo._flat_path("meta_controller")),
-                },
-                "risk_tips": ["元策略依赖子策略质量，建议定期重训"],
-                "created_by": "evolve_engine",
-                "version": f"v{self.zoo.best_version('meta_controller') or 0}",
-                "base_symbol": self._effective_symbol() if hasattr(self, "_effective_symbol") else "",
-                "base_timeframe": self._effective_timeframe(),
-                "pine_code": "",
-                "pine_note": ("元策略控制器在子策略间动态切换，无等价 Pine 模板；"
-                              "如需图上买卖点请对单个子策略导出 Pine"),
-            }
-            register_dynamic("meta_controller", spec)
-            await self._upsert_ai_strategy("meta_controller", spec)
 
     async def _audit_manual_rollback(self, name: str, version: int, *, reason: str,
                                      runtime_reload: dict, registered: bool) -> None:
@@ -1137,13 +1072,11 @@ class EvolveEngine(EvolveObservationsMixin):
             "timeframe": self._effective_timeframe(),
             "factor_miner": self._pipeline_view("factor_miner", self._factor_miner_status, anchors["factor_miner"]),
             "strategy_drl": self._pipeline_view("strategy_drl", self._strategy_drl_status, anchors["strategy_drl"]),
-            "meta_controller": self._pipeline_view("meta_controller", self._meta_controller_status, anchors["meta_controller"]),
             # 锚点（回退基线）画像：fitness 数值 + 口径凭证，前端据此解释"为什么不接受"
             "anchor": anchors,
             "stall_rounds": self._stall_rounds,
             "factor_miner_interval": self._factor_miner_interval,
             "strategy_drl_interval": self._strategy_drl_interval,
-            "meta_controller_interval": getattr(settings, "evolve_meta_interval", 600),
             "rolling_window": self._rolling_window,
             "rollback_threshold": self._rollback_threshold,
             "tasks_alive": tasks_alive,
@@ -1190,10 +1123,14 @@ class EvolveEngine(EvolveObservationsMixin):
             "rolling_window": int(self._rolling_window),
             "rollback_threshold": float(self._rollback_threshold),
             "factor_miner_episodes": int(getattr(settings, "evolve_factor_miner_episodes", 8)),
+            # 因子挖掘训练目标口径（2026-09-29 成本对齐修复）：net=扣成本净收益
+            "factor_miner_fitness_mode": str(getattr(
+                settings, "evolve_factor_miner_fitness_mode", "net") or "ic"),
+            "factor_miner_cost_per_turn": float(getattr(
+                settings, "evolve_factor_miner_cost_per_turn", 0.002) or 0.0),
+            "factor_miner_net_fitness_scale": float(getattr(
+                settings, "evolve_factor_miner_net_fitness_scale", 500.0) or 1.0),
             "strategy_drl_episodes": int(getattr(settings, "evolve_strategy_drl_episodes", 8)),
-            "meta_episodes": int(getattr(settings, "evolve_meta_episodes", 8)),
-            "meta_participation_scale": float(getattr(
-                settings, "evolve_meta_participation_scale", 0.0) or 0.0),
             "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 20.0)),
             "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
             "cross_symbol_oos": bool(getattr(settings, "evolve_cross_symbol_oos", True)),
@@ -1209,6 +1146,11 @@ class EvolveEngine(EvolveObservationsMixin):
             "strategy_drl_n_episodes": int(getattr(settings, "evolve_strategy_drl_n_episodes", 8) or 0),
             "strategy_drl_ppo_epochs": int(getattr(settings, "evolve_strategy_drl_ppo_epochs", 8) or 0),
             "strategy_drl_min_trade_zone": float(getattr(settings, "evolve_strategy_drl_min_trade_zone", 0.10)),
+            # 经验回放（跨轮存活，对抗遗忘）
+            "strategy_drl_replay_capacity": int(getattr(
+                settings, "evolve_strategy_drl_replay_capacity", 0) or 0),
+            "strategy_drl_replay_mix_ratio": float(getattr(
+                settings, "evolve_strategy_drl_replay_mix_ratio", 0.3) or 0.0),
             # walk-forward 多折观测（同品种，不改接受逻辑）
             "strategy_drl_walkforward_obs": bool(getattr(settings, "evolve_strategy_drl_walkforward_obs", True)),
             "strategy_drl_walkforward_folds": int(getattr(settings, "evolve_strategy_drl_walkforward_folds", 2)),
@@ -1217,8 +1159,6 @@ class EvolveEngine(EvolveObservationsMixin):
             # 连续拒绝 from-scratch 重置（0=关闭）
             "strategy_drl_reset_after_rejects": int(getattr(
                 settings, "evolve_strategy_drl_reset_after_rejects", 0) or 0),
-            "meta_reset_after_rejects": int(getattr(
-                settings, "evolve_meta_reset_after_rejects", 0) or 0),
             # GAP-01 实盘验收观测（同品种单标的，两档成本）
             "gap01_obs": bool(getattr(settings, "evolve_gap01_obs", True)),
             "gap01_folds": int(getattr(settings, "evolve_gap01_folds", 2)),
@@ -1259,7 +1199,7 @@ class EvolveEngine(EvolveObservationsMixin):
         pending: list[tuple[str, Any, Optional[str] | None]] = []  # (settings_attr, value, engine_attr)
 
         # 训练标的池：支持"单元素 = 固定品种训练"。
-        # P4-E1：空数组视为非法输入（清空标的池会让三管线无从取数），
+        # P4-E1：空数组视为非法输入（清空标的池会让训练管线无从取数），
         # 明确报错而不是静默 no-op；此前 `if changes["symbols"]:` 把空池整体跳过，
         # 前端却提示"保存成功"。
         if "symbols" in changes:
@@ -1319,6 +1259,13 @@ class EvolveEngine(EvolveObservationsMixin):
         try:
             _check("factor_miner_interval", "evolve_factor_miner_interval", "_factor_miner_interval",
                    conv=int, min_v=1)
+            # 因子训练目标口径（net/ic 二选一；net 的 cost/scale 数值范围）
+            _check("factor_miner_fitness_mode", "evolve_factor_miner_fitness_mode",
+                   conv=_fitness_mode_conv)
+            _check("factor_miner_cost_per_turn", "evolve_factor_miner_cost_per_turn",
+                   conv=float, min_v=0.0, max_v=0.1)
+            _check("factor_miner_net_fitness_scale", "evolve_factor_miner_net_fitness_scale",
+                   conv=float, min_v=1.0, max_v=100000.0)
             _check("strategy_drl_interval", "evolve_strategy_drl_interval", "_strategy_drl_interval",
                    conv=int, min_v=1)
             _check("rolling_window", "evolve_rolling_window", "_rolling_window",
@@ -1327,9 +1274,6 @@ class EvolveEngine(EvolveObservationsMixin):
                    conv=float, min_v=0.0, max_v=1.0)
             _check("factor_miner_episodes", "evolve_factor_miner_episodes", conv=int, min_v=1, max_v=500)
             _check("strategy_drl_episodes", "evolve_strategy_drl_episodes", conv=int, min_v=1, max_v=500)
-            _check("meta_episodes", "evolve_meta_episodes", conv=int, min_v=1, max_v=500)
-            _check("meta_participation_scale", "evolve_meta_participation_scale",
-                   conv=float, min_v=0.0, max_v=100.0)
             _check("vol_penalty", "evolve_vol_penalty", conv=float, min_v=0.0, max_v=1000.0)
             _check("oos_min_bars", "evolve_oos_min_bars", conv=int, min_v=50, max_v=100000)
             _check("min_new_bars", "evolve_min_new_bars", conv=int, min_v=0, max_v=100000)
@@ -1353,6 +1297,10 @@ class EvolveEngine(EvolveObservationsMixin):
                    conv=int, min_v=1, max_v=64)
             _check("strategy_drl_min_trade_zone", "evolve_strategy_drl_min_trade_zone",
                    conv=float, min_v=0.0, max_v=0.5)
+            _check("strategy_drl_replay_capacity", "evolve_strategy_drl_replay_capacity",
+                   conv=int, min_v=0, max_v=100000)
+            _check("strategy_drl_replay_mix_ratio", "evolve_strategy_drl_replay_mix_ratio",
+                   conv=float, min_v=0.0, max_v=1.0)
             if "cross_symbol_oos" in changes and changes["cross_symbol_oos"] is not None:
                 if not isinstance(changes["cross_symbol_oos"], bool):
                     raise ValueError("cross_symbol_oos 必须是布尔值")
@@ -1366,8 +1314,6 @@ class EvolveEngine(EvolveObservationsMixin):
                    conv=int, min_v=0, max_v=1000)
             _check("strategy_drl_reset_after_rejects",
                    "evolve_strategy_drl_reset_after_rejects",
-                   conv=int, min_v=0, max_v=100000)
-            _check("meta_reset_after_rejects", "evolve_meta_reset_after_rejects",
                    conv=int, min_v=0, max_v=100000)
             # GAP-01 实盘验收观测配置
             _check("gap01_folds", "evolve_gap01_folds", conv=int, min_v=1, max_v=10)
@@ -1481,8 +1427,8 @@ class EvolveEngine(EvolveObservationsMixin):
                         yield_to: tuple = ()) -> None:
         """通用训练循环：启动 start_delay 秒后首次训练，之后按间隔（失败时 5 分钟重试）。
 
-        pipeline: 管线标识（factor_miner/strategy_drl/meta_controller），传入后
-        在每次真实训练尝试后调用 _mark_pipeline_done——三管线同标训练完成一轮才
+        pipeline: 管线标识（factor_miner/strategy_drl），传入后
+        在每次真实训练尝试后调用 _mark_pipeline_done——全部管线同标训练完成一轮才
         切换标的（P4-A1 同步修复）。增量门跳过（train_fn 返回 False，无训练发生）
         时不推进；异常也算一次尝试（防单管线长期失败导致标的永卡）。
 
@@ -1510,7 +1456,7 @@ class EvolveEngine(EvolveObservationsMixin):
                     if not self._running:
                         break
                     continue
-                # P4-C3：让出给更高优先级管线（因子挖掘 > 策略DRL > 元策略）。
+                # P4-C3：让出给更高优先级管线（因子挖掘 > 策略DRL）。
                 # 锁本身无优先级，若不主动让出，间隔相同 + 训练耗时波动时
                 # 可能长时间拿不到锁。
                 _yielded = False
@@ -1631,15 +1577,8 @@ class EvolveEngine(EvolveObservationsMixin):
                              start_delay=30, pipeline="strategy_drl",
                              yield_to=("factor_miner",))
 
-    async def _meta_controller_loop(self) -> None:
-        """元策略控制器持续训练循环（间隔较长；因子挖掘/策略DRL 优先，见 yield_to）。"""
-        meta_interval = getattr(settings, "evolve_meta_interval", 600)
-        await self._run_loop(self._meta_controller_status, self._train_meta_controller_once,
-                             meta_interval, "元策略", start_delay=60, pipeline="meta_controller",
-                             yield_to=("factor_miner", "strategy_drl"))
-
     # ---- 保活（watchdog）：训练循环的统一创建与自愈 ----
-    # 背景：三条训练循环是 asyncio 任务。任务一旦结束就再也不会自己回来，而
+    # 背景：训练循环是 asyncio 任务。任务一旦结束就再也不会自己回来，而
     # _running/_enabled 仍是 True，status() 照样报 running=true —— 「看起来在跑、
     # 其实已经停训」是最难发现的一类故障。此前 status() 虽然算了 tasks_alive，
     # 但全仓无人消费它（只读诊断），也没有任何重建逻辑，只能重启进程恢复。
@@ -1649,7 +1588,6 @@ class EvolveEngine(EvolveObservationsMixin):
         return {
             "evolve_factor_miner": self._factor_miner_loop,
             "evolve_strategy_drl": self._strategy_drl_loop,
-            "evolve_meta_controller": self._meta_controller_loop,
         }
 
     def _status_for(self, name: str) -> Optional[dict]:
@@ -1657,7 +1595,6 @@ class EvolveEngine(EvolveObservationsMixin):
         return {
             "evolve_factor_miner": self._factor_miner_status,
             "evolve_strategy_drl": self._strategy_drl_status,
-            "evolve_meta_controller": self._meta_controller_status,
         }.get(name)
 
     def _find_task(self, name: str) -> Optional[asyncio.Task]:
@@ -1670,7 +1607,7 @@ class EvolveEngine(EvolveObservationsMixin):
     def _spawn_loops(self) -> int:
         """补齐缺失的训练循环任务（幂等），返回新建条数。
 
-        start() / set_enabled(True) / 保活监督三条路径共用同一入口，消除
+        start() / set_enabled(True) / 保活监督三条路径共用同一入口（"三条"指这三条调用路径），消除
         "哪条路径漏建了哪条管线"这类只在热切换时才暴露的漏配。
         """
         factories = self._loop_factories()
@@ -1697,7 +1634,7 @@ class EvolveEngine(EvolveObservationsMixin):
                                                name="evolve_supervisor"))
 
     async def _supervise_loop(self) -> None:
-        """保活监督：周期巡检三条训练循环，发现已退出的就地重建。"""
+        """保活监督：周期巡检各训练循环，发现已退出的就地重建。"""
         log.info("[evolve] 保活监督已启动（巡检间隔 %.0fs，自愈最小间隔 %.0fs）",
                  self._supervise_interval, self._restart_min_gap)
         while True:
@@ -1858,6 +1795,12 @@ class EvolveEngine(EvolveObservationsMixin):
                     # .optim/exp_training/sweep_factor.py + verify_factor_win.py
                     # 实测：OOS 秩IC 0.0088→0.0356、续训 OOS 门 0/3→3/3（3 seed）。
                     "action_masking": True,
+                    # 训练目标口径（2026-09-29 成本对齐修复）：net = 验证段可交易
+                    # 净收益（方向收益 − 换手成本）× scale。旧 ic 口径的 fitness
+                    # 会被低换手奖励虚高（0.35 vs 真实 IC 0.07），与回测收益脱节。
+                    "fitness_mode": str(getattr(settings, "evolve_factor_miner_fitness_mode", "net") or "ic"),
+                    "cost_per_turn": float(getattr(settings, "evolve_factor_miner_cost_per_turn", 0.002) or 0.0),
+                    "net_fitness_scale": float(getattr(settings, "evolve_factor_miner_net_fitness_scale", 500.0) or 1.0),
                     "base_agent": best_agent,   # 续训起点（None=首轮从零）
                     "time_budget": float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0),
                 },
@@ -1903,13 +1846,18 @@ class EvolveEngine(EvolveObservationsMixin):
             "factor_miner", symbol, self._effective_timeframe(),
             state_window=1,
             config={
-                "episodes": int(getattr(settings, "evolve_factor_miner_episodes", 8)),
-                "ic_window": 120, "corr_threshold": 0.85,
-                "train_ratio": 0.6, "val_ratio": 0.2,
-                # E-EXP：纳入身份——旧锚点（无掩码训练）自动判不可比，
-                # 重建基线而非与不同训练口径比较回退
-                "action_masking": True,
-            })
+                    "episodes": int(getattr(settings, "evolve_factor_miner_episodes", 8)),
+                    "ic_window": 120, "corr_threshold": 0.85,
+                    "train_ratio": 0.6, "val_ratio": 0.2,
+                    # E-EXP：纳入身份——旧锚点（无掩码训练）自动判不可比，
+                    # 重建基线而非与不同训练口径比较回退
+                    "action_masking": True,
+                    # 训练目标口径（2026-09-29）：fitness 量纲变了就不该与旧锚点
+                    # 直接比——旧 ic 口径 fitness≈0.35 vs 新 net 口径不同量级，
+                    # 强制判不可比、重建基线（缺失=旧模型，同样判不可比）。
+                    "fitness_mode": str(getattr(settings, "evolve_factor_miner_fitness_mode", "net") or "ic"),
+                    "cost_per_turn": float(getattr(settings, "evolve_factor_miner_cost_per_turn", 0.002) or 0.0),
+                })
         if best_agent is not None and anchor.get("comparable"):
             _factor_mismatch = _identity_mismatch(anchor, _factor_identity)
             if _factor_mismatch:
@@ -1940,7 +1888,7 @@ class EvolveEngine(EvolveObservationsMixin):
                     await self._log_round(
                         "factor_miner", symbol, self._effective_timeframe(),
                         data_source_used, new_fitness, status="rollback")
-                    # P4-E1：回退轮补发 evolve_train 事件——此前三条 rollback 分支
+                    # P4-E1：回退轮补发 evolve_train 事件——此前各条 rollback 分支
                     # 不发事件，前端若依赖事件流刷新进度，回退轮完全看不到更新
                     await self.bus.publish(Event(EventType.SYSTEM, {
                         "kind": "evolve_train",
@@ -2067,7 +2015,7 @@ class EvolveEngine(EvolveObservationsMixin):
             # 对齐到原始 df 的索引（factor_miner 内部可能截断或排序）
             factor_values = pd.Series(composite_series.to_numpy(), index=composite_series.index)
             aligned = factor_values.reindex(df.index).to_numpy(float)
-            # 按标的分文件保存（P4-A1）：level-2 防御。尽管三管线现已同标训练，
+            # 按标的分文件保存（P4-A1）：level-2 防御。尽管各管线现已同标训练，
             # 分文件 + 加载时按标的匹配仍防止任何异常路径下的跨标错配。
             cascade_path = self.zoo.models_dir / f"_cascade_factor_values_{symbol.replace('/', '_')}.npy"
             np.save(str(cascade_path), aligned)
@@ -2292,6 +2240,13 @@ class EvolveEngine(EvolveObservationsMixin):
                     self._strategy_drl_status["last_error"] = (
                         f"连续 {self._reject_streak.get('strategy_drl', 0)} 轮被拒，"
                         "已触发 from-scratch 重训")
+                    # 与 gap01 分支同理（见上）：触发后清零，给新起点 N 轮续训窗口。
+                    # 此前只清 gap01、不清 reject，而 _reject_streak 仅在 status=="ok"
+                    # 或重置锚点时归零——strategy_drl 的 from-scratch 过门率为 0
+                    # （REPORT §22：生产窗口复刻 16 次全不过门），于是连拒一旦达阈值
+                    # 就再也不会回落，**每一轮都从零重训**：累积学习被反复丢弃，
+                    # 表现为模型始终学不动（现场实测 reject_streak=19 > 阈值 5）。
+                    self._reject_streak["strategy_drl"] = 0
 
         # 级联因子值：按当前训练标的加载，保证注入的因子与训练标的一致（P4-A1）
         cascade_factor_values = self._load_cascade_factor_values(df, symbol=symbol)
@@ -2304,11 +2259,62 @@ class EvolveEngine(EvolveObservationsMixin):
         train_cfg = _strategy_drl_train_cfg(
             getattr(settings, "evolve_strategy_drl_episodes", 8))
 
+        # 经验回放缓冲区（跨轮存活）：capacity>0 时持有实例并每轮透传，
+        # 让上一轮/更早窗口的轨迹参与本轮更新。
+        # 重建条件：(a) capacity 变更；(b) 训练标的变更——符号轮换（ETH→SOL）不会
+        # 改变状态维度，维度守卫生效不了，若不按标的隔离，上一标的的轨迹会混入本轮
+        # 策略更新（每轮只 8ep 时，64 条跨标轨迹足以主导梯度）。按符号重建更保守：
+        # 回放只覆盖"同一标的的最近若干轮"，符合"对抗遗忘"的本意而非引入跨标噪声。
+        # P0 多标的混合训练例外：训练本体就是跨标的混合采样，缓冲里的轨迹天然
+        # 含多标的经验——按主标的重建会每轮清空缓冲（主标轮换），反而丢掉经验，
+        # 与"多标的混合"的目的相悖。多标模式开启时跳过 (b) 条件，只在容量变更时重建。
+        _multi_on = bool(getattr(settings, "evolve_strategy_drl_multi_symbol", True))
+        _replay_cap = max(0, int(getattr(
+            settings, "evolve_strategy_drl_replay_capacity", 0) or 0))
+        if _replay_cap > 0:
+            if (self._strategy_drl_replay is None
+                    or int(self._strategy_drl_replay.capacity) != _replay_cap
+                    or (not _multi_on and self._strategy_drl_replay_symbol != symbol)):
+                self._strategy_drl_replay = ReplayBuffer(capacity=_replay_cap)
+                log.info("[evolve] 策略DRL 经验回放缓冲区已建立: capacity=%d 标的=%s%s",
+                         _replay_cap, symbol, "（多标模式跨标共享）" if _multi_on else "")
+            self._strategy_drl_replay_capacity = _replay_cap
+            self._strategy_drl_replay_symbol = symbol
+        else:
+            self._strategy_drl_replay = None
+            self._strategy_drl_replay_capacity = 0
+            self._strategy_drl_replay_symbol = ""
+
         # 4. 训练（P0：续训——best_agent 传入作为起点。此前 load_agent 只用于
         # 回退对照，训练每次随机初始化重训，8 轮 PPO 从零起步学不到东西 →
         # 每轮都被锚点回退，形成死循环。现在每轮在旧模型上小步增量，
         # 成本大幅下降、模型真正进化。续训只换起点：OOS 硬门、回退保护、
         # 训练身份隔离、demo 短路全部照常生效。）
+        # P0 多标的混合训练（经验广度）：默认把 evolve_symbols 池中除当前主标的外
+        # 的全部标的拉取进来作为额外经验来源（尽力而为：单个标的拉取失败不阻断）。
+        # 主标的仍是 val/OOS/部署语义锚点；额外标的只作为训练经验。
+        extra_dfs_pool: dict = {}
+        if getattr(settings, "evolve_strategy_drl_multi_symbol", True):
+            for _sym in self._symbols:
+                if _sym == symbol:
+                    continue
+                try:
+                    _sdf = await self._fetch_latest_data(symbol=_sym)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("[evolve] 多标的数据获取失败(%s)，跳过: %s", _sym, e)
+                    continue
+                if _sdf is None or len(_sdf) < max(300, int(self._rolling_window * 0.1)):
+                    continue
+                if len(_sdf) > self._rolling_window:
+                    _sdf = _sdf.iloc[-self._rolling_window:]
+                extra_dfs_pool[_sym] = _sdf
+            if extra_dfs_pool:
+                log.info("[evolve] 策略DRL 多标的混合训练: 额外经验标的 %s",
+                         list(extra_dfs_pool))
+                self._strategy_drl_status["multi_symbol"] = list(extra_dfs_pool)
+            else:
+                self._strategy_drl_status["multi_symbol"] = []
+
         def _train():
             # 级联因子注入：加载 factor_miner 产出的组合因子值（若有），
             # 作为策略 DRL 的额外状态特征（与训练/部署口径一致）
@@ -2320,7 +2326,17 @@ class EvolveEngine(EvolveObservationsMixin):
                          "有" if cascade_recipe is not None else "无")
             train_cfg["base_agent"] = best_agent   # 续训起点（None=首轮从零）
             train_cfg["time_budget"] = float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0)
-            return train_drl(df, train_cfg, on_progress=None)
+            # 回放缓冲区透传：跨轮复用（本轮 push 的轨迹留给下一轮）。
+            # from-scratch 轮（best_agent=None）同样透传——此时回放正是唯一的
+            # 历史经验来源，丢弃它会让"重置"退化为彻底的信息清零。
+            if self._strategy_drl_replay is not None:
+                train_cfg["replay_buffer"] = self._strategy_drl_replay
+                train_cfg["replay_mix_ratio"] = float(getattr(
+                    settings, "evolve_strategy_drl_replay_mix_ratio", 0.3) or 0.3)
+            train_cfg["extra_mix_ratio"] = float(getattr(
+                settings, "evolve_strategy_drl_multi_mix_ratio", 0.5) or 0.5)
+            return train_drl(df, train_cfg, on_progress=None,
+                             extra_dfs=extra_dfs_pool or None)
 
         result = await self._run_train(_train)
         # 取最后一条历史记录的收益
@@ -2350,7 +2366,10 @@ class EvolveEngine(EvolveObservationsMixin):
         self._strategy_drl_status["episode"] += 1
         self._strategy_drl_status["fitness"] = round(new_fitness, 5)
 
-        # 训练身份：与锚点同口径才允许回退比较（不同符号/周期/状态维度/配置不可比）
+        # 训练身份：与锚点同口径才允许回退比较（不同符号/周期/状态维度/配置不可比）。
+        # P0 多标的：训练模式（单标/多标）是不可比的配置维度——混入身份指纹，
+        # 防止"单标的训练产出"与"多标的混合训练产出"互相回退比较（语义不同）。
+        _multi_names = sorted(result.get("multi_extra_names") or [])
         _identity = _training_identity(
             "strategy_drl", symbol, self._effective_timeframe(),
             state_window=int(train_cfg.get("state_window", 1)),
@@ -2359,6 +2378,8 @@ class EvolveEngine(EvolveObservationsMixin):
                 "episodes": int(getattr(settings, "evolve_strategy_drl_episodes", 8)),
                 "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 20.0)),
                 "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
+                "multi_symbol": bool(_multi_names),
+                "multi_extra_names": _multi_names,
             })
 
         # 5.0 P4-E1：demo 合成数据轮短路——不回退比较、不跑 OOS 部署门。
@@ -2518,9 +2539,19 @@ class EvolveEngine(EvolveObservationsMixin):
         # 的样本外表现。跨标收益非正时：仅存档不设为最佳（保持旧 best 与 flat 文件），
         # 防止"单标的特有模式"被当成通用能力上线。
         # 级联因子注入时 agent 状态含因子列，跨标数据无法重建同维状态，跳过（不拦）。
+        # P0 多标的混合训练例外：训练本体已见全部池内标的（主标+额外标），
+        # 跨标 OOS 不再构成"换一个没见过的标的验证泛化"，反而会因模型已学该标
+        # 的本地模式而产生误导性高/低分，直接跳过（主标的本地 OOS 门照常把关）。
+        _multi_used = bool(result.get("multi_symbol"))
         if cascade_factor_values is not None:
             self._strategy_drl_status["cross_oos"] = None
             log.info("[evolve] 级联因子注入中，跳过跨标传导 OOS")
+            cross_oos = None
+        elif _multi_used:
+            self._strategy_drl_status["cross_oos"] = None
+            log.info("[evolve] 多标的混合训练中（额外标的 %s），"
+                     "跨标 OOS 不构成样本外验证，跳过",
+                     result.get("multi_extra_names") or [])
             cross_oos = None
         else:
             cross_oos = await self._cross_symbol_oos(result["agent"], symbol,
@@ -2815,295 +2846,6 @@ class EvolveEngine(EvolveObservationsMixin):
             "model": "strategy_drl",
             "fitness": new_fitness,
             "lineage": ("challenger_promoted" if is_challenger else "main"),
-        }, source="evolve_engine"))
-
-    async def _train_meta_controller_once(self, force: bool = False) -> Optional[bool]:
-        """训练 DRL 元策略控制器（统一管理子策略）。
-
-        子策略取用户在「统一策略」中为 meta_controller 选定的池（未选则回退默认内置池），
-        元控制器在它们之上学习"何时信任哪个策略"。产出模型注册为
-        meta_controller 策略，供用户启用。
-        """
-        symbol = self._next_symbol()
-        self._meta_controller_status["symbol"] = symbol
-
-        # P0-3：加载上次最佳模型（元控制器此前缺回退保护，与另两管线不一致）
-        agent = self.zoo.load_agent("meta_controller")
-        best_agent = agent
-        prev_fitness = self.zoo.best_fitness("meta_controller") or 0.0
-
-        # 连续拒绝 from-scratch 重置（对齐 factor_miner 先例，诊断报告 §7 建议第2条）：
-        # meta 控制器被老化锚点/空仓懒解压住、连续未接受时，下一轮从零重训跳出局部区域。
-        if _should_from_scratch_reset(
-                self._reject_streak.get("meta_controller", 0),
-                getattr(settings, "evolve_meta_reset_after_rejects", 0)):
-            best_agent = None
-            log.warning("[evolve] 元策略 连续 %d 轮未接受，本轮 from-scratch 重训"
-                        "（打破连拒，阈值=%d）",
-                        self._reject_streak.get("meta_controller", 0),
-                        int(getattr(settings, "evolve_meta_reset_after_rejects", 0)))
-            self._meta_controller_status["last_error"] = (
-                f"连续 {self._reject_streak.get('meta_controller', 0)} 轮被拒，"
-                "已触发 from-scratch 重训")
-
-        # 1. 获取最新数据
-        df = await self._fetch_latest_data(symbol=symbol)
-        if df is None or len(df) < self._rolling_window * 0.1:
-            if df is None:
-                # P4-C1：交易所不可达 → 递增连续 demo 计数（供 _run_loop 降频）。
-                # P4-E1：返回 False（与增量门跳过同语义）——否则 _run_loop 会把
-                # 「未发生的训练」记为 last_success=True 并推进标的轮换。
-                self._meta_controller_status["_demo_streak"] = int(self._meta_controller_status.get("_demo_streak", 0)) + 1
-                self._meta_controller_status["last_error"] = "交易所数据不可达，跳过元策略训练"
-                log.warning("[evolve] 元策略：交易所数据不可达，跳过本轮")
-                return False
-            self._meta_controller_status["last_error"] = f"数据不足（{len(df)} < {int(self._rolling_window * 0.1)}）"
-            raise InsufficientDataError(f"数据不足: {len(df)} < {int(self._rolling_window * 0.1)}")
-        else:
-            # 真实交易所数据：清零连续 demo 计数（恢复正常训练节奏）
-            self._meta_controller_status["_demo_streak"] = 0
-
-        if len(df) > self._rolling_window:
-            df = df.iloc[-self._rolling_window:]
-
-        # P2-11 增量门：数据无新增 K 线则跳过本轮（仅连续训练生效，手动触发总执行）
-        if not force and not self._data_incremented("meta_controller", df, symbol=symbol,
-                                                    is_demo=False):
-            return False
-
-        # 2. 子策略池：用户在「统一策略」中为 meta_controller 选定的子策略优先
-        from strategies import get_dynamic
-        sub_strategies = resolve_meta_sub_strategies(
-            (get_dynamic("meta_controller") or {}).get("params"))
-        self._meta_controller_status["sub_strategies"] = sub_strategies
-
-        # 3. 训练元控制器（P0：续训——best_agent 传入作为起点，与另两管线同口径。
-        # 此前 load_agent 只用于回退对照，元策略每次随机初始化重训 → 每轮被锚点
-        # 回退的死循环。现在每轮在旧模型上小步增量；OOS 硬门/回退保护/身份隔离
-        # 全部照常生效。子策略池变更时本轮仍作废，续训起点不受影响。）
-        def _train():
-            return train_meta_controller(
-                df, {
-                    "episodes": getattr(settings, "evolve_meta_episodes", 8),
-                    "n_episodes": 4,
-                    "hidden": [64, 64],
-                    "seed": None,
-                    "sub_strategies": sub_strategies,
-                    "fee_rate": 0.001,
-                    "meta_window": 20,
-                    "base_agent": best_agent,   # 续训起点（None=首轮从零）
-                    "time_budget": float(getattr(settings, "evolve_train_time_budget", 0.0) or 0.0),
-                    # 信号对齐塑形（P4-E2）：让元控制器学会跟随高置信子策略信号，
-                    # 逃出"空仓=0"陷阱——此前 289 轮全部 fitness=0.0 被回退/拦截。
-                    # 塑形只进训练梯度，best_ret/OOS 仍按真实收益，验证口径不变。
-                    "reward_signal_align": float(getattr(settings, "evolve_meta_signal_align", 6.0) or 0.0),
-                    # 持仓参与塑形（E-EXP 落地）：奖励 += 系数×仓位比，进一步惩罚
-                    # "空仓=0"懒解（生产归档 489/501 轮被拒）。只进训练梯度。
-                    "reward_participation_scale": float(getattr(
-                        settings, "evolve_meta_participation_scale", 0.0) or 0.0),
-                },
-                on_progress=None,
-            )
-
-        result = await self._run_train(_train)
-        history = result.get("history", [])
-        if not history:
-            raise RuntimeError("元策略训练无历史记录")
-
-        # 训练耗时以十秒计，期间用户可能在「统一策略」里改了子策略池。本轮模型是按旧池
-        # 训练的，覆盖模型文件 + 回写 params 会静默打回用户的选择，故直接作废等下轮重训
-        cur_pool = resolve_meta_sub_strategies(
-            (get_dynamic("meta_controller") or {}).get("params"))
-        if cur_pool != sub_strategies:
-            log.info("[evolve] 训练期间子策略池已被用户改为 %s，本轮结果作废（下轮按新池重训）", cur_pool)
-            # P4-E1：返回 False（本轮未训练，不推进 last_success/标的轮换）
-            # 作废轮在上面的增量门已消费了"新数据额度"，这里回退该记录，
-            # 下轮仍按真实数据增量判定（否则作废轮会白吃掉一批新 K 线）
-            self._last_tail_ts.pop(f"meta_controller:{symbol}:{self._effective_timeframe()}", None)
-            return False
-
-        # P4-E1：不能用 `or` 链——best_ret=0.0 是 falsy，会被 history 末行数值
-        # 静默替换（与 strategy_drl 同款修复）。显式判 None。
-        _mbr = result.get("best_ret")
-        best_ret = float(_mbr if _mbr is not None
-                         else history[-1].get("best_ret") or 0.0)
-        self._meta_controller_status["episode"] += 1
-        self._meta_controller_status["fitness"] = round(best_ret, 5)
-
-        # 训练身份：同级策略仅同口径可比（元控制器版本同样按符号/周期/配置分桶）
-        _meta_identity = _training_identity(
-            "meta_controller", symbol, self._effective_timeframe(),
-            state_window=1,
-            factor_signature=f"subs:{sub_strategies}",
-            config={
-                "episodes": int(getattr(settings, "evolve_meta_episodes", 8)),
-                "sub_strategies": sub_strategies,
-            })
-
-        # 3.4 最佳模型回退保护（P0-3 补齐：元控制器此前无回退保护；
-        # P0-4 负 fitness 方向反转修复，统一走 _should_rollback；
-        # 锚点口径不可比时跳过，同策略DRL/因子挖掘）
-        # P4-E1：判据统一为 OOS 收益（与 strategy_drl L1055-1069 同口径）——
-        # 旧实现用训练段 best_ret 与锚点比较：新模型 OOS 优于锚点但训练段略低
-        # 会被误回退（丢真改进）；反过来 OOS 相对锚点明显回撤却不触发回退
-        # （meta 进化可在 OOS 口径上持续退步）。新旧均有 oos_ret 时以 OOS 为准，
-        # 缺失时回落训练段比较（旧版本锚点无 OOS 记录）。
-        anchor = self.zoo.best_info("meta_controller")
-        meta_rollback_hit = False
-        meta_cmp_desc = ""
-        if best_agent is not None and anchor.get("comparable"):
-            _meta_mismatch = _identity_mismatch(anchor, _meta_identity)
-            if _meta_mismatch:
-                self._mark_deployment_status("meta_controller", anchor_mismatch=_meta_mismatch)
-                log.info("[evolve] 元控制器锚点身份不可比（%s），跳过回退比较", _meta_mismatch)
-            _moos = result.get("oos_report") or {}
-            new_moos = float(_moos.get("oos_ret") or 0.0) if _moos.get("enabled") else None
-            prev_moos = anchor.get("oos_ret")
-            if new_moos is not None and prev_moos is not None:
-                meta_rollback_hit = _should_rollback(new_moos, float(prev_moos), self._rollback_threshold)
-                meta_cmp_desc = f"OOS {new_moos:.4f} < {float(prev_moos):.4f}×{self._rollback_threshold}"
-            else:
-                meta_rollback_hit = _should_rollback(best_ret, prev_fitness, self._rollback_threshold)
-                meta_cmp_desc = f"fitness {best_ret:.4f} < {prev_fitness:.4f}×{self._rollback_threshold}"
-            if _meta_mismatch:
-                meta_rollback_hit = False
-        if meta_rollback_hit:
-            log.warning("[evolve] 元控制器新模型退化 (%s)，回退到最佳版本", meta_cmp_desc)
-            try:
-                from core.notify import notify
-                await notify(self.db, "进化引擎：模型回退",
-                             f"元控制器新模型退化（{meta_cmp_desc}），已回退最佳版本")
-            except Exception:  # noqa: BLE001
-                pass
-            await self.deploy_model(
-                "meta_controller", anchor.get("version") or self.zoo.best_version("meta_controller"),
-                outcome="rollback", symbol=symbol, timeframe=self._effective_timeframe(),
-                reason=f"新模型退化({meta_cmp_desc})")
-            self._mark_deployment_status("meta_controller", outcome="rollback",
-                                         candidate_fitness=best_ret)
-            # P2-13：回退轮次也要落库（此前回退路径漏记，曲线因此长期空白）
-            await self._log_round(
-                "meta_controller", symbol, self._effective_timeframe(),
-                "exchange", best_ret, status="rollback")
-            # P4-E1：回退轮补发 evolve_train 事件（与另两条管线一致）
-            await self.bus.publish(Event(EventType.SYSTEM, {
-                "kind": "evolve_train",
-                "model": "meta_controller",
-                "fitness": float(best_ret),
-                "status": "rollback",
-            }, source="evolve_engine"))
-            return
-
-        # 3.5 OOS 硬门：元模型同样不得零样本外证据接管实盘
-        # （save_agent(is_best=True) 会覆盖 rl/meta 加载的 meta_controller.json）
-        gate_ok, gate_reason = _strategy_deploy_gate(result)
-        self._meta_controller_status["oos_rejected"] = "" if gate_ok else gate_reason
-        if not gate_ok:
-            log.warning("[evolve] 元控制器未通过 OOS 硬门，保留原最佳模型：%s", gate_reason)
-            try:
-                # P4-C2：仅存档不占版本名额（被 OOS 拦截的元模型非有效改进）
-                await asyncio.to_thread(self.zoo.save_agent_archive, result["agent"], "meta_controller",
-                                        meta={"fitness": best_ret, "timestamp": time.time(),
-                                              "data_source": "exchange",
-                                              "oos_rejected": gate_reason})
-            except Exception as e:  # noqa: BLE001
-                log.warning("[evolve] 被拦截元模型存档失败: %s", e)
-            try:
-                from core.notify import notify
-                await notify(self.db, "进化引擎：OOS 硬门拦截",
-                             f"元控制器新模型未通过样本外安检，已保留原最佳模型：{gate_reason}")
-            except Exception:  # noqa: BLE001
-                pass
-            await self.bus.publish(Event(EventType.SYSTEM, {
-                "kind": "evolve_train",
-                "model": "meta_controller",
-                "fitness": best_ret,
-                "oos_rejected": gate_reason,
-            }, source="evolve_engine"))
-            # P2-13：OOS 拦截轮次落库
-            _oos_report_m = result.get("oos_report") or {}
-            await self._log_round(
-                "meta_controller", symbol, self._effective_timeframe(),
-                "exchange", best_ret,
-                status="oos_rejected",
-                oos_ret=_oos_report_m.get("oos_ret", 0.0) or 0.0,
-                decay=_oos_report_m.get("decay", 0.0) or 0.0,
-                position_ratio=_oos_report_m.get("oos_position_ratio", 0.0) or 0.0)
-            return
-
-        # 4. 保存元模型
-        import json as _json
-        await asyncio.to_thread(
-            self.zoo.save_agent, result["agent"], "meta_controller",
-            meta={"fitness": best_ret, "timestamp": time.time(),
-                  "data_source": "exchange",
-                  "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
-                  **_meta_identity})
-        self._mark_deployment_status("meta_controller", outcome="accepted",
-                                     candidate_fitness=best_ret)
-
-        # 5. 注册为可用策略
-        try:
-            flat_path = self.zoo._flat_path("meta_controller")
-            # 只合并训练负责的键：曾整体替换 params，训练一次就把用户设的
-            # meta_window/止损止盈/下单比例等参数打回默认值
-            _params = dict((get_dynamic("meta_controller") or {}).get("params") or {})
-            # mode 由用户决定：曾无条件写 "drl"，把「统一策略」选的集成模式打回 DRL
-            _mode = _params.get("mode") or "drl"
-            _params.update({"sub_strategies": sub_strategies,
-                            "mode": _mode,
-                            "model_path": str(flat_path)})
-            _pool_txt = sub_strategies.replace(',', ' / ')
-            spec = {
-                "name": "meta_controller",
-                "title": f"元策略控制器·{symbol}",
-                "description": (f"DRL 元控制器：在 {_pool_txt} 子策略间动态选择" if _mode == "drl"
-                                else f"集成元控制器：按置信度加权 {_pool_txt}"),
-                "logic": "元级 PPO，状态含子策略信号+置信度+历史胜率",
-                "executor": "meta_controller",
-                "params": _params,
-                "risk_tips": ["元策略依赖子策略质量，建议定期重训"],
-                "created_by": "evolve_engine",
-                "version": f"v{self._meta_controller_status['episode']}",
-                "base_symbol": symbol,
-                "base_timeframe": self._effective_timeframe(),
-                # 关键要求「图上给出买卖点」：元控制器在多个子策略间动态切换，
-                # Pine 端无等价实现（既非单一逻辑也无可内联的持仓规则）。
-                # 明确留空 + 说明原因，由前端提示，绝不套别的策略模板冒充。
-                "pine_code": "",
-                "pine_note": ("元策略控制器在子策略间动态切换，无等价 Pine 模板，"
-                              "不支持导出图表自动交易代码；如需在图上看买卖点，"
-                              "请对单个子策略（如 rl_evolve）导出 Pine"),
-            }
-            register_dynamic("meta_controller", spec)
-            # 持久化
-            from core.database import AiStrategy
-            from sqlalchemy import select
-            async with self.db.session() as s:
-                row = (await s.execute(select(AiStrategy).where(AiStrategy.name == "meta_controller"))).scalar_one_or_none()
-                if row:
-                    row.spec_json = _json.dumps(spec, ensure_ascii=False)
-                else:
-                    s.add(AiStrategy(name="meta_controller", spec_json=_json.dumps(spec, ensure_ascii=False)))
-                await s.commit()
-            log.info("[evolve] 元策略控制器已注册（best_ret=%.4f）", best_ret)
-        except Exception as e:
-            log.warning("[evolve] 元策略注册失败: %s", e)
-
-        # 6. 发布事件
-        # P2-13：训练轮次落库
-        _oos_report_ok = result.get("oos_report") or {}
-        await self._log_round(
-            "meta_controller", symbol, self._effective_timeframe(),
-            "exchange", float(best_ret),
-            status="ok",
-            oos_ret=_oos_report_ok.get("oos_ret", 0.0) or 0.0,
-            decay=_oos_report_ok.get("decay", 0.0) or 0.0,
-            position_ratio=_oos_report_ok.get("oos_position_ratio", 0.0) or 0.0)
-        await self.bus.publish(Event(EventType.SYSTEM, {
-            "kind": "evolve_train",
-            "model": "meta_controller",
-            "fitness": float(best_ret),
         }, source="evolve_engine"))
 
     # ---- 数据获取 ----
@@ -3432,27 +3174,28 @@ class EvolveEngine(EvolveObservationsMixin):
             return None
 
     def _next_symbol(self) -> str:
-        """返回当前训练标的（三管线共享，不递增）。
+        """返回当前训练标的（两管线共享，不递增）。
 
-        P4-A1：标的轮换改由 _mark_pipeline_done 在「三条管线均完成当前标的
+        P4-A1：标的轮换改由 _mark_pipeline_done 在「全部管线均完成当前标的
         训练后」统一推进，保证 factor_miner 产出的级联因子与 strategy_drl
-        训练标的始终一致（此前三管线各自递增轮换 → 级联因子跨标错配）。
+        训练标的始终一致（此前各自递增轮换 → 级联因子跨标错配）。
         """
         return self._symbols[self._symbol_idx % len(self._symbols)]
 
     def _mark_pipeline_done(self, pipeline: str) -> None:
-        """标记一条管线已在当前标的完成训练；三管线齐全后切换到下一标的。
+        """标记一条管线已在当前标的完成训练；全部管线齐全后切换到下一标的。
 
         仅在真实执行了一次训练（含失败/跳过后的完成）后调用，挂在各
         _train_*_once 的 finally 里。因子挖掘优先级最低（它是链路源头，
-        需要先给下游产出因子），因此只有三管线都完成后才推进标的。
+        需要先给下游产出因子），因此只有全部管线都完成后才推进标的。
+        目标数取 len(self._models)（元策略训练管线移除后为 2），避免再硬编码。
         """
         self._cycle_pipelines_done.add(pipeline)
-        if len(self._cycle_pipelines_done) >= 3:
+        if len(self._cycle_pipelines_done) >= len(self._models):
             self._cycle_pipelines_done.clear()
             self._symbol_idx += 1
             nxt = self._symbols[self._symbol_idx % len(self._symbols)]
-            log.info("[evolve] 三管线均完成 %s 训练，切换至 %s",
+            log.info("[evolve] 全部管线均完成 %s 训练，切换至 %s",
                      self._symbols[(self._symbol_idx - 1) % len(self._symbols)], nxt)
 
     def _generate_symbol_demo(self, symbol: str, n: int, timeframe: str) -> Optional[Any]:
@@ -3498,7 +3241,7 @@ class EvolveEngine(EvolveObservationsMixin):
         limit = max(int(self._rolling_window), 1000)
         max_candles = max(int(self._rolling_window), 1000)
 
-        # P4-E1：拉数串行锁——三管线 + 跨标 OOS 并发打交易所会放大 429；
+        # P4-E1：拉数串行锁——两管线 + 跨标 OOS 并发打交易所会放大 429；
         # 统一串行化后同一时刻只有一条 fetch 在飞（429 重试逻辑见 data_loader）。
         try:
             async with self._fetch_lock:

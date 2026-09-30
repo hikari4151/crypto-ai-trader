@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把持续进化页（`view==='evolve'`）整页重排为「页头操作区 → 8 个状态光晕 KPI 磁贴 → 全宽训练曲线 → 模型三卡 → DRL 实验台折叠条」的监控优先布局，配置/触发改为页头按钮弹出的下拉浮层，功能与数据绑定零丢失。
+**Goal:** 把持续进化页（`view==='evolve'`）整页重排为「页头操作区 → 7 个状态光晕 KPI 磁贴 → 全宽训练曲线 → 模型两卡 → DRL 实验台折叠条」的监控优先布局，配置/触发改为页头按钮弹出的下拉浮层，功能与数据绑定零丢失。
 
 **Architecture:** 单文件改造：`web/static/index.html` 内重写 evolve 视图模板与局部 CSS，新增的 KPI 数据全部由现有 API（`/evolve/status`、`/evolve/rounds` 已拉取数据）在前端 computed 中计算，后端零改动。测试采用仓库既有的「静态 UI 契约」模式（`tests/test_backtest_ui_contract.py` 同款：读 index.html 断言结构），配合 `scripts/check_js.py` 与 `scripts/build_frontend.py --check-only` 门禁。
 
@@ -14,19 +14,19 @@
 ## Global Constraints
 
 1. **零后端改动**：`web/api/evolve.py`、`drl/evolve_engine.py` 不允许出现任何 diff。
-2. **零数据绑定改名**：既有 Vue 响应式字段/方法（`fetchEvolveStatus/evolvePause/evolveResume/evolveEnable/saveEvolveConfig/triggerFactorMiner/triggerStrategyDrl/triggerMetaController/resetEvolveAnchor/showEvolveVersions/evolveRollback/deployEvolveFactor/goEvolveComboBacktest/setEvolveCurveModel/setEvolveRange/drlPanelOpen/drlMode/fetchEvolveRounds/renderEvolveCurve/evolveCurveStat/evolveAnchorIssues/...`）全部保留原名。
+2. **零数据绑定改名**：既有 Vue 响应式字段/方法（`fetchEvolveStatus/evolvePause/evolveResume/evolveEnable/saveEvolveConfig/triggerFactorMiner/triggerStrategyDrl/resetEvolveAnchor/showEvolveVersions/evolveRollback/deployEvolveFactor/goEvolveComboBacktest/setEvolveCurveModel/setEvolveRange/drlPanelOpen/drlMode/fetchEvolveRounds/renderEvolveCurve/evolveCurveStat/evolveAnchorIssues/...`）全部保留原名。
 3. **`#evolveCurveChart` 唯一**，仍归持续进化曲线渲染；ECharts 渲染逻辑（dataZoom、指纹门控、缩放记忆）不动。
 4. **轮询策略不动**：status 5s、rounds 10s、与 visibilitychange 解耦（`startEvolvePolls` 块不改）。
 5. **禁止 emoji**：evolve 视图模板内不出现 📈🧪🧠🤖🧬⏸⚡ 等表情符号；图标一律用站内 SVG sprite（`#i-*`）。
 6. **设计令牌**：只用既有变量（`--bg-0 #0A0A0A`、`--bg-1 #141417`、`--bg-2 #1C1C21`、`--border #262629`、`--text #FAFAFA`、`--muted #A1A1AB`、`--text3 #70707A`、`--accent #7D3BED`、`--green #0DCC82`、`--red #F5475E`、`--orange #F59E0A`）；不引入新色值（光晕用既有色的 rgba）。
-7. **KPI 轮次口径同源**：#6/#8 磁贴的轮次分类必须引用既有 `EVOLVE_STOP_STATUS`/`evolveVisual`，不得另写一套集合。
+7. **KPI 轮次口径同源**：#5/#7 磁贴的轮次分类必须引用既有 `EVOLVE_STOP_STATUS`/`evolveVisual`，不得另写一套集合。
 8. 图表高度 **220px → 260px**（两处内联样式都要改）。
 9. 每个任务结束跑该任务的测试 + `check_js`，**全绿才 commit**；commit 会触发仓库 pre-commit 门禁（ruff/mypy/check_js/build_frontend），失败必须修。
 
 ## 对规格的三处细化（写入计划即生效，最终回填 spec）
 
 - **页头不放大标题**：顶栏 `.tb-name` 已显示「持续进化」+「自优化模板 · 轮次迭代 · 版本回退」（`viewTitle/viewSub`），页头再放一份会同屏重复；页头仅保留按钮区（右对齐）。
-- **部署版高亮规则具体化**：`deployed_fitness` 非空**且为三模型最高**的那张卡加紫描边（三模型往往都有部署值，逐卡高亮无意义）。
+- **部署版高亮规则具体化**：`deployed_fitness` 非空**且为两模型最高**的那张卡加紫描边（两模型往往都有部署值，逐卡高亮无意义）。
 - **`⚠` 文本符号清除**：模型卡 warning 的 `<span>⚠</span>` 换成 `#i-alert` SVG（emoji 测试按此口径执行）。
 
 ## File Structure
@@ -47,7 +47,7 @@
 - Test: `tests/test_evolve_ui_contract.py`（新建）
 
 **Interfaces:**
-- Consumes: `evolveStatus`（reactive，含 `supervisor.loops_alive/degraded/heartbeat_age/restarts_by_loop`、`factor_miner/strategy_drl/meta_controller` 的 `fitness/next_run/deployed_fitness/deployed_version/rounds_total`、`*_interval`、`running/enabled/paused`）、`evolveRounds`（按模型缓存的轮次数组，行含 `ts/status`）、`evolveRoundsTotal`、`evolveCurveModel`、`evolveVisual(model)`（返回 `{rows, stopRounds, ...}`）、`EVOLVE_STOP_STATUS`、`evolveAnchorIssues`、`EVOLVE_MODELS`、`EVOLVE_MODEL_LABELS`、`clock`（秒级时钟 ref）、`setEvolveCurveModel`（模板用）
+- Consumes: `evolveStatus`（reactive，含 `supervisor.loops_alive/degraded/heartbeat_age/restarts_by_loop`、`factor_miner/strategy_drl` 的 `fitness/next_run/deployed_fitness/deployed_version/rounds_total`、`*_interval`、`running/enabled/paused`）、`evolveRounds`（按模型缓存的轮次数组，行含 `ts/status`）、`evolveRoundsTotal`、`evolveCurveModel`、`evolveVisual(model)`（返回 `{rows, stopRounds, ...}`）、`EVOLVE_STOP_STATUS`、`evolveAnchorIssues`、`EVOLVE_MODELS`、`EVOLVE_MODEL_LABELS`、`clock`（秒级时钟 ref）、`setEvolveCurveModel`（模板用）
 - Produces（Task 2-5 依赖，setup return 必须导出）:
   - `evolveKpiTiles` — computed<Array<{key, label, value, glow:'green'|'amber'|'red'|'plain', valueCls:''|'pos'|'warn'|'neg', sub:string, model?:string, anchor?:boolean, dot?:string}>>
   - `evolvePanelOpen` — ref<boolean>
@@ -94,7 +94,7 @@ def test_kpi_computed_exported_from_setup():
 
 def test_loop_kpi_uses_supervisor_loops_alive():
     start = HTML.find("const evolveKpiLoops = computed")
-    assert start != -1, "三循环 KPI computed 缺失"
+    assert start != -1, "两循环 KPI computed 缺失"
     body = HTML[start:HTML.find("const evolveKpiTiles", start)]
     assert "loops_alive" in body
     assert "supervisor" in body
@@ -145,14 +145,14 @@ Expected: FAIL（`const evolveKpiTiles = computed` not found 等，全部红）
     function toggleEvolvePanel(force) {
       evolvePanelOpen.value = (force === true) ? true : !evolvePanelOpen.value;
     }
-    // KPI 磁贴统一点击：前三张切曲线模型；锚点磁贴开浮层。
+    // KPI 磁贴统一点击：前两张切曲线模型；锚点磁贴开浮层。
     // 注意：anchor 分支必须 stopPropagation——否则本次点击冒泡到 document 的
     //    onDocClick（此时 evolvePanelOpen 刚变 true）会把浮层立刻关掉，表现为"点了打不开"。
     function kpiTileClick(t, ev) {
       if (t.model) { setEvolveCurveModel(t.model); return; }
       if (t.anchor) { ev.stopPropagation(); toggleEvolvePanel(true); }
     }
-    // ---- KPI 磁贴数据层：8 磁贴全部由现有数据前端计算，后端零改动 ----
+    // ---- KPI 磁贴数据层：7 磁贴全部由现有数据前端计算，后端零改动 ----
     // 轮次口径与曲线红点同源（evolveVisual / EVOLVE_STOP_STATUS），杜绝"文本与图不符"。
     const evolveKpiLoops = computed(() => {
       const sup = evolveStatus.supervisor || {};
@@ -161,7 +161,6 @@ Expected: FAIL（`const evolveKpiTiles = computed` not found 等，全部红）
       const defs = [
         { key:'factor_miner', label:'因子挖掘', intKey:'factor_miner_interval' },
         { key:'strategy_drl', label:'策略 DRL', intKey:'strategy_drl_interval' },
-        { key:'meta_controller', label:'元策略', intKey:'meta_controller_interval' },
       ];
       return defs.map(d => {
         const p = evolveStatus[d.key] || {};
@@ -198,7 +197,7 @@ Expected: FAIL（`const evolveKpiTiles = computed` not found 等，全部红）
           { key:'oos', label:'OOS 通过率', ...blank },
         ];
       }
-      // ④ 引擎保活：supervisor 降级判定 + 心跳/自愈
+      // ③ 引擎保活：supervisor 降级判定 + 心跳/自愈
       let kaVal = '—', kaGlow = 'plain', kaCls = '', kaSub = '状态未知';
       if (evolveStatus.running && evolveStatus.enabled) {
         kaVal = sup.degraded ? '降级' : '正常';
@@ -208,22 +207,22 @@ Expected: FAIL（`const evolveKpiTiles = computed` not found 等，全部红）
         const rs = Object.values(sup.restarts_by_loop || {}).reduce((s, n) => s + (Number(n) || 0), 0);
         kaSub = (hb != null ? `心跳 ${hb}s 前` : '心跳未知') + ` · 自愈 ${rs} 次`;
       }
-      // ⑤ 锚点健康：复用现有 evolveAnchorIssues（3 - 告警数）
+      // ④ 锚点健康：复用现有 evolveAnchorIssues（2 - 告警数）
       const issues = evolveAnchorIssues.value;
       const anchorTile = {
-        key:'anchor', label:'锚点健康', value:(3 - issues.length) + ' / 3',
+        key:'anchor', label:'锚点健康', value:(2 - issues.length) + ' / 2',
         glow: issues.length ? 'red' : 'green', valueCls:'',
-        sub: issues.length ? (issues[0].label + ' · ' + issues[0].tag) : '三模型基线正常',
+        sub: issues.length ? (issues[0].label + ' · ' + issues[0].tag) : '两模型基线正常',
         anchor: true,
       };
-      // ⑥ 累计轮次：_pipeline_view.rounds_total 三模型合计（status 同源，零额外请求）
+      // ⑤ 累计轮次：_pipeline_view.rounds_total 两模型合计（status 同源，零额外请求）
       const roundsSum = EVOLVE_MODELS.reduce(
         (s, m) => s + (Number(evolveStatus[m.key] && evolveStatus[m.key].rounds_total) || 0), 0);
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       const curRows = evolveRounds[evolveCurveModel.value] || [];
       const todayN = curRows.filter(r => r.ts && r.ts * 1000 >= todayStart.getTime()).length;
       const curLabel = EVOLVE_MODEL_LABELS[evolveCurveModel.value] || evolveCurveModel.value;
-      // ⑦ 最佳 fitness：三模型最大者，数值色按正负
+      // ⑥ 最佳 fitness：两模型最大者，数值色按正负
       let best = null;
       for (const m of EVOLVE_MODELS) {
         const f = Number(evolveStatus[m.key] && evolveStatus[m.key].fitness);
@@ -233,7 +232,7 @@ Expected: FAIL（`const evolveKpiTiles = computed` not found 等，全部红）
                    ver: Number(evolveStatus[m.key] && evolveStatus[m.key].deployed_version) || 0 };
         }
       }
-      // ⑧ OOS 通过率：近 30 轮，拦截口径 = EVOLVE_STOP_STATUS（与曲线红点同源）
+      // ⑦ OOS 通过率：近 30 轮，拦截口径 = EVOLVE_STOP_STATUS（与曲线红点同源）
       const v = evolveVisual(evolveCurveModel.value);
       const recent = (v.rows || []).slice(-30);
       const stopN = recent.filter(r => EVOLVE_STOP_STATUS.has(r.status)).length;
@@ -286,7 +285,7 @@ Expected: `JS 语法完全通过`
 
 ```powershell
 git add web/static/index.html tests/test_evolve_ui_contract.py
-git commit -m "feat(web): 持续进化页 KPI 数据层——8 磁贴 computed + 配置/触发浮层状态 + 部署旗舰高亮"
+git commit -m "feat(web): 持续进化页 KPI 数据层——7 磁贴 computed + 配置/触发浮层状态 + 部署旗舰高亮"
 ```
 
 ---
@@ -361,7 +360,7 @@ Expected: 新增 5 个测试 FAIL（旧测试保持绿）
         <button class="mac-btn" disabled title="进化日志导出尚未提供接口"><svg width="13" height="13"><use href="#i-download"/></svg>导出进化日志</button>
         <button class="mac-btn" @click="fetchEvolveStatus()" :disabled="!evolveStatus.running"><svg width="13" height="13"><use href="#i-refresh"/></svg>刷新状态</button>
       </div></div>
-      <!-- KPI 磁贴 ×8（状态光晕）：前三张点按切换曲线模型，锚点磁贴点按开浮层 -->
+      <!-- KPI 磁贴 ×7（状态光晕）：前两张点按切换曲线模型，锚点磁贴点按开浮层 -->
       <div class="evolve-kpis">
         <button v-for="t in evolveKpiTiles" :key="t.key" type="button" class="evolve-kpi"
           :class="t.glow!=='plain' ? 'on-'+t.glow : ''"
@@ -432,7 +431,7 @@ Expected: 通过
 
 ```powershell
 git add web/static/index.html tests/test_evolve_ui_contract.py
-git commit -m "feat(web): 持续进化页头（配置/触发按钮）+ 8 状态光晕 KPI 磁贴"
+git commit -m "feat(web): 持续进化页头（配置/触发按钮）+ 7 状态光晕 KPI 磁贴"
 ```
 
 ---
@@ -444,7 +443,7 @@ git commit -m "feat(web): 持续进化页头（配置/触发按钮）+ 8 状态�
 - Test: `tests/test_evolve_ui_contract.py`（追加断言）
 
 **Interfaces:**
-- Consumes: Task 1 `evolvePanelOpen/toggleEvolvePanel`；Task 2 `.evolve-panel` 包装；既有 `formDrop/toggleFormDrop`（标的池多选）、`saveEvolveConfig`、`triggerFactorMiner/triggerStrategyDrl/triggerMetaController`、`evolveAnchorIssues/evolveAnchorLocked/resetEvolveAnchor`、`evolveConfig/evolveTfOptions`
+- Consumes: Task 1 `evolvePanelOpen/toggleEvolvePanel`；Task 2 `.evolve-panel` 包装；既有 `formDrop/toggleFormDrop`（标的池多选）、`saveEvolveConfig`、`triggerFactorMiner/triggerStrategyDrl`、`evolveAnchorIssues/evolveAnchorLocked/resetEvolveAnchor`、`evolveConfig/evolveTfOptions`
 - Produces: `.evolve-panel-pop` 浮层（含四段：标的池+周期+保存 / 手动触发 / 锚点）；浮层内标的池二级菜单的 Teleport 节点追加类 `evolve-symbols-pop`（供点外部判定"算内部"）
 
 - [ ] **Step 1: 写失败契约测试**
@@ -458,7 +457,6 @@ def test_panel_pop_contains_all_functionality():
     assert "保存配置（热更新）" in v
     assert "triggerFactorMiner()" in v
     assert "triggerStrategyDrl()" in v
-    assert "triggerMetaController()" in v
     assert "resetEvolveAnchor(a.model)" in v
     assert "formDrop==='evolveSymbols'" in v
 
@@ -501,7 +499,7 @@ Expected: 新增 3 个 FAIL
               <div class="evolve-pop-group">
                 <div class="mac-label">手动触发训练</div>
                 <div class="evolve-trigger-stack">
-                  <!-- 原「手动触发训练」卡的 3 个按钮原样移入（含 :disabled 条件与「训练中…」文案） -->
+                  <!-- 原「手动触发训练」卡的 2 个按钮原样移入（含 :disabled 条件与「训练中…」文案） -->
                 </div>
               </div>
               <div class="evolve-pop-group" v-if="evolveAnchorIssues.length" :style="{borderColor: evolveAnchorLocked ? 'rgba(245,71,94,.45)' : 'rgba(245,158,10,.3)'}">
@@ -518,7 +516,7 @@ Expected: 新增 3 个 FAIL
 
 1. 标的池块：原 `<div class="mac-window evolve-side-config">` 卡内，从 `<div class="menu-drop" :class="{open: formDrop==='evolveSymbols'}"...>` 到其配对 `</div>`（含 `<button class="mac-input" ... :data-form-key="'evolveSymbols'"`、`<Teleport to="body">` 二级菜单、手输添加行）→ 粘进浮层第一个 `menu-drop` 占位注释处；
 2. 二级菜单 Teleport 节点 `<div v-if="formDrop==='evolveSymbols'" ref="formDropMenu" class="menu-sub" ...>` 追加类名：改为 `class="menu-sub evolve-symbols-pop"`（点外部判定需要）；
-3. 触发按钮：原 `<div class="mac-window evolve-side-trigger">` 卡的 `.evolve-trigger-stack` 内 3 个 `<button>` → 粘进浮层 `.evolve-trigger-stack` 占位注释处；
+3. 触发按钮：原 `<div class="mac-window evolve-side-trigger">` 卡的 `.evolve-trigger-stack` 内 2 个 `<button>` → 粘进浮层 `.evolve-trigger-stack` 占位注释处；
 4. 锚点条目：原 `<div class="mac-window evolve-side-anchor">` 卡 `.mac-body` 内的 `<div class="evolve-anchor-item" ...>` 整块 → 粘进浮层锚点占位注释处。
 
 - [ ] **Step 4: 从原位删除三张侧栏卡（内容已移入浮层，整卡删除）**
@@ -552,7 +550,7 @@ Expected: 通过
 
 ```powershell
 git add web/static/index.html tests/test_evolve_ui_contract.py
-git commit -m "feat(web): 持续进化配置/触发改为页头按钮下拉浮层（标的池/周期/触发三键/锚点/保存，功能零丢失）"
+git commit -m "feat(web): 持续进化配置/触发改为页头按钮下拉浮层（标的池/周期/触发两键/锚点/保存，功能零丢失）"
 ```
 
 ---
@@ -845,20 +843,20 @@ Select-String -Path web/static/index.html -Pattern "evolvePanelOpen" | Measure-O
 
 - [ ] **Step 6: 视觉验收（启动 web 服务人工过一遍，1440 / 1000 / 700 三档）**
 
-- [ ] KPI 8 磁贴等行高、无文案扭曲/换行（重点看「运行中」大字）；运行绿光、暂停琥珀光、锚点告警红光、无状态素色
+- [ ] KPI 7 磁贴等行高、无文案扭曲/换行（重点看「运行中」大字）；运行绿光、暂停琥珀光、锚点告警红光、无状态素色
 - [ ] 页头按钮区右对齐、无任何 emoji、无重复大标题（顶栏已有「持续进化」）
 - [ ] 「配置 / 触发」点击弹浮层，锚定按钮下方；标的池二级菜单可打开、点浮层外关闭、点二级菜单内不关闭
 - [ ] 曲线统计行独立一行（不与分段按钮挤压）、图表 260px、红点/图例正常
-- [ ] 模型三卡：部署旗舰卡紫描边；查看版本弹层、回退按钮可用
+- [ ] 模型两卡：部署旗舰卡紫描边；查看版本弹层、回退按钮可用
 - [ ] 实验台 pills 点击切模式并展开；四模式表单完整
 - [ ] 页面无横向滚动条；`#evolveCurveChart` 曲线随轮询刷新
-- [ ] KPI 前三张点按切换曲线模型；锚点磁贴点按开浮层
+- [ ] KPI 前两张点按切换曲线模型；锚点磁贴点按开浮层
 
 - [ ] **Step 7: 交互回归点检**
 
 - [ ] 暂停/恢复、启用、刷新状态按钮按既有禁用条件工作
 - [ ] 浮层内「保存配置」toast 正常、二级菜单多选标的池正常
-- [ ] 手动触发三键在引擎未运行时禁用、训练中显示「训练中…」
+- [ ] 手动触发两键在引擎未运行时禁用、训练中显示「训练中…」
 - [ ] 锚点告警存在时浮层显示锚点段与「重置锚点」；无告警时整段隐藏
 - [ ] 切到别的视图再切回，轮询与数据仍在（status 5s / rounds 10s 未动）
 

@@ -1,5 +1,6 @@
-"""DRL 引擎优化（M4 统一 + 元策略 + 经验回放 + 风控）专项测试。"""
+"""DRL 引擎优化（M4 统一 + 经验回放 + 风控）与元策略运行时专项测试。"""
 import numpy as np
+import pandas as pd
 
 from backtest.engine import BacktestConfig, run_backtest
 from backtest.data_loader import generate_demo
@@ -29,6 +30,51 @@ def test_replay_buffer_push_and_len():
     assert len(buf) == 0
     buf.push(np.array([[0.1, 0.2]]), np.array([1]), np.array([0.5]), np.array([-0.1]))
     assert len(buf) == 1
+
+
+def test_replay_buffer_feature_dim():
+    """feature_dim：空缓冲返回 None，有轨迹时返回状态维度（跨轮复用的守卫依据）。"""
+    from drl.agent import ReplayBuffer
+    buf = ReplayBuffer(capacity=10)
+    assert buf.feature_dim() is None
+    buf.push(np.zeros((7, 5)), np.zeros(7, dtype=int), np.zeros(7), np.zeros(7))
+    assert buf.feature_dim() == 5
+
+
+def test_train_drl_reuses_external_replay_buffer():
+    """跨训练轮复用：调用方传入的缓冲区在训练后持有轨迹，且第二轮继续累积。
+
+    这是"对抗灾难性遗忘"的前提——若缓冲区每轮重建，旧行情经验在轮间被完全丢弃。
+    """
+    from drl.agent import ReplayBuffer, train_drl
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    buf = ReplayBuffer(capacity=50)
+    cfg = {"episodes": 1, "n_episodes": 2, "ppo_epochs": 1, "mini_batch_size": 32,
+           "seed": 42, "val_eval_interval": 1,
+           "replay_buffer": buf, "replay_mix_ratio": 0.3}
+
+    train_drl(df, cfg)
+    n_first = len(buf)
+    assert n_first > 0, "外部缓冲区应在训练后被填充（串起来才能跨轮生效）"
+
+    train_drl(df, cfg)
+    assert len(buf) > n_first, "第二轮应继续复用同一缓冲区，而不是新建后丢弃历史"
+
+
+def test_train_drl_clears_dim_mismatched_replay_buffer():
+    """维度守卫：配置变更（state_window/因子列）后旧轨迹维度不符，须清空而非崩溃。"""
+    from drl.agent import ReplayBuffer, train_drl
+    df = generate_demo(timeframe="1h", n=400, seed=42)
+    buf = ReplayBuffer(capacity=10)
+    # 伪造一条与当前状态维度不符的旧轨迹（模拟改过 state_window 的缓冲）
+    buf.push(np.zeros((5, 3)), np.zeros(5, dtype=int), np.zeros(5), np.zeros(5))
+    assert buf.feature_dim() == 3
+
+    train_drl(df, {"episodes": 1, "n_episodes": 1, "ppo_epochs": 1, "mini_batch_size": 32,
+                   "seed": 42, "val_eval_interval": 1, "replay_buffer": buf})
+
+    assert buf.feature_dim() != 3, "维度不符的旧轨迹必须被清空重建"
+    assert len(buf) > 0 and buf.feature_dim() and buf.feature_dim() > 3
 
 
 def test_replay_buffer_sample():
@@ -156,6 +202,102 @@ def test_tail_risk_penalty_reduces_reward():
 
 # ============ T6. vol_penalty 口径统一验证 ============
 
+def test_factor_net_fitness_costs_penalize():
+    """net fitness 模式：换手成本正确压制高换手组合（2026-09-29 成本对齐修复）。
+
+    背景：旧 ic 口径 fitness=|rank_ic|×√(1/turnover) 会被低换手奖励虚高，
+    与真实回测收益脱节（5m ETH 300+ 笔 -34.6%）。net 口径 = 验证段方向收益
+    − 换手成本，高换手组合应被显著压制。
+    """
+    from factors.engine import compute_factor_matrix
+    from drl.factor_env import FactorMiningEnv
+    from factors.analysis import _rolling_ic, _spearman
+
+    df = generate_demo(timeframe="5m", n=2000, seed=7)
+    mat = compute_factor_matrix(df)
+    close = df["close"]
+    _ics = pd.DataFrame({c: _rolling_ic(mat[c], close, h=1, method="rank", window=120)
+                          for c in mat.columns}, index=mat.index).shift(1).ffill()
+    _icir = _ics.rolling(600, min_periods=240).mean() / (
+        _ics.rolling(600, min_periods=240).std() + 1e-12)
+    _z_exp = {c: ((mat[c] - mat[c].expanding().mean())
+                  / (mat[c].expanding().std() + 1e-12)).fillna(0.0)
+              for c in mat.columns}
+
+    def _mk(mode, cost):
+        return FactorMiningEnv(mat, close, h=1, ic_window=120, max_steps=4,
+                               train_ratio=0.6, val_ratio=0.2, corr_threshold=0.85,
+                               seed=7, precomputed_ics=_ics, precomputed_icir=_icir,
+                               precomputed_z=_z_exp, use_action_mask=True,
+                               fitness_mode=mode, cost_per_turn=cost)
+
+    e_ic = _mk("ic", 0.0)
+    e_net = _mk("net", 0.002)
+
+    fwd = close.to_numpy(float)[1:] / close.to_numpy(float)[:-1] - 1
+    ics = {c: _spearman(mat[c].to_numpy(float)[e_ic.n_train:e_ic.n_val],
+                        fwd[e_ic.n_train:e_ic.n_val]) for c in mat.columns}
+    ranked = sorted(ics.items(), key=lambda x: -abs(x[1]))
+    top = [mat.columns.get_loc(r[0]) for r in ranked[:4]]
+    bot = [mat.columns.get_loc(r[0]) for r in ranked[-4:]]
+
+    # 分别评估两组组合
+    e_ic._selected = top
+    f_ic = e_ic._composite_fitness()
+    e_net._selected = top
+    f_net_top = e_net._composite_fitness()
+    e_net._selected = bot
+    f_net_bot = e_net._composite_fitness()
+
+    # 无成本时两种组合都应接近（demo 方向收益相近）
+    assert f_ic > 0, "ic 口径应给出正分"
+    # 成本应显著压制净收益：top4 保留（IC 高），bot4 被压得更狠
+    assert f_net_top >= f_net_bot, (
+        "net 口径下高 IC 组合应不低于低 IC 组合；"
+        f"top={f_net_top} bot={f_net_bot}")
+
+
+def test_factor_net_fitness_matches_manual():
+    """net fitness 的手动重算逐位一致（gross − turnover×cost）× scale。"""
+    from factors.engine import compute_factor_matrix
+    from drl.factor_env import FactorMiningEnv
+    from factors.analysis import _rolling_ic, factor_turnover, forward_returns
+    from factors.mining import composite_factor
+
+    df = generate_demo(timeframe="5m", n=2000, seed=7)
+    mat = compute_factor_matrix(df)
+    close = df["close"]
+    _ics = pd.DataFrame({c: _rolling_ic(mat[c], close, h=1, method="rank", window=120)
+                          for c in mat.columns}, index=mat.index).shift(1).ffill()
+    _icir = _ics.rolling(600, min_periods=240).mean() / (
+        _ics.rolling(600, min_periods=240).std() + 1e-12)
+    _z_exp = {c: ((mat[c] - mat[c].expanding().mean())
+                  / (mat[c].expanding().std() + 1e-12)).fillna(0.0)
+              for c in mat.columns}
+    e = FactorMiningEnv(mat, close, h=1, ic_window=120, max_steps=4,
+                        train_ratio=0.6, val_ratio=0.2, corr_threshold=0.85,
+                        seed=7, precomputed_ics=_ics, precomputed_icir=_icir,
+                        precomputed_z=_z_exp, use_action_mask=True,
+                        fitness_mode="net", cost_per_turn=0.002)
+
+    cols = list(mat.columns[:4])
+    e._selected = [mat.columns.get_loc(c) for c in cols]
+    actual = e._composite_fitness()
+
+    weights = {c: 0.1 for c in cols}
+    combo = composite_factor(mat, weights, method="ic", z_mode="expanding", z_map=_z_exp)
+    vs = combo.iloc[e.n_train:e.n_val]
+    vc = close.iloc[e.n_train:e.n_val]
+    s = vs.to_numpy(float)
+    fwd = forward_returns(vc, 1).to_numpy(float)
+    sig = np.nan_to_num(np.sign(s), nan=0.0)
+    fwd_a = np.nan_to_num(fwd, nan=0.0)
+    gross = float(np.mean(sig * fwd_a))
+    cost = factor_turnover(vs) * 0.002
+    expected = round(max(0.0, gross - cost) * 500.0, 4)
+    assert abs(actual - expected) < 1e-9, f"逐位不一致: env={actual} manual={expected}"
+
+
 def test_vol_penalty_unified():
     """验证环境与训练环境使用相同的 vol_penalty（M4 修复）。"""
     from drl.agent import train_drl
@@ -171,90 +313,6 @@ def test_vol_penalty_unified():
     assert "factor_sd" in result
     # 验证 PPO config 包含 replay 信息
     assert "replay" in result["ppo_cfg"]
-
-
-# ============ T8. MetaController DRL 训练 ============
-
-def test_meta_controller_train():
-    """元策略 DRL 训练能完成，产出有界收益和元智能体。"""
-    from strategies.meta import train_meta_controller
-    df = generate_demo(timeframe="1h", n=500, seed=42)
-    result = train_meta_controller(
-        df, {"episodes": 2, "n_episodes": 2, "sub_strategies": "dual_ma,factor_signal",
-             "hidden": [8, 8]})
-    assert result["agent"] is not None
-    assert result["sub_strategies"] == ["dual_ma", "factor_signal"]
-    assert result["state_dim"] > 0
-    # 收益应是有界浮点数（不爆炸）
-    assert -1e6 < result["best_ret"] < 1e6
-
-
-def test_meta_controller_train_seed_none():
-    """回归：进化引擎传 seed=None（意为每轮随机），不得触发 int(None) 崩溃。
-
-    修复前 drl/evolve_engine 的每轮元策略训练都以此 cfg 抛 TypeError，
-    表现为「持续进化」页元策略控制器一直报错。
-    """
-    from strategies.meta import train_meta_controller
-    df = generate_demo(timeframe="1h", n=500, seed=42)
-    result = train_meta_controller(df, {
-        "episodes": 1, "n_episodes": 1, "hidden": [8, 8], "seed": None,
-        "sub_strategies": "dual_ma,factor_signal,price_action",
-        "fee_rate": 0.001, "meta_window": 20,
-    })
-    assert result["agent"] is not None
-    assert result["history"][-1]["best_ret"] == result["best_ret"]
-
-
-def test_meta_controller_train_explicit_seed_reproducible():
-    """显式 seed 仍可复现：随机 seed 的兜底不能破坏确定性。"""
-    from strategies.meta import train_meta_controller
-    df = generate_demo(timeframe="1h", n=500, seed=42)
-    cfg = {"episodes": 2, "n_episodes": 1, "hidden": [8, 8], "seed": 7,
-           "sub_strategies": "dual_ma,factor_signal"}
-    r1 = train_meta_controller(df, cfg)
-    r2 = train_meta_controller(df, cfg)
-    assert [h["total_ret"] for h in r1["history"]] == [h["total_ret"] for h in r2["history"]]
-
-
-def test_meta_controller_signal_align_shaping():
-    """P4-E2：信号对齐塑形开启后训练仍完成、收益有界；顺势建仓当步奖励更高。
-
-    回归：元策略此前每轮 fitness=0.0（PPO 收敛到"空仓=0"的懒惰最优解），
-    OOS 从不交易被硬门拦截。塑形只进训练梯度、不污染 best_ret 真实口径，
-    本测试锁定「塑形开关不破坏训练契约 + 塑形确实按决策生效」。
-    """
-    from strategies.meta import MetaControllerEnv, train_meta_controller
-    df = generate_demo(timeframe="1h", n=500, seed=42)
-    res = train_meta_controller(df, {
-        "episodes": 3, "n_episodes": 2, "hidden": [8, 8], "seed": 5,
-        "sub_strategies": "dual_ma,factor_signal",
-        "reward_signal_align": 15.0,
-    })
-    assert res["agent"] is not None
-    assert -1e6 < res["best_ret"] < 1e6
-
-    # 塑形环境 vs 关闭塑形：找到一根有买入信号、已过 warmup 的K线，
-    # 两环境同步推进到该处后执行买入，顺势建仓的当步奖励应严格更高。
-    env_on = MetaControllerEnv(df, ["dual_ma", "factor_signal"], warmup=60,
-                               reward_signal_align=15.0)
-    env_off = MetaControllerEnv(df, ["dual_ma", "factor_signal"], warmup=60,
-                                reward_signal_align=0.0)
-    env_on.reset()
-    env_off.reset()
-    buy_t = None
-    for t in range(env_on.warmup, len(df) - 1):
-        sigs = env_on._collect(t)
-        if any(float(s.get("direction", 0.0) or 0.0) > 0 for s in sigs.values()):
-            buy_t = t
-            break
-    assert buy_t is not None, "demo 数据应存在买入信号K线"
-    for _ in range(env_on.warmup, buy_t):
-        env_on.step(0)
-        env_off.step(0)
-    _, r_on, _, _ = env_on.step(1)
-    _, r_off, _, _ = env_off.step(1)
-    assert r_on > r_off, f"顺势建仓塑形应提高当步奖励（on={r_on:.3f} off={r_off:.3f}）"
 
 
 # ============ T9. 级联因子注入 ============
@@ -276,36 +334,6 @@ def test_train_drl_factor_values():
     # 级联因子应被记录到结果
     assert result["factor_values"] is not None
     assert len(result["factor_values"]) == len(df)
-
-
-# ============ T10. MetaController DRL 部署 ============
-
-def test_meta_controller_drl_deploy(tmp_path):
-    """MetaController DRL 模式：训练→保存→加载→产出信号。"""
-    import os
-    from strategies.meta import train_meta_controller
-    from strategies import get_strategy
-    df = generate_demo(timeframe="1h", n=500, seed=42)
-    result = train_meta_controller(
-        df, {"episodes": 3, "n_episodes": 2, "sub_strategies": "dual_ma,factor_signal",
-             "hidden": [16, 16]})
-    model_path = os.path.join(str(tmp_path), "meta.json")
-    result["agent"].save(model_path)
-    st = get_strategy("meta_controller")
-    st.update_params({"sub_strategies": "dual_ma,factor_signal",
-                      "mode": "drl", "model_path": model_path})
-    closes = df["close"].to_numpy(float)
-    n_sig = 0
-    for t in range(60, min(120, len(df))):
-        price = float(closes[t])
-        ctx = {"symbol": "META", "price": price, "position": 0.0, "cash": 10000.0,
-               "indicators": {"close": price, "high": price, "low": price,
-                              "open": price, "volume": 1.0, "candles_count": t + 1}}
-        sig = st.on_candle(ctx)
-        if sig is not None:
-            n_sig += 1
-    # 不抛异常即可；信号数因随机训练而异
-    assert n_sig >= 0
 
 
 # ============ T11. 奖励系数自动搜索 ============
@@ -338,7 +366,7 @@ def test_replay_enabled_training():
     assert len(result["history"]) > 0
 
 
-# ============ T12. 进化引擎元策略训练与用户参数互通 ============
+# ============ 进化引擎测试用假 DB/会话（test_evolve_api_guards 等复用） ============
 
 class _MetaRow:
     def __init__(self):
@@ -396,82 +424,6 @@ class _MetaDB:
         return self.session_obj
 
 
-def _make_evolve_engine(tmp_path, monkeypatch, sub_strategies, mode):
-    """构造一个可离线跑元策略训练一轮的 EvolveEngine。"""
-    from core.bus import EventBus
-    from drl.evolve_engine import EvolveEngine
-    from strategies import register_dynamic
-    register_dynamic("meta_controller", {
-        "name": "meta_controller", "executor": "meta_controller",
-        "params": {"sub_strategies": sub_strategies, "mode": mode},
-    })
-    eng = EvolveEngine(_MetaDB(), EventBus(), tmp_path / "models")
-    eng._rolling_window = 200  # 让 400 根 demo K 线通过数据量检查
-    df = generate_demo(timeframe="1h", n=400, seed=42)
-
-    async def _fake_fetch(symbol: str = ""):
-        return df
-    monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
-    saved: list[str] = []
-    monkeypatch.setattr(eng.zoo, "save_agent",
-                        lambda agent, name, *, meta=None: saved.append(name))
-    return eng, saved
-
-
-async def test_evolve_meta_round_invalidated_when_pool_changes(tmp_path, monkeypatch):
-    """训练期间用户改了子策略池 → 本轮作废，不打回用户的新选择。"""
-    from strategies import register_dynamic, get_dynamic, remove_dynamic
-    import drl.evolve_engine as ev
-    eng, saved = _make_evolve_engine(
-        tmp_path, monkeypatch, "dual_ma,grid", "drl")
-    user_pool = "dual_ma,factor_signal,price_action,sr_pullback_reversal_v3"
-
-    def _fake_train(df_, cfg_, on_progress=None):
-        # 模拟训练过程中「统一策略」页面保存了新的 4 子策略池
-        register_dynamic("meta_controller", {
-            "name": "meta_controller", "executor": "meta_controller",
-            "params": {"sub_strategies": user_pool, "mode": "ensemble"},
-        })
-        return {"history": [{"best_ret": 0.5}], "agent": object()}
-    monkeypatch.setattr(ev, "train_meta_controller", _fake_train)
-
-    ep0 = eng._meta_controller_status["episode"]
-    try:
-        await eng._train_meta_controller_once()
-        assert saved == [], "旧池训练出的模型不应覆盖模型文件"
-        assert eng._meta_controller_status["episode"] == ep0
-        assert (get_dynamic("meta_controller") or {})["params"]["sub_strategies"] == user_pool
-    finally:
-        remove_dynamic("meta_controller")
-
-
-async def test_evolve_meta_registration_keeps_user_mode(tmp_path, monkeypatch):
-    """完成的一轮训练注册时保留用户选的集成模式，只更新模型路径与说明。"""
-    from strategies import get_dynamic, remove_dynamic
-    import drl.evolve_engine as ev
-    eng, saved = _make_evolve_engine(
-        tmp_path, monkeypatch, "dual_ma,grid,price_action", "ensemble")
-    monkeypatch.setattr(ev, "train_meta_controller",
-                        lambda df_, cfg_, on_progress=None: {
-                            "history": [{"best_ret": 0.42}], "agent": object(),
-                            # 元控制器管线同样要过 OOS 硬门：假结果需携带可放行的样本外报告，
-                            # 否则训练在注册前即被拦截（gate 拒绝无 oos_report 的结果）
-                            "oos_report": {"enabled": True, "oos_ret": 0.1,
-                                           "oos_position_ratio": 0.4}})
-    try:
-        await eng._train_meta_controller_once()
-        spec = get_dynamic("meta_controller") or {}
-        params = spec["params"]
-        assert params["mode"] == "ensemble"
-        assert params["sub_strategies"] == "dual_ma,grid,price_action"
-        assert params["model_path"]
-        assert "集成元控制器" in spec["description"]
-        assert saved == ["meta_controller"]
-        assert eng._meta_controller_status["episode"] == 1
-    finally:
-        remove_dynamic("meta_controller")
-
-
 # ============ 第2项完善：训练成本闸 ============
 
 def test_reject_downshift_retry_pure():
@@ -516,7 +468,64 @@ async def test_config_whitelist_accepts_reject_downshift_after(tmp_path, monkeyp
             bak_file.unlink()
 
 
-async def test_train_time_budget_default_positive():
+async def test_config_whitelist_accepts_replay_keys(tmp_path, monkeypatch):
+    """新配置键（经验回放）应通过热更新校验并进入 applied。"""
+    from drl.evolve_engine import EvolveEngine
+    from core.bus import EventBus
+    from config.settings import ROOT as _SETTINGS_ROOT
+    from config.settings import settings as _settings
+
+    # apply_config 会**原地修改全局 settings 对象**（并持久化回 config.yaml）。
+    # 用 monkeypatch 记录原值以便用例结束自动恢复——否则污染后续用例
+    # （曾把默认 capacity 断言污染成 512）。
+    monkeypatch.setattr(_settings, "evolve_strategy_drl_replay_capacity",
+                        int(_settings.evolve_strategy_drl_replay_capacity))
+    monkeypatch.setattr(_settings, "evolve_strategy_drl_replay_mix_ratio",
+                        float(_settings.evolve_strategy_drl_replay_mix_ratio))
+
+    yaml_cfg = _SETTINGS_ROOT / "config" / "config.yaml"
+    bak_bytes = yaml_cfg.read_bytes() if yaml_cfg.exists() else None
+    bak_file = _SETTINGS_ROOT / "config" / "config.yaml.bak"
+    eng = EvolveEngine(_MetaDB(), EventBus(), tmp_path / "models")
+    try:
+        result = await eng.apply_config({"strategy_drl_replay_capacity": 512,
+                                         "strategy_drl_replay_mix_ratio": 0.25})
+        assert result["ok"] is True
+        assert result["applied"].get("evolve_strategy_drl_replay_capacity") == 512
+        assert result["applied"].get("evolve_strategy_drl_replay_mix_ratio") == 0.25
+    finally:
+        if bak_bytes is not None:
+            yaml_cfg.write_bytes(bak_bytes)
+        elif yaml_cfg.exists():
+            yaml_cfg.unlink()
+        if bak_file.exists():
+            bak_file.unlink()
+
+
+def test_evolve_engine_has_replay_slot(tmp_path):
+    """引擎须持有跨轮回放槽位（默认 None/0，由 settings 决定是否启用）。"""
+    from drl.evolve_engine import EvolveEngine
+    from core.bus import EventBus
+    eng = EvolveEngine(_MetaDB(), EventBus(), tmp_path / "models")
+    assert hasattr(eng, "_strategy_drl_replay")
+    assert eng._strategy_drl_replay is None
+    assert eng._strategy_drl_replay_capacity == 0
+    assert eng._strategy_drl_replay_symbol == ""
+
+
+def test_replay_settings_defaults_enabled():
+    """默认启用回放：遗忘是本项目的现场故障，默认应修复。
+
+    capacity=64 是按实测内存定的（单轨迹≈1.24MB，64 条≈77MB ≈ 恰好覆盖上一轮的
+    8ep×8 轨迹）；不得盲目调大——400 会占约 484MB 常驻内存。
+    """
+    from config.settings import settings
+    assert settings.evolve_strategy_drl_replay_capacity == 64
+    assert settings.evolve_strategy_drl_replay_mix_ratio == 0.3
+    assert 0.0 < settings.evolve_strategy_drl_replay_mix_ratio < 1.0
+
+
+def test_train_time_budget_default_positive():
     """第2项完善：train_time_budget 默认应为正值（120s），后台无预算上限不再常驻吃 CPU。"""
     from config.settings import settings
     assert float(settings.evolve_train_time_budget) > 0

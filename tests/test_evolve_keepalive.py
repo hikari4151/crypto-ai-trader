@@ -38,10 +38,9 @@ def _make_engine(tmp_path):
 
 
 def _install_stub_loops(eng, factory):
-    """用桩替换三条训练循环（实例属性遮蔽类方法）。"""
+    """用桩替换全部训练循环（实例属性遮蔽类方法）。"""
     eng._factor_miner_loop = factory
     eng._strategy_drl_loop = factory
-    eng._meta_controller_loop = factory
 
 
 async def _wait_until(pred, timeout: float = 5.0) -> bool:
@@ -59,7 +58,7 @@ async def _forever():
 
 
 async def test_supervisor_rebuilds_dead_training_loops(tmp_path):
-    """三条训练循环一启动就崩 → 保活监督必须把它们都重建起来。"""
+    """训练循环一启动就崩 → 保活监督必须把它们都重建起来。"""
     eng = _make_engine(tmp_path)
 
     async def _crash():
@@ -72,7 +71,7 @@ async def test_supervisor_rebuilds_dead_training_loops(tmp_path):
         ok = await _wait_until(
             lambda: all(eng._restarts[n] >= 1 for n in eng._loop_names))
         assert ok, f"保活未重建死掉的循环: {eng._restarts}"
-        assert eng._supervise_status["restarts"] >= 3
+        assert eng._supervise_status["restarts"] >= len(eng._loop_names)
         assert eng._supervise_status["alive"] is True
         assert eng._supervise_status["last_restart_name"] in eng._loop_names
         st = eng.status()
@@ -96,8 +95,9 @@ async def test_supervisor_reaps_finished_task_from_task_list(tmp_path):
     try:
         ok = await _wait_until(lambda: eng._supervise_status["restarts"] >= 6)
         assert ok, "未发生足够次数的自愈，无法验证回收"
-        # 3 条循环 + 1 个监督，已终结的旧任务必须被就地清掉
-        assert len(eng._tasks) <= 4, f"_tasks 泄漏: {[t.get_name() for t in eng._tasks]}"
+        # 训练循环 + 1 个监督，已终结的旧任务必须被就地清掉
+        assert len(eng._tasks) <= len(eng._loop_names) + 1, \
+            f"_tasks 泄漏: {[t.get_name() for t in eng._tasks]}"
     finally:
         await eng.stop()
 
@@ -134,15 +134,15 @@ async def test_spawn_loops_fills_missing_pipeline_without_duplicating(tmp_path):
 
     _install_stub_loops(eng, _forever)
     try:
-        assert eng._spawn_loops() == 3
+        assert eng._spawn_loops() == len(eng._loop_names)
         assert eng._spawn_loops() == 0, "已存活的循环不应被重复创建"
-        # P4-A2 的历史形态：只死掉元策略一条
-        victim = eng._find_task("evolve_meta_controller")
+        # 只死掉其中一条时必须只补那一条（缺哪条补哪条）
+        victim = eng._find_task("evolve_strategy_drl")
         victim.cancel()
         await asyncio.sleep(0.02)
         assert eng._spawn_loops() == 1, "只应补齐缺失的那一条"
         names = [t.get_name() for t in eng._tasks]
-        assert names.count("evolve_meta_controller") == 1
+        assert names.count("evolve_strategy_drl") == 1
     finally:
         await eng.stop()
 
@@ -216,7 +216,7 @@ async def test_stop_cancels_supervisor_and_clears_tasks(tmp_path):
     _install_stub_loops(eng, _forever)
     eng._spawn_loops()
     eng._spawn_supervisor()
-    assert len(eng._tasks) == 4
+    assert len(eng._tasks) == len(eng._loop_names) + 1
 
     await eng.stop()
     assert eng._tasks == []

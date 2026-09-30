@@ -81,6 +81,20 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
     # E-EXP：学习率退火（与 train_drl 同口径）；默认关
     lr_anneal = bool(cfg.get("lr_anneal", False))
     lr_final_ratio = float(cfg.get("lr_final_ratio", 0.2))
+    # 训练目标口径（2026-09-29 成本对齐修复）：
+    #   "ic"  = 旧行为（|rank_ic| × √(1/turnover)），抽象选择质量，与真实回测收益脱节
+    #   "net" = 验证段可交易净收益（方向收益 − 换手成本）× scale，对齐"扣成本后能赚多少"
+    # cost_per_turn：方向翻转的双边费率（如扣 fee_rate=0.1% → 约 0.002）
+    fitness_mode = str(cfg.get("fitness_mode", "ic") or "ic").lower()
+    cost_per_turn = float(cfg.get("cost_per_turn", 0.0) or 0.0)
+    net_fitness_scale = float(cfg.get("net_fitness_scale", 500.0) or 1.0)
+    _env_kwargs = dict(
+        h=h, ic_window=ic_window, max_steps=max_steps,
+        train_ratio=train_ratio, val_ratio=val_ratio,
+        corr_threshold=corr_threshold,
+        fitness_mode=fitness_mode, cost_per_turn=cost_per_turn,
+        net_fitness_scale=net_fitness_scale,
+    )
 
     # 因子矩阵（若未传入则从 OHLCV 计算全部内置因子）
     if mat is None:
@@ -111,13 +125,9 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
                   / (mat[c].expanding().std() + 1e-12)).fillna(0.0)
               for c in mat.columns}
 
-    env = FactorMiningEnv(mat, close, h=h, ic_window=ic_window,
-                          max_steps=max_steps,
-                          train_ratio=train_ratio, val_ratio=val_ratio,
-                          corr_threshold=corr_threshold, seed=seed,
-                          precomputed_ics=_ics, precomputed_icir=_icir,
-                          precomputed_z=_z_exp,
-                          use_action_mask=action_masking)
+    env = FactorMiningEnv(mat, close, seed=seed, precomputed_ics=_ics,
+                          precomputed_icir=_icir, precomputed_z=_z_exp,
+                          use_action_mask=action_masking, **_env_kwargs)
     agent = ACAgent(env.state_dim, env.n_actions, hidden=hidden,
                     lr_actor=float(cfg.get("lr_actor", 3e-3)),
                     lr_critic=float(cfg.get("lr_critic", 6e-3)),
@@ -154,14 +164,12 @@ def train_factor_miner(df: pd.DataFrame, mat: Optional[pd.DataFrame] = None,
 
     def _collect_one(args: tuple) -> dict:
         ep_i, worker_i = args
-        local_env = FactorMiningEnv(mat, close, h=h, ic_window=ic_window,
-                                    max_steps=max_steps,
-                                    train_ratio=train_ratio, val_ratio=val_ratio,
-                                    corr_threshold=corr_threshold,
+        local_env = FactorMiningEnv(mat, close,
                                     seed=seed + ep_i * 1000 + worker_i,
                                     precomputed_ics=_ics, precomputed_icir=_icir,
                                     precomputed_z=_z_exp,  # E3：共享预计算 z
-                                    use_action_mask=action_masking)
+                                    use_action_mask=action_masking,
+                                    **_env_kwargs)
         # D1：独立 rng 采样（绝不共享 agent._rng，保证多线程可复现）
         local_rng = np.random.default_rng(seed + ep_i * 2000 + worker_i)
         return agent.collect_episode(local_env, rng=local_rng)

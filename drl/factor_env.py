@@ -46,7 +46,10 @@ class FactorMiningEnv:
                  precomputed_ics: Optional[pd.DataFrame] = None,
                  precomputed_icir: Optional[pd.DataFrame] = None,
                  precomputed_z: Optional[dict[str, pd.Series]] = None,
-                 use_action_mask: bool = False) -> None:
+                 use_action_mask: bool = False,
+                 fitness_mode: str = "ic",
+                 cost_per_turn: float = 0.0,
+                 net_fitness_scale: float = 500.0) -> None:
         self.mat = mat
         self.close = close
         self.h = max(1, int(h))
@@ -55,6 +58,15 @@ class FactorMiningEnv:
         self.corr_threshold = corr_threshold
         self.reward_scale = reward_scale
         self.duplicate_penalty = duplicate_penalty
+        # 训练目标口径（2026-09-29 成本对齐修复）：
+        #   "ic"  = 旧行为：|rank_ic| × √(1/max(turnover,0.125))——抽象选择质量，
+        #           低换手奖励会虚高分数（fitness 0.35 而真实 IC 仅 ~0.07），
+        #           与真实回测收益脱节（现场实测：5m ETH 300+ 笔交易 -34.6%）。
+        #   "net" = 验证段可交易净收益（方向收益 − 换手成本）× scale，训练目标
+        #           直接对齐"扣成本后能赚多少"，高换手组合被真实成本压制。
+        self.fitness_mode = str(fitness_mode or "ic").lower()
+        self.cost_per_turn = float(cost_per_turn or 0.0)
+        self.net_fitness_scale = float(net_fitness_scale or 1.0)
         # 动作掩码（E-EXP）：True 时 collect/greedy 每步只允许选未加入的因子
         # （valid_actions），组合大小恒为 max_steps 且无重复选择浪费步数。
         # 训练与最终决策同口径（_greedy_select 传 mask）。
@@ -202,9 +214,24 @@ class FactorMiningEnv:
         val_close = self.close.iloc[self.n_train:self.n_val]
         s = val_slice.to_numpy(dtype=float)
         fwd = forward_returns(val_close, self.h).to_numpy(dtype=float)
-        rank_ic = float(round(_spearman(s, fwd), 6))
         turnover = factor_turnover(val_slice)
-        fitness = round(factor_fitness(rank_ic, turnover), 4)
+        if self.fitness_mode == "net":
+            # 验证段可交易净收益（2026-09-29 成本对齐修复）：
+            #   gross = mean(sign(combo) × fwd)：跟随因子方向的每根K线平均收益
+            #           （无杠杆多头；方向错则亏 fwd）
+            #   cost  = turnover × cost_per_turn：方向翻转的换手成本（双边费率
+            #           由调用方折算，如 fee 0.1% → cost_per_turn≈0.002）
+            #   fitness = max(0, gross − cost) × net_fitness_scale
+            # 选择目标直接从"IC × 低换手奖励"变成"扣成本后能赚多少"——
+            # 高换手组合（5m 上实测 300+ 笔 → -34.6%）被真实成本压制。
+            fwd_a = np.nan_to_num(fwd, nan=0.0)
+            sig = np.nan_to_num(np.sign(s), nan=0.0)
+            gross = float(np.mean(sig * fwd_a)) if len(fwd_a) else 0.0
+            cost = turnover * self.cost_per_turn
+            fitness = round(max(0.0, gross - cost) * self.net_fitness_scale, 4)
+        else:
+            rank_ic = float(round(_spearman(s, fwd), 6))
+            fitness = round(factor_fitness(rank_ic, turnover), 4)
         self._fitness_cache[key] = fitness
         return fitness
 

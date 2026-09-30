@@ -121,7 +121,7 @@ def _make_strategy_engine_with_fake_obs(tmp_path, monkeypatch, verdict):
                         lambda name: {"version": 1, "fitness": 0.0})
     captured = []
 
-    def _fake_train(df_, cfg_, on_progress=None):
+    def _fake_train(df_, cfg_, on_progress=None, extra_dfs=None):
         captured.append(cfg_.get("base_agent"))
         return {"history": [{"best_ret": 0.01}], "agent": _agent(),
                 "oos_report": {"enabled": False}}

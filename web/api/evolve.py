@@ -11,15 +11,16 @@ _MODEL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+$")
 _CONFIG_KEYS = {
     "symbols", "timeframe", "factor_miner_interval", "strategy_drl_interval",
     "rolling_window", "rollback_threshold", "factor_miner_episodes",
-    "strategy_drl_episodes", "meta_episodes", "vol_penalty", "oos_min_bars",
+    "strategy_drl_episodes", "vol_penalty", "oos_min_bars",
     "cross_symbol_oos", "min_new_bars",
-    # E-EXP：元策略「持仓参与塑形」系数（0=关闭）
-    "meta_participation_scale",
+    # 因子训练目标口径（net=扣成本净收益 / ic=抽象评分；2026-09-29 成本对齐修复）
+    "factor_miner_fitness_mode", "factor_miner_cost_per_turn",
+    "factor_miner_net_fitness_scale",
     # walk-forward 多折观测（同品种，不改接受逻辑）
     "strategy_drl_walkforward_obs", "strategy_drl_walkforward_folds",
     "strategy_drl_walkforward_bars", "walkforward_min_trades",
     # 连续拒绝 from-scratch 重置（0=关闭）
-    "strategy_drl_reset_after_rejects", "meta_reset_after_rejects",
+    "strategy_drl_reset_after_rejects",
     # GAP-01 实盘验收观测（同品种，两档成本）
     "gap01_obs", "gap01_folds", "gap01_bars", "gap01_min_trades",
     "gap01_cost_multiplier", "gap01_fail_reset_after", "gap01_stable_pass_required",
@@ -34,6 +35,8 @@ _CONFIG_KEYS = {
     "strategy_drl_n_episodes", "strategy_drl_ppo_epochs",
     # 训练环境最小交易区（降换手实验，0.05→0.10）
     "strategy_drl_min_trade_zone",
+    # 经验回放（跨训练轮存活，对抗灾难性遗忘）
+    "strategy_drl_replay_capacity", "strategy_drl_replay_mix_ratio",
     # 第2项完善：连续 OOS 被拒自动降频阈值
     "reject_downshift_after",
 }
@@ -111,18 +114,6 @@ async def trigger_factor_miner(request: Request):
     return {"ok": True, **result}
 
 
-@router.post("/trigger/meta-controller")
-async def trigger_meta_controller(request: Request):
-    """手动触发一次元策略控制器训练（立即执行，等待完成）。"""
-    evolve = _get_evolve(request)
-    result = await evolve.trigger_meta_controller()
-    if result.get("busy"):
-        raise HTTPException(status_code=409, detail=result.get("reason", "另一条训练正在进行中"))
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error") or result.get("reason") or "训练失败")
-    return {"ok": True, **result}
-
-
 @router.post("/trigger/strategy-drl")
 async def trigger_strategy_drl(request: Request):
     """手动触发一次策略 DRL 训练（立即执行，等待完成）。"""
@@ -192,8 +183,8 @@ async def rounds(model: str = "strategy_drl",
     """
     from sqlalchemy import select, func
     from core.database import EvolveRound
-    if model not in ("factor_miner", "strategy_drl", "meta_controller"):
-        raise HTTPException(status_code=400, detail=f"未知模型 {model}，可选：factor_miner / strategy_drl / meta_controller")
+    if model not in ("factor_miner", "strategy_drl"):
+        raise HTTPException(status_code=400, detail=f"未知模型 {model}，可选：factor_miner / strategy_drl")
     evolve = _get_evolve(request)
     out: list = []
     total = 0

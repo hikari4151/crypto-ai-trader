@@ -93,7 +93,7 @@ def test_apply_config_rejects_boolean_for_numeric_setting(tmp_path):
     from core.bus import EventBus
 
     eng = EvolveEngine(_MetaDB(), EventBus(), tmp_path / "models")
-    result = asyncio.run(eng.apply_config({"meta_episodes": True}))
+    result = asyncio.run(eng.apply_config({"strategy_drl_episodes": True}))
     assert result["ok"] is False
     assert "数字" in result["error"]
 

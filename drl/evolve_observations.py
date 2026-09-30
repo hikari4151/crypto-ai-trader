@@ -422,4 +422,3 @@ class EvolveObservationsMixin:
             log.warning("[evolve] 部署长窗门计算失败（放行）: %s", e)
             return True, f"长窗门计算失败（放行）: {e}"
 
-    # ---- 元策略控制器持续训练 ----

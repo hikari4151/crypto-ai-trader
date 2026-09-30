@@ -67,7 +67,7 @@
 1. 在 `_train_lock` 内确认目标快照和当前部署状态；
 2. 保存部署前快照信息，用于失败恢复；
 3. 调用 `ModelZoo.restore_deployment`；
-4. 依据完整快照重新生成/注册 `rl_evolve` 或元控制器动态策略，确保 Pine、模型路径和元数据来自同一版本；
+4. 依据完整快照重新生成/注册 `rl_evolve` 动态策略，确保 Pine、模型路径和元数据来自同一版本（元策略训练/部署注册已移除（2026-09-28），此处仅保留运行时热加载）；
 5. 调用可选的 `deployment_reload` 异步回调刷新当前交易引擎实例；
 6. 校验运行时加载的模型路径/版本与部署快照一致；
 7. 写入 outcome、通知和系统事件。
@@ -105,7 +105,7 @@ factor_signature, config_fingerprint)
 
 ### 3.4 状态与审计
 
-三条管线状态统一增加：
+两条管线（`factor_miner`、`strategy_drl`）状态统一增加：
 
 - `candidate_fitness`：当前训练候选值；
 - `deployed_fitness`：当前 best 快照实际值；

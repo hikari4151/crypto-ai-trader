@@ -38,9 +38,9 @@
 
 ```
 ┌ 页头：持续进化 + 副标题          [暂停] [启用] [配置/触发] [导出进化日志] [刷新状态]
-├ KPI 磁贴 ×8（4 列 × 2 行，状态光晕）
+├ KPI 磁贴 ×7（4 列 × 2 行，状态光晕）
 ├ 训练轮次曲线面板（全宽）：标题+双分段控件 / 统计行 / 图表 / 图例
-├ 「模型状态 · 部署与成果」标签 + 模型三卡（3 列）
+├ 「模型状态 · 部署与成果」标签 + 模型两卡（2 列）
 └ 手动 DRL 实验台（折叠条，展开后四模式，容器与逻辑不变）
 ```
 
@@ -55,9 +55,9 @@
   - 刷新状态（现有 `fetchEvolveStatus`）。
 - 实现细化（2026-09-27）：页头不再重复放大标题与副标题——顶栏 `.tb-name` 已显示 `viewTitle/viewSub`（持续进化 + 自优化模板 · 轮次迭代 · 版本回退），页头仅保留操作按钮区（右对齐），避免同屏两份标题。
 
-### 3.2 KPI 磁贴 ×8（新组件）
+### 3.2 KPI 磁贴 ×7（新组件）
 
-统一结构：**标签行（状态点+名称；状态点仅三循环与引擎保活四张）/ 大数值行 / 副文案行**；`grid-auto-rows:1fr` 等行高，三行均 `nowrap + ellipsis`，任何文案不得换行挤压（修复 v2 稿「运行中」扭曲问题）。
+统一结构：**标签行（状态点+名称；状态点仅两循环与引擎保活三张）/ 大数值行 / 副文案行**；`grid-auto-rows:1fr` 等行高，三行均 `nowrap + ellipsis`，任何文案不得换行挤压（修复 v2 稿「运行中」扭曲问题）。
 
 **质感 = 状态光晕式（用户选定 B）**：
 
@@ -68,35 +68,34 @@
 | 告警（锚点锁死/保活降级） | 红光晕（同构，`#F5475E`） |
 | 无状态 KPI | 素色 1px 边框 `--border`，零光效 |
 
-**8 个磁贴与数据源映射（全部现有 API，前端计算）**：
+**7 个磁贴与数据源映射（全部现有 API，前端计算）**：
 
 | # | 磁贴 | 主数值 | 数据源（同源字段） | 光晕 |
 |---|---|---|---|---|
 | 1 | 因子挖掘 | 运行中/已暂停/已停用 | `GET /api/evolve/status` → `factor_miner.active`、`supervisor.loops_alive.factor_miner`；副行 = `next_run` 倒计时 + `factor_miner_interval`s/轮 | 运行绿/暂停琥珀 |
 | 2 | 策略 DRL | 同上 | `strategy_drl.*`、`loops_alive.strategy_drl`、`strategy_drl_interval` | 同上 |
-| 3 | 元策略 | 同上 | `meta_controller.*`、`loops_alive.meta_controller`、`meta_controller_interval` | 同上 |
-| 4 | 引擎保活 | 正常/降级 | `supervisor.degraded` 取反；副行 = `heartbeat_age` 秒数 + `restarts_by_loop` 自愈次数合计 | 正常素色/降级红 |
-| 5 | 锚点健康 | `X / 3` | 现有 `evolveAnchorIssues` computed：`3 - evolveAnchorIssues.length`；副行 = 第一条 issue 的 `label`（有告警时） | 有告警红/全健康绿 |
-| 6 | 累计轮次 | 三模型合计 | `factor_miner.rounds_total + strategy_drl.rounds_total + meta_controller.rounds_total`（`_pipeline_view` 已返回，零额外请求）；副行 = 当前曲线模型的今日轮次（`evolveRounds[model]` 按 `ts` 过滤当日，标注模型简称） | 素色 |
-| 7 | 最佳 fitness | 三模型最大 fitness | 三模型 status 的 `fitness` 取最大，正值绿/负值红；副行 = 模型名 + `deployed_version`（如有）`v49 已部署` | 素色 |
-| 8 | OOS 通过率 | 近 30 轮未拦截占比 | 与曲线红点**同一 `evolveVisual` 口径**：当前曲线模型最近 30 轮中非拦截轮占比；副行 = `20 过 / 10 拦` | 素色 |
+| 3 | 引擎保活 | 正常/降级 | `supervisor.degraded` 取反；副行 = `heartbeat_age` 秒数 + `restarts_by_loop` 自愈次数合计 | 正常素色/降级红 |
+| 4 | 锚点健康 | `X / 2` | 现有 `evolveAnchorIssues` computed：`2 - evolveAnchorIssues.length`；副行 = 第一条 issue 的 `label`（有告警时） | 有告警红/全健康绿 |
+| 5 | 累计轮次 | 两模型合计 | `factor_miner.rounds_total + strategy_drl.rounds_total`（`_pipeline_view` 已返回，零额外请求）；副行 = 当前曲线模型的今日轮次（`evolveRounds[model]` 按 `ts` 过滤当日，标注模型简称） | 素色 |
+| 6 | 最佳 fitness | 两模型最大 fitness | 两模型 status 的 `fitness` 取最大，正值绿/负值红；副行 = 模型名 + `deployed_version`（如有）`v49 已部署` | 素色 |
+| 7 | OOS 通过率 | 近 30 轮未拦截占比 | 与曲线红点**同一 `evolveVisual` 口径**：当前曲线模型最近 30 轮中非拦截轮占比；副行 = `20 过 / 10 拦` | 素色 |
 
-> 同源约束（历史教训，`evolveCurveStat` 曾因两套口径打架）：#6/#8 的轮次分类必须复用 `evolveVisual` 的分类结果，**不另算一套**。
+> 同源约束（历史教训，`evolveCurveStat` 曾因两套口径打架）：#5/#7 的轮次分类必须复用 `evolveVisual` 的分类结果，**不另算一套**。
 
-**磁贴交互**：#1-#3 点击 → `setEvolveCurveModel(对应模型)`（曲线切到该模型）；#5 有告警点击 → 打开配置/触发浮层并滚动到锚点段。
+**磁贴交互**：#1-#2 点击 → `setEvolveCurveModel(对应模型)`（曲线切到该模型）；#4 有告警点击 → 打开配置/触发浮层并滚动到锚点段。
 
 ### 3.3 训练轮次曲线面板（全宽）
 
-- 标题行：「训练轮次曲线」+ 模型分段（因子挖掘/策略 DRL/元策略）+ 范围分段（全部/最近 120/最近 50），沿用现有 `mac-seg` 与 `setEvolveCurveModel`/`setEvolveRange`；
+- 标题行：「训练轮次曲线」+ 模型分段（因子挖掘/策略 DRL）+ 范围分段（全部/最近 120/最近 50），沿用现有 `mac-seg` 与 `setEvolveCurveModel`/`setEvolveRange`；
 - **统计行（独立成行，修复 v3 稿显示问题）**：现 `evolveCurveStat` 文案从标题行挪到标题下方独立一行，竖线分隔样式，空态显示「红点 = 拦截 / 回退轮次」；`evolveCurveNote`（聚合说明）保持在图例行；
 - 图表：容器 ID `evolveCurveChart` 不变（ECharts 渲染、dataZoom、指纹门控逻辑全不动），高度由 220px 提升至 **260px**（全宽后比例更舒展）；
 - 图例行：现有四色图例 + `evolveCurveNote`。
 
-### 3.4 模型状态三卡
+### 3.4 模型状态两卡
 
-- 保留 `EVOLVE_MODELS` 配置驱动的 `v-for` 单模板（不回退成三份复制粘贴）；
-- 卡片升级：所有字段/按钮/条件渲染照旧（候选/部署/上轮结论/热加载、锚点不一致、last_error、OOS 拦截、跨标 OOS、子策略、组合因子部署/回测/IC/部署与去回测按钮）；
-- 视觉：实现细化：**部署旗舰卡紫色描边高亮：`deployed_fitness` 非空且为三模型中最高者（`evolveAccentModel` computed）；均无部署则不高亮**（`rgba(125,59,237,.5)` + 微光）；fitness 行保留上下边框分隔与大数字（正值绿/负值红）；
+- 保留 `EVOLVE_MODELS` 配置驱动的 `v-for` 单模板（不回退成两份复制粘贴）；
+- 卡片升级：所有字段/按钮/条件渲染照旧（候选/部署/上轮结论/热加载、锚点不一致、last_error、OOS 拦截、跨标 OOS、组合因子部署/回测/IC/部署与去回测按钮）；
+- 视觉：实现细化：**部署旗舰卡紫色描边高亮：`deployed_fitness` 非空且为两模型中最高者（`evolveAccentModel` computed）；均无部署则不高亮**（`rgba(125,59,237,.5)` + 微光）；fitness 行保留上下边框分隔与大数字（正值绿/负值红）；
 - 「查看版本」等按钮改用统一 `mac-btn btn-sm`，不使用内联 padding 拼凑（逐步清理本页内联样式）。
 - 实现细化（2026-09-27 最终审查）：「查看版本」等按钮保留既有内联 padding——`.btn-sm` 全站未定义 padding，内联值承重；全站按钮 padding 收归 `.btn-sm` 另行立项。
 
@@ -111,7 +110,7 @@
 - 实现复用站内 `menu-drop` 模式：浮层 `Teleport to body`、按按钮位置锚定（按钮下方右对齐）、点外部/Esc 关闭、`max-height:70vh` 内部滚动；
 - 浮层内容 = 原右栏三张卡的全部功能，零丢失：
   1. **训练标的池**（现 `formDrop==='evolveSymbols'` 多选二级菜单，含手输添加）+ **训练时间周期**（`mac-select`）；
-  2. **手动触发训练**三键（`triggerFactorMiner`/`triggerStrategyDrl`/`triggerMetaController`，禁用与「训练中…」文案逻辑不变）；
+  2. **手动触发训练**两键（`triggerFactorMiner`/`triggerStrategyDrl`，禁用与「训练中…」文案逻辑不变）；
   3. **回退基线（锚点）**：`evolveAnchorIssues` 列表 + 「重置锚点」（`resetEvolveAnchor`），空态时不渲染该段；
   4. **保存配置**（`saveEvolveConfig`，toast 反馈不变）；
 - 窄屏（≤700px）浮层宽度 `min(330px, 92vw)`。
@@ -128,7 +127,7 @@
 - 字号体系沿用 `--fs-caption/--fs-body/--fs-footnote/--fs-micro`，KPI 主数值 `~16-17px SemiBold + tabular-nums`；
 - **禁止 emoji**：所有图标用站内 SVG sprite（`#i-*`），文案层面不出现 ⚠️📈🧪 之类的表情符号（v2 稿用户明确要求）；
 - 卡片：`border-radius 8px`、1px 细边框、无堆叠阴影；光晕只用于 KPI 磁贴与部署版模型卡；
-- 响应式断点：`>1100px` KPI 4 列 / 模型 3 列；`700-1100px` KPI 2 列 / 模型 2 列；`<700px` KPI 1 列 / 模型 1 列，页头按钮保持文字不缩图标（沿用现断点习惯）；
+- 响应式断点：`>1100px` KPI 4 列 / 模型 2 列；`700-1100px` KPI 2 列 / 模型 2 列；`<700px` KPI 1 列 / 模型 1 列，页头按钮保持文字不缩图标（沿用现断点习惯）；
 - 退役样式：`.evolve-layout/.evolve-main-column/.evolve-side-column` 双栏规则及其 `grid-row:1` 相关注释块（该布局不再存在，注释里的推演结论随规则一起移除，避免误导后人）。
 
 ## 5. 错误与空态
@@ -137,14 +136,14 @@
 |---|---|
 | status 轮询连续 ≥3 次失败（`evolveFailStreak≥3`，与页顶黄色提示条同口径）→ KPI 全部素色，主数值 `—`，副行「状态未知」；单次失败保留上次值（避免抖动误清空） | 页头按钮维持现有禁用态 |
 | 轮次加载失败 | 统计行显示现有「训练轮次加载失败，请稍后重试」；图表区沿用现有 `evolveRoundsErr` 分支 |
-| 无训练轮次 | 图表区现有空态文案不变；#6/#8 KPI 显示 `—` |
-| 无锚点告警 | #5 磁贴绿光晕 `3 / 3`；浮层锚点段不渲染 |
-| 引擎禁用/暂停 | #1-#3 磁贴如实反映（停用态用素色，不误用绿色） |
+| 无训练轮次 | 图表区现有空态文案不变；#5/#7 KPI 显示 `—` |
+| 无锚点告警 | #4 磁贴绿光晕 `2 / 2`；浮层锚点段不渲染 |
+| 引擎禁用/暂停 | #1-#2 磁贴如实反映（停用态用素色，不误用绿色） |
 
 ## 6. 不变项清单（验收红线）
 
 1. `web/api/evolve.py`、`drl/evolve_engine.py` 零 diff；
-2. 模板中所有既有响应式字段与方法仍有引用（`fetchEvolveStatus/evolvePause/evolveResume/evolveEnable/saveEvolveConfig/triggerFactorMiner/triggerStrategyDrl/triggerMetaController/resetEvolveAnchor/showEvolveVersions/evolveRollback/deployEvolveFactor/goEvolveComboBacktest/setEvolveCurveModel/setEvolveRange/drlPanelOpen/drlMode/...`）；
+2. 模板中所有既有响应式字段与方法仍有引用（`fetchEvolveStatus/evolvePause/evolveResume/evolveEnable/saveEvolveConfig/triggerFactorMiner/triggerStrategyDrl/resetEvolveAnchor/showEvolveVersions/evolveRollback/deployEvolveFactor/goEvolveComboBacktest/setEvolveCurveModel/setEvolveRange/drlPanelOpen/drlMode/...`）；
 3. `#evolveCurveChart` 唯一且仍归持续进化曲线渲染；
 4. 轮询策略不变：status 5s、rounds 10s、与页面可见性解耦、回前台补刷；
 5. DRL 实验台四模式与版本回退弹层功能零丢失。
@@ -154,7 +153,7 @@
 - **回归**：现有 `tests/test_evolve_*.py`（anchor/api_guards/audit/deployment/keepalive/runtime_reload）全部通过——因后端零改动，预期直接通过；
 - **静态检查**：模板字段/方法引用完整性（对照 §6.2 清单逐项 grep）；evolve 视图模板内无 emoji 字符；
 - **视觉验收**（1440 / 1000 / 700 三档）：KPI 磁贴行高等高、无文案扭曲换行；配置/触发浮层锚定正确、点外部关闭、窄屏不溢出；曲线统计行独立成行不与分段按钮挤压；模型卡部署版紫描边；页面无横向滚动条；
-- **交互点检**：KPI #1-#3 点击切曲线模型；#5 点击开浮层；暂停/恢复/启用/刷新/保存配置/手动触发/查看版本/回退/重置锚点/实验台四模式逐一可用。
+- **交互点检**：KPI #1-#2 点击切曲线模型；#4 点击开浮层；暂停/恢复/启用/刷新/保存配置/手动触发/查看版本/回退/重置锚点/实验台四模式逐一可用。
 
 ## 8. 风险与对策
 

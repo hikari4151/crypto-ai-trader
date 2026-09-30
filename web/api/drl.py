@@ -85,6 +85,12 @@ class TrainIn(BaseModel):
     reward_losing_penalty: float = 0.2   # 连亏惩罚（3 连亏起二次斜坡）
     reward_trend_align: float = 0.1      # 趋势一致性奖励（低波动趋势持仓同向加分）
     reward_val_gap_penalty: float = 0.5  # 过拟合衰减：训练收益>验证收益时衰减优势权重
+    # P0 多标的混合训练（经验广度）：额外的交易所标的名列表（如 ["ETH/USDT"]）。
+    # 训练时每个 episode 随机选一个额外标的×随机时间窗切片，网络共享；仅作为
+    # 经验来源，val/OOS/部署语义仍由主标的（symbol）承担。0.5 为每条轨迹来自
+    # 额外标的的概率，可由 extra_mix_ratio 调整。
+    extra_symbols: list[str] = []
+    extra_mix_ratio: float = 0.5
 
 
 def _validate_train(body: TrainIn) -> None:
@@ -229,6 +235,45 @@ async def _load_df(body: TrainIn):
     raise HTTPException(status_code=400, detail="未知数据源")
 
 
+async def _load_extra_dfs(body: TrainIn) -> dict:
+    """加载多标的混合训练所需的额外标的数据（尽力而为，失败跳过不阻断）。
+
+    P0 多标的混合训练（经验广度）：与主标的同口径拉取（同一 data_source/
+    timeframe/limit），返回 {symbol: df}。CSV 源无法提供多文件，返回空。
+    单个标的加载失败仅警告跳过——多标的是"锦上添花"的经验来源，
+    不应因单个标的失败阻断主标的训练。
+    """
+    extra = body.extra_symbols or []
+    if not extra:
+        return {}
+    if body.data_source == "csv":
+        log.warning("[drl] CSV 数据源不支持多标的混合训练（在主标的 CSV 上单标的训练）")
+        return {}
+    from backtest.data_loader import load_klines_cached
+    out: dict = {}
+    for sym in extra:
+        sym = str(sym).strip()
+        if not sym or "/" not in sym:
+            log.warning("[drl] 忽略非法额外标的 %r（应为 SYMBOL/QUOTE，如 ETH/USDT）", sym)
+            continue
+        try:
+            if body.data_source == "demo":
+                from backtest.data_loader import generate_demo
+                df = generate_demo(n=body.limit, timeframe=body.timeframe)
+            else:
+                df = await load_klines_cached(body.exchange, sym,
+                                              body.timeframe, limit=body.limit)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[drl] 额外标的 %s 数据加载失败，跳过: %s", sym, e)
+            continue
+        if df is None or len(df) < 300:
+            log.warning("[drl] 额外标的 %s 数据不足(%s根)，跳过", sym,
+                        len(df) if df is not None else 0)
+            continue
+        out[sym] = df
+    return out
+
+
 def _default_name(body: TrainIn) -> str:
     import datetime
     ts = datetime.datetime.now().strftime("%m%d_%H%M")
@@ -274,7 +319,13 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                     prune_task_cache(_TRAINING, PROGRESS_LOCK)
 
                 from drl import train_drl
-                result = train_drl(df, cfg, on_progress=on_progress)
+                # P0 多标的混合训练（经验广度）：加载额外标的（尽力而为，失败跳过）
+                extra_dfs = await _load_extra_dfs(body)
+                if extra_dfs:
+                    cfg["extra_mix_ratio"] = float(getattr(body, "extra_mix_ratio", 0.5) or 0.5)
+                    log.info("[drl] 多标的混合训练: 额外经验标的 %s", list(extra_dfs))
+                result = train_drl(df, cfg, on_progress=on_progress,
+                                   extra_dfs=extra_dfs or None)
 
                 # 续训模式：保存回原模型路径（覆盖原模型），策略名沿用 rl_{原模型名}
                 # 而非新建模型文件——"在原先模型上改变"。模型名需通过白名单校验。
@@ -312,6 +363,9 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                         "best_ret": result["best_ret"],
                         "best_val_ret": result.get("best_val_ret"),
                         "oos_report": result.get("oos_report"),
+                        # P0 多标的混合训练元数据（单标的训练时为空列表）
+                        "multi_extra_names": result.get("multi_extra_names") or [],
+                        "multi_mix_ratio": result.get("multi_mix_ratio", 0.0),
                     }
                     # 因子列标准化统计量（训练段拟合）——部署端 rl_adaptive 用同一
                     # mu/sd 标准化，否则喂原始因子值给模型，状态分布与训练完全不同

@@ -488,8 +488,9 @@ class ModelZoo:
 
         必须从 best.json.gz 自带的 _meta 读，不能查 versions[best_version]：
         save_agent_best（回退路径）只覆盖 best 文件、不递增也不写入 versions，
-        用 versions 反查会读到"最近一轮被拦截模型"的 meta。实测 meta_controller
-        就是这样错配的——best_fitness=0.016223 却指向 fitness=0.0 的 v289。
+        用 versions 反查会读到"最近一轮被拦截模型"的 meta。历史实测（元策略
+        管线，训练已于 2026-09-28 移除）就是这样错配的——best_fitness=0.016223
+        却指向 fitness=0.0 的 v289。
 
         comparable：能否与新一轮训练结果直接比较。demo（合成数据）锚点的 fitness
         与真实交易所数据不同量级（合成数据能跑到 1267，真实数据 0.3 已算不错），

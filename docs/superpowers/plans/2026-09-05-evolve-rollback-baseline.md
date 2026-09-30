@@ -152,14 +152,14 @@ async def test_deploy_model_reports_reload_failure_and_does_not_claim_success(tm
 Run: `.venv\\Scripts\\python -m pytest -q tests/test_evolve_deployment.py`
 Expected: FAIL because the callback setter and `deploy_model` do not exist.
 
-- [ ] **Step 3: 实现统一部署入口并接入三条管线**
+- [ ] **Step 3: 实现统一部署入口并接入两条管线**
 
 In `drl/evolve_engine.py`:
 
-1. Initialize `self._deployment_reload = None` and status defaults for `candidate_fitness`, `deployed_fitness`, `deployed_version`, `deployed_source`, `last_outcome`, `anchor_mismatch`, and `runtime_reload` for all three models.
-2. Implement `set_deployment_reload` and `deploy_model`. Acquire `_train_lock` only in the public orchestration caller; do not re-acquire it inside a caller that already holds it. Capture the old best payload before restore, call `zoo.restore_deployment`, call `_register_rl_evolve` for `strategy_drl` or the existing meta-controller registration helper for `meta_controller`, then await the callback. On callback failure, call `restore_deployment` for the captured old version when available, return `ok=False`, and set `last_outcome="failed"`.
+1. Initialize `self._deployment_reload = None` and status defaults for `candidate_fitness`, `deployed_fitness`, `deployed_version`, `deployed_source`, `last_outcome`, `anchor_mismatch`, and `runtime_reload` for both models (`factor_miner` and `strategy_drl`).
+2. Implement `set_deployment_reload` and `deploy_model`. Acquire `_train_lock` only in the public orchestration caller; do not re-acquire it inside a caller that already holds it. Capture the old best payload before restore, call `zoo.restore_deployment`, call `_register_rl_evolve` for `strategy_drl`, then await the callback. On callback failure, call `restore_deployment` for the captured old version when available, return `ok=False`, and set `last_outcome="failed"`. （元策略训练/部署注册已移除（2026-09-28），此处仅保留运行时热加载。）
 3. Add a private `_mark_deployment_status` helper that sets `candidate_fitness` separately from `deployed_fitness` and refreshes the latter from `zoo.best_info` after every accepted/rollback path.
-4. Replace factor, strategy, and meta automatic `save_agent_best` rollback calls with `deploy_model` using the actual anchor version. Preserve existing `_log_round` and event behavior, but publish the deployed version/outcome in the event payload.
+4. Replace factor and strategy automatic `save_agent_best` rollback calls with `deploy_model` using the actual anchor version. Preserve existing `_log_round` and event behavior, but publish the deployed version/outcome in the event payload.
 5. After accepted `save_agent`, call `deploy_model` only when the new version is already written, or factor the write and deployment into a helper so the new best uses the same reload/registration sequence. A candidate that fails runtime reload must not leave `last_outcome="accepted"`.
 6. Preserve demo archive, OOS reject, and cross-symbol reject semantics; set their `candidate_fitness` and `last_outcome` without changing deployed fields.
 
@@ -281,7 +281,7 @@ Expected: FAIL because comparison currently only checks `best_info["comparable"]
 3. Before each `_should_rollback` call, compute `_identity_mismatch`; when non-empty, set `anchor_mismatch`, skip rollback comparison, and allow only the candidate’s own OOS/deployment gate to decide acceptance.
 4. Keep demo/exchange incomparable and keep unknown legacy anchors runnable but non-comparable.
 5. Reorder factor miner flow so factor OOS gate runs before any `is_best=True` save. On failed OOS/ICIR/turnover checks, call `save_agent_archive` only; do not update factor best, cascade `.npy`, cascade metadata or cascade weights.
-6. Ensure strategy/meta identity is propagated through accepted, rollback, and archive metadata without changing existing OOS thresholds.
+6. Ensure strategy identity is propagated through accepted, rollback, and archive metadata without changing existing OOS thresholds.
 
 - [ ] **Step 4: 运行身份/OOS/锚点回归**
 

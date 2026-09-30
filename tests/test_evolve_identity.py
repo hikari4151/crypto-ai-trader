@@ -112,3 +112,33 @@ async def test_factor_oos_passed_becomes_best(engine, monkeypatch):
 
     assert eng.zoo.best_fitness("factor_miner") == 0.6
     assert eng._factor_miner_status["oos_rejected"] == ""
+
+
+def test_factor_identity_fingerprint_includes_fitness_mode():
+    """fitness_mode/cost_per_turn 纳入 config 指纹（2026-09-29 成本对齐修复）。
+
+    旧 ic 口径 fitness≈0.35 与新的 net 口径不同量级，若不入指纹，
+    _identity_mismatch 会判"可比"然后 _should_rollback 把新模型压回旧锚点，
+    训练目标切换被回退保护抵消。入指纹后新旧口径自动判不可比、重建基线。
+    """
+    base = _training_identity(
+        "factor_miner", "ETH/USDT", "5m", state_window=1,
+        config={"episodes": 8, "ic_window": 120, "corr_threshold": 0.85,
+                "train_ratio": 0.6, "val_ratio": 0.2, "action_masking": True})
+
+    net = _training_identity(
+        "factor_miner", "ETH/USDT", "5m", state_window=1,
+        config={"episodes": 8, "ic_window": 120, "corr_threshold": 0.85,
+                "train_ratio": 0.6, "val_ratio": 0.2, "action_masking": True,
+                "fitness_mode": "net", "cost_per_turn": 0.002})
+
+    ic = _training_identity(
+        "factor_miner", "ETH/USDT", "5m", state_window=1,
+        config={"episodes": 8, "ic_window": 120, "corr_threshold": 0.85,
+                "train_ratio": 0.6, "val_ratio": 0.2, "action_masking": True,
+                "fitness_mode": "ic", "cost_per_turn": 0.0})
+
+    assert base["config_fingerprint"] != net["config_fingerprint"], "新旧口径指纹应不同"
+    assert net["config_fingerprint"] != ic["config_fingerprint"], "net 与 ic 指纹应不同"
+    assert _identity_mismatch({"config_fingerprint": base["config_fingerprint"]}, net) is not None
+    assert _identity_mismatch({"config_fingerprint": net["config_fingerprint"]}, ic) is not None

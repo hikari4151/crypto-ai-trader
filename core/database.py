@@ -117,7 +117,7 @@ class EvolveRound(Base):
     __tablename__ = "evolve_rounds"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ts: Mapped[datetime] = mapped_column(DateTime, default=func.now(), index=True)
-    model: Mapped[str] = mapped_column(String(32), index=True)        # factor_miner / strategy_drl / meta_controller
+    model: Mapped[str] = mapped_column(String(32), index=True)        # factor_miner / strategy_drl（历史行可能含已移除的 meta_controller）
     symbol: Mapped[str] = mapped_column(String(32), default="")
     timeframe: Mapped[str] = mapped_column(String(16), default="")
     data_source: Mapped[str] = mapped_column(String(16), default="exchange")

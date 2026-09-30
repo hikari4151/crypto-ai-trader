@@ -174,7 +174,6 @@ class Settings(BaseSettings):
     evolve_enabled: bool = True
     evolve_factor_miner_interval: int = 60     # 因子挖掘训练间隔：60s（连续训练）
     evolve_strategy_drl_interval: int = 60      # 策略 DRL 训练间隔：60s（连续训练）
-    evolve_meta_interval: int = 600             # 元策略训练间隔
     evolve_rolling_window: int = 5000             # 滚动窗口K线数
     evolve_factor_miner_episodes: int = 8         # 每轮因子挖掘训练轮数（连续训练取小值）
     # E-EXP（2026-09 实验落地）：因子挖掘连续 OOS 被拒达到此阈值后，下一轮强制
@@ -183,6 +182,16 @@ class Settings(BaseSettings):
     # （.optim/exp_training/replicate_prod_windows.py）——续训循环会困在老化基线上，
     # 周期重置可打破"永久连拒"。0=关闭。
     evolve_factor_miner_reset_after_rejects: int = 5
+    # 因子挖掘训练目标口径（2026-09-29 成本对齐修复）：
+    #   "ic"  = 旧行为：|rank_ic| × √(1/max(turnover,0.125))——抽象选择质量，低换手
+    #           奖励会虚高分数（现场实测 fitness 0.35 而真实 IC 仅 ~0.07），与真实
+    #           回测收益脱节（5m ETH 300+ 笔交易 -34.6%）。
+    #   "net" = 验证段可交易净收益（方向收益 − 换手成本）× scale：训练目标直接
+    #           对齐"扣成本后能赚多少"，高换手组合被真实成本压制。
+    # 注意：改口径会触发锚点不可比 → 自动重建基线（config 指纹含此项）。
+    evolve_factor_miner_fitness_mode: str = "net"
+    evolve_factor_miner_cost_per_turn: float = 0.002   # 方向翻转双边费率（fee 0.1% ×2）
+    evolve_factor_miner_net_fitness_scale: float = 500.0
     evolve_strategy_drl_episodes: int = 8          # 每轮策略 DRL 训练轮数（连续训练取小值）
     # 策略 DRL 网络规模：导出 Pine 时权重必须整段内联，故默认取「装得进 Pine」的组合。
     # 旧配置 state_window=20 + hidden=[64,64] = 21184 权重 ≈700KB 脚本 → 进化产物
@@ -193,18 +202,25 @@ class Settings(BaseSettings):
     # 是高换手成本侵蚀；buy_zone 部署侧扫描无效，须在训练侧解决）。
     evolve_strategy_drl_min_trade_zone: float = 0.10
     evolve_strategy_drl_hidden: list[int] = [16, 16]
-    evolve_meta_episodes: int = 16                 # 每轮元策略训练轮数（连续训练取小值；
-                                             # 8→16 实验提升：.optim/exp_training/verify_meta_rounds.py
-                                             # 3 轮续训 OOS 收益 +0.021→+0.044、验证收益转正，
-                                             # 每轮墙钟 ~17.5s 对 600s 间隔占比 ~3%）
-    # 元策略信号对齐塑形系数：>0 时奖励叠加"仓位×最强子策略信号×置信度"项，
-    # 让 PPO 学会在信号高置信时持仓（元控制器本职），逃出"空仓=0"懒惰最优解；
-    # 0=关闭保持旧行为。塑形只进训练梯度，best_ret/OOS 仍按真实收益。
-    evolve_meta_signal_align: float = 12.0
-    # E-EXP（2026-09-19 落地）：元策略「持仓参与塑形」系数。奖励 += 系数×当前仓位比，
-    # 直接惩罚"空仓=0"的懒惰最优解（生产归档：meta_controller 489/501 轮被拒、fitness=0）。
-    # 只进训练梯度，选模/OOS 的 total_ret 仍按权益复利计算。0=关闭保持旧行为。
-    evolve_meta_participation_scale: float = 0.5
+    # 策略 DRL 经验回放（跨训练轮存活）：每轮只训 8ep + 滚动窗口移动，若缓冲每轮
+    # 重建，旧行情经验在轮间被完全丢弃——这是"灾难性遗忘"的加速器。>0 时引擎持有
+    # 缓冲区实例并逐轮透传，上一轮乃至更早窗口的轨迹继续参与 PPO 更新（旧轨迹经
+    # 重要性采样比率自然衰减，PPO 兼容）。0=禁用（保持旧行为）。
+    #
+    # 内存口径（实测 2026-09-28，5m/5000根/state_window=4）：单条轨迹 ≈1.24MB
+    # （2939 步 × 54 维 float64），每轮推入 n_episodes×episodes = 8×8 = 64 条 ≈77MB。
+    # 故 capacity=64 恰好覆盖"上一轮"，约 77MB；128≈155MB；400≈484MB（不建议）。
+    # 调大前请按此公式估算常驻内存。
+    evolve_strategy_drl_replay_capacity: int = 64
+    evolve_strategy_drl_replay_mix_ratio: float = 0.3   # 每批中来自回放的历史轨迹比例
+    # P0 多标的混合训练（2026-10 经验广度）：开启后策略 DRL 每轮把 evolve_symbols
+    # 池中的全部标的喂给 train_drl，每个 episode 随机选标的×随机时间窗切片，
+    # 网络共享——补"见过多种价格行为"的经验广度（人类几年=牛熊震荡多标的多场景）。
+    # 主标的仍承担 val/OOS/部署语义；额外标的只作为经验来源。0=关闭（单标的训练）。
+    evolve_strategy_drl_multi_symbol: bool = True
+    # 每条轨迹来自额外标的的概率（0=只用主标的；1=只用额外标的）。主标的经验密度
+    # 更高、部署语义最强，默认 0.5 让两者均衡。
+    evolve_strategy_drl_multi_mix_ratio: float = 0.5
     evolve_rollback_threshold: float = 0.95       # 新模型低于最佳模型此比例时回退（仅旧 fitness 为正时生效）
     evolve_max_versions: int = 10                 # 保留的历史版本数
     evolve_symbols: list[str] = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # 训练标的池（留单个=固定品种训练）
@@ -259,10 +275,9 @@ class Settings(BaseSettings):
     evolve_strategy_drl_walkforward_bars: int = 6000
     evolve_walkforward_min_trades: int = 8
     # 连续拒绝 from-scratch 重置（对齐 factor_miner 先例，诊断报告 §7 建议第2条）：
-    # 策略 DRL（仅冠军轮）/ meta_controller 连续 OOS 被拒达阈值后，下一轮强制
+    # 策略 DRL（仅冠军轮）连续 OOS 被拒达阈值后，下一轮强制
     # 从零重训（base_agent=None），打破"永久连拒"困在老基线上的死循环。0=关闭。
     evolve_strategy_drl_reset_after_rejects: int = 5
-    evolve_meta_reset_after_rejects: int = 5
     # GAP-01 实盘验收观测（2026-09-19，诊断报告建议第6条(b)）：每轮 strategy DRL
     # 真实训练后，对部署中的最佳模型跑同品种多折 walk-forward × 两档成本（基准/翻倍），
     # 输出 PASS/FAIL（单标的部署豁免跨品种，见 docs/LIVE_READINESS.md E7）。

@@ -147,41 +147,36 @@ def test_meta_update_params_reloads_meta_agent():
     assert st._meta_agent is None
 
 
-# ---------------- C: 训练子策略池解析 ----------------
+# ---------------- C: 子策略池解析（运行时唯一入口） ----------------
+# 注：训练/注册侧的 resolve_meta_sub_strategies 已随元策略训练功能移除
+# （2026-09-28），防递归/去重/回退约束收敛到 MetaController 运行时。
 
-def test_resolve_meta_sub_strategies_prefers_user_selection():
-    from drl.evolve_engine import resolve_meta_sub_strategies
-    # 用内置策略名（测试进程注册表中恒可用），断言用户选定优先且容忍空白
-    assert resolve_meta_sub_strategies(
-        {"sub_strategies": "dual_ma, price_action ,grid"}
-    ) == "dual_ma,price_action,grid"
+def _sub_names(raw: str) -> list[str]:
+    from strategies import get_strategy
+    st = get_strategy("meta_controller")
+    st.reset()
+    st.update_params({"sub_strategies": raw})
+    return list(st._strategy_names)
 
 
-def test_resolve_meta_sub_strategies_excludes_self():
+def test_sub_strategies_prefers_user_selection():
+    # 用内置策略名（测试进程中恒可用），断言用户选定优先且容忍空白
+    assert _sub_names("dual_ma, price_action ,grid") == ["dual_ma", "price_action", "grid"]
+
+
+def test_sub_strategies_excludes_self():
     """元控制器把自己当子策略会无限递归。"""
-    from drl.evolve_engine import resolve_meta_sub_strategies
-    assert resolve_meta_sub_strategies(
-        {"sub_strategies": "meta_controller,dual_ma"}).split(",") == ["dual_ma"]
-    # 仅选自身 → 回退默认池：结果须与空选回退一致，且绝不含 meta_controller 自身
-    # （不硬编码池大小：默认池随 rl_evolve 是否已注册可能为 3 或 4 项）
-    fallback = resolve_meta_sub_strategies({"sub_strategies": "  "})
-    assert resolve_meta_sub_strategies({"sub_strategies": "meta_controller"}) == fallback
-    assert "meta_controller" not in fallback.split(",")
+    assert _sub_names("meta_controller,dual_ma") == ["dual_ma"]
+    # 仅选自身 → 空池（运行时 on_candle 无子策略时走集成/直接无信号）
+    assert _sub_names("meta_controller") == []
+    # 自身混入多选中也要被剔除，其余保持
+    assert _sub_names("grid,meta_controller,dual_ma") == ["grid", "dual_ma"]
 
 
-def test_resolve_meta_sub_strategies_falls_back_and_dedupes():
-    from strategies import list_strategies
-    from drl.evolve_engine import DEFAULT_META_SUBS, resolve_meta_sub_strategies
-    # 默认池按设计会过滤「当前未注册」的项（如首启时 rl_evolve 尚未注册），
-    # 期望值需按同样规则从 DEFAULT_META_SUBS 推导，而非与常量直接比较
-    available = {s["name"] for s in list_strategies()}
-    expected = ",".join(dict.fromkeys(
-        n for n in DEFAULT_META_SUBS.split(",") if n in available and n != "meta_controller")
-    ) or "dual_ma,factor_signal"
-    assert resolve_meta_sub_strategies(None) == expected
-    assert resolve_meta_sub_strategies({"sub_strategies": "  "}) == expected
-    assert resolve_meta_sub_strategies(
-        {"sub_strategies": "grid,dual_ma,grid"}) == "grid,dual_ma"
+def test_sub_strategies_dedupes():
+    assert _sub_names("grid,dual_ma,grid") == ["grid", "dual_ma"]
+    assert _sub_names("") == []
+    assert _sub_names("   ") == []
 
 
 # ---------------- B: POST /strategy-repo/params ----------------

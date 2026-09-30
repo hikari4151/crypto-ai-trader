@@ -20,16 +20,17 @@ evolve_factor_miner_interval: 60
 evolve_strategy_drl_interval: 60
 evolve_rolling_window: 5000
 evolve_factor_miner_episodes: 8
+evolve_factor_miner_fitness_mode: net
+evolve_factor_miner_cost_per_turn: 0.002
+evolve_factor_miner_net_fitness_scale: 500.0
 evolve_strategy_drl_episodes: 8
 evolve_strategy_drl_n_episodes: 8
 evolve_strategy_drl_ppo_epochs: 8
-evolve_meta_participation_scale: 0.5
 evolve_strategy_drl_walkforward_obs: true
 evolve_strategy_drl_walkforward_folds: 2
 evolve_strategy_drl_walkforward_bars: 6000
 evolve_walkforward_min_trades: 8
 evolve_strategy_drl_reset_after_rejects: 5
-evolve_meta_reset_after_rejects: 5
 evolve_gap01_obs: true
 evolve_gap01_folds: 4
 evolve_gap01_bars: 15000
@@ -48,6 +49,8 @@ evolve_strategy_drl_min_trade_zone: 0.10
 evolve_strategy_drl_hidden:
 - 16
 - 16
+evolve_strategy_drl_replay_capacity: 64
+evolve_strategy_drl_replay_mix_ratio: 0.3
 evolve_rollback_threshold: 0.95
 evolve_max_versions: 10
 evolve_symbols:

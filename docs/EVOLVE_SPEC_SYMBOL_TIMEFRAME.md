@@ -7,14 +7,14 @@
 ## 一、现状与本次落地的能力
 
 ### 现状（本次改动前）
-- 训练标的池：`evolve_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]`，因子挖掘/策略 DRL/元控制器三条管线每轮 `_next_symbol()` 轮换取一个标的训练；
-- 训练时间周期：三条管线一律使用全局 `settings.default_timeframe`（默认 1h），与**实盘交易周期绑定**。
+- 训练标的池：`evolve_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]`，因子挖掘/策略 DRL 两条管线每轮 `_next_symbol()` 轮换取一个标的训练（元策略训练已于 2026-09-28 移除）；
+- 训练时间周期：两条管线一律使用全局 `settings.default_timeframe`（默认 1h），与**实盘交易周期绑定**。
 
 ### 本次落地的能力
 | 能力 | 实现 |
 |---|---|
 | 固定品种训练 | `evolve_symbols` 允许单元素（如 `["BTC/USDT"]`），轮换自然变成固定品种；前端「训练配置」面板可编辑保存，热更新 + 写回 config.yaml |
-| 独立训练周期 | 新增 `evolve_timeframe`（留空=跟随 default_timeframe），三条训练管线统一走 `_effective_timeframe()`：拉数、demo 兜底、落库、flat 元数据、注册 base_timeframe 全部用实际训练标的与周期 |
+| 独立训练周期 | 新增 `evolve_timeframe`（留空=跟随 default_timeframe），两条训练管线统一走 `_effective_timeframe()`：拉数、demo 兜底、落库、flat 元数据、注册 base_timeframe 全部用实际训练标的与周期 |
 | 前端入口 | 持续进化面板「训练配置」卡：训练标的池（逗号分隔）、训练时间周期下拉、间隔/窗口/回退阈值/vol_penalty/OOS 门槛/增量门槛/跨标门，一键保存热更新 |
 
 ---

@@ -58,7 +58,8 @@ def test_gate_rejects_when_oos_trades_zero():
 def test_gate_traded_but_lost_reports_nonpositive():
     """P4-E2：OOS 有交易但段末平仓（position_ratio=0）+ 收益为负 → 判"真亏损"而非"未交易"。
 
-    回归：元策略 OOS 策略"交易后段末平仓"会被段末持仓比例误判为从未交易；
+    回归：历史上元策略 OOS 曾把"交易后段末平仓"误判为从未交易（该管线训练已
+    于 2026-09-28 移除，但门禁是 strategy_drl 共用的）；
     有了 oos_trades 计数后必须给出诚实的"非正"结论。
     """
     ok, reason = _strategy_deploy_gate({
@@ -127,7 +128,7 @@ def engine(tmp_path, monkeypatch):
     monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
     holder = {"result": None}   # 每个用例塞入本轮 train_drl 的返回
     monkeypatch.setattr(ev, "train_drl",
-                        lambda df_, cfg_, on_progress=None: holder["result"])
+                        lambda df_, cfg_, on_progress=None, extra_dfs=None: holder["result"])
     registered: list = []
     monkeypatch.setattr(ev, "register_dynamic", lambda name, spec: registered.append(name))
     # P4-E1：桩掉跨标 OOS 与策略注册——跨标评估要跑真实 greedy rollout

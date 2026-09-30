@@ -35,7 +35,7 @@
 在编辑前用 `rg` 确认以下绑定仍存在并记录行号：
 
 ```bash
-rg -n "evolveStatus|evolveAnchorIssues|evolveConfig|evolveCurveChart|EVOLVE_MODELS|drlPanelOpen|triggerFactorMiner|triggerStrategyDrl|triggerMetaController" web/static/index.html
+rg -n "evolveStatus|evolveAnchorIssues|evolveConfig|evolveCurveChart|EVOLVE_MODELS|drlPanelOpen|triggerFactorMiner|triggerStrategyDrl" web/static/index.html
 ```
 
 预期：这些字段和方法在脚本区存在，且 `#evolveCurveChart` 仅用于持续进化曲线。
@@ -76,7 +76,7 @@ rg -n "evolveStatus|evolveAnchorIssues|evolveConfig|evolveCurveChart|EVOLVE_MODE
 .evolve-layout { display:grid; grid-template-columns:minmax(0,1fr) 370px; gap:16px; align-items:start; }
 .evolve-main-column, .evolve-side-column { min-width:0; display:grid; gap:16px; align-content:start; }
 .evolve-status-bar { display:grid; grid-template-columns:auto repeat(4,minmax(0,1fr)) auto; gap:14px; align-items:center; }
-.evolve-model-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.evolve-model-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
 @media (max-width: 1100px) { .evolve-layout { grid-template-columns:1fr; } .evolve-side-column { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width: 760px) { .evolve-status-bar, .evolve-side-column, .evolve-model-grid { grid-template-columns:1fr; } }
 ```
@@ -118,7 +118,7 @@ git commit -m "style: reshape continuous evolution page layout"
 
 **Interfaces:**
 - Consumes: `evolveStatus`, `evolveFailStreak`, `evolveAnchorIssues`, `evolveAnchorLocked`, `evolveConfig`, `evolveSymbolOptions`, `evolveSymbolsLabel`, `evolveTfOptions`, `formDrop`, `formDropStyle`。
-- Produces: 设计稿顶部状态条及右栏三个操作面板，保留现有暂停、恢复、启用、禁用、刷新、保存配置、重置锚点和三种立即训练入口。
+- Produces: 设计稿顶部状态条及右栏三个操作面板，保留现有暂停、恢复、启用、禁用、刷新、保存配置、重置锚点和两种立即训练入口。
 
 - [ ] **Step 1: 将运行状态压缩为单行状态带**
 
@@ -126,7 +126,7 @@ git commit -m "style: reshape continuous evolution page layout"
 
 - `evolveStatus.running`、`evolveStatus.paused`、`evolveStatus.enabled` 的状态显示；
 - `evolveStatus.symbols` / `current_symbol` 的标的池；
-- `factor_miner.active`、`strategy_drl.active`、`meta_controller.active`；
+- `factor_miner.active`、`strategy_drl.active`；
 - `next_run` 或 `next_train` 可用值；
 - 暂停、恢复、启用、禁用、刷新和设计稿中的“立即训练”主按钮。
 
@@ -158,15 +158,14 @@ git commit -m "style: reshape continuous evolution page layout"
 
 - [ ] **Step 4: 将手动训练触发器改为右栏纵向按钮组**
 
-保留三组现有按钮与禁用条件：
+保留两组现有按钮与禁用条件：
 
 ```html
 @click="triggerFactorMiner()"
 @click="triggerStrategyDrl()"
-@click="triggerMetaController()"
 ```
 
-按钮标签继续反映 `active` 状态，例如“因子挖掘中…”、“策略训练中…”、“元策略训练中…”。按 PDF 让按钮在右栏垂直堆叠并占满可用宽度。
+按钮标签继续反映 `active` 状态，例如“因子挖掘中…”、“策略训练中…”。按 PDF 让按钮在右栏垂直堆叠并占满可用宽度。
 
 - [ ] **Step 5: 运行绑定检查**
 
@@ -174,7 +173,7 @@ git commit -m "style: reshape continuous evolution page layout"
 python - <<'PY'
 from pathlib import Path
 s = Path('web/static/index.html').read_text(encoding='utf-8')
-for token in ('toggleFormDrop(\'evolveSymbols\'', 'saveEvolveConfig()', 'resetEvolveAnchor', 'triggerFactorMiner()', 'triggerStrategyDrl()', 'triggerMetaController()'):
+for token in ('toggleFormDrop(\'evolveSymbols\'', 'saveEvolveConfig()', 'resetEvolveAnchor', 'triggerFactorMiner()', 'triggerStrategyDrl()'):
     assert token in s, token
 print('evolve controls: PASS')
 PY
@@ -198,11 +197,11 @@ git commit -m "style: align evolution controls with pdf layout"
 
 **Interfaces:**
 - Consumes: `evolveCurveModel`, `evolveCurveHasData`, `evolveRoundsErr`, `EVOLVE_MODELS`, `evolveModel`, `showEvolveVersions`, `evolveVersionsOpen`, `evolveVersionTitle`, `evolveVersions`, `evolveBestVersion`, `evolveRollback`, `closeEvolveVersions`。
-- Produces: 左栏曲线和三卡横排模型区，以及 PDF 风格版本弹层。
+- Produces: 左栏曲线和两卡横排模型区，以及 PDF 风格版本弹层。
 
 - [ ] **Step 1: 将训练轮次曲线放入主栏首卡**
 
-保留三个模型切换按钮和以下图表容器：
+保留两个模型切换按钮和以下图表容器：
 
 ```html
 <div id="evolveCurveChart" v-if="evolveCurveHasData"></div>
@@ -210,7 +209,7 @@ git commit -m "style: align evolution controls with pdf layout"
 
 空数据时保留“加载失败”和“暂无训练轮次记录”两种文案分支。将图例信息压缩到曲线卡底部，保留红点代表拦截/回退、蓝线代表接受/训练轮次和最佳 fitness/接受率摘要。
 
-- [ ] **Step 2: 将模型状态改为三卡横排**
+- [ ] **Step 2: 将模型状态改为两卡横排**
 
 继续使用单一 `v-for`：
 
@@ -224,7 +223,7 @@ git commit -m "style: align evolution controls with pdf layout"
 - `evolveModel(m.key).fitness`；
 - symbol、episode、last_run；
 - 候选 fitness、部署 fitness、版本、last outcome、runtime reload；
-- anchor mismatch、last error、oos rejected、cross OOS、meta 子策略和 next run；
+- anchor mismatch、last error、oos rejected、cross OOS 和 next run；
 - `@click="showEvolveVersions(m.key)"`。
 
 不要改变 `EVOLVE_MODELS` 数据数组和 `evolveModel()` 方法。

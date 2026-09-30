@@ -48,7 +48,7 @@ def engine(tmp_path, monkeypatch):
     monkeypatch.setattr(eng, "_data_incremented", lambda *a, **k: True)
     holder = {"result": None}
     monkeypatch.setattr(ev, "train_drl",
-                        lambda df_, cfg_, on_progress=None: holder["result"])
+                        lambda df_, cfg_, on_progress=None, extra_dfs=None: holder["result"])
     registered: list = []
     monkeypatch.setattr(ev, "register_dynamic", lambda name, spec: registered.append(name))
 

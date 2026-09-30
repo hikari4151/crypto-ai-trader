@@ -109,7 +109,8 @@ def test_panel_pop_contains_all_functionality():
     assert "保存配置（热更新）" in v
     assert "triggerFactorMiner()" in v
     assert "triggerStrategyDrl()" in v
-    assert "triggerMetaController()" in v
+    # 元策略训练已移除（2026-09-28）：不得再出现手动训练入口
+    assert "triggerMetaController()" not in v
     assert "resetEvolveAnchor(a.model)" in v
     assert "formDrop==='evolveSymbols'" in v
 

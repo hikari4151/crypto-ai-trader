@@ -505,46 +505,11 @@ run4 曾判定「rng.choice 不可复刻」（手写 Pearson 两次验证 1-2ulp
 
 ## 16. 第七轮自治优化（2026-09-06）：meta 控制器管线单轮耗时（run7，-19.8%）
 
-> 执行依据：《自治优化协议 v2》；契约：主目标=evolve `_train_meta_controller_once` 计算链路耗时，min_gain=+5%，max_level=L2，预算 8 实验/4h
-> 起点：run2-6 保留项之上（含 run6 agent.py E1 手写 ICDF 采样）；测量 command=`.optim/bench_meta_controller.py 8 4 3`
-
-### 16.1 run7 基线快照
-
-| 指标 | 基线值 |
-|---|---|
-| meta 控制器单轮 bench（8ep×4nep×3 次，子策略池 dual_ma/factor_signal/price_action） | median=17.937s σ=1.731s cv=9.6% |
-| pytest | ✅ PASS（exit 0） |
-
-### 16.2 run7 变更清单（保留项）
-
-| 实验 | 变更文件 | 改动内容 | 增量 |
-|---|---|---|---|
-| E1 | `strategies/meta.py` | `MetaControllerEnv.step` 每步 2 次 pandas `df["close"].iloc[t]` 标量访问 → `self._closes` numpy 数组索引（`__init__` 已有 `df["close"].to_numpy(float)` 预转，同一底层数据）——消除 96,865 步 × 2 的 pandas iget/__getitem__ 调度热点（profile 193,900 次） | **-19.8%** |
-
-### 16.3 前后对比（实际数值）
-
-| 阶段 | 耗时 | 增量 |
-|---|---|---|
-| 基线 | 17.937s（σ=1.731，cv 9.6%） | — |
-| E1 后 | 14.376s（σ=0.067，cv 0.5%） | **-19.8%** |
-
-### 16.4 为何此处难以继续优化（§4④ 分析）
-
-E1 后剩余热点逐项评估：
-- `sample_action_with_logp`/`forward`/`nnet.step`/`train_batch`：run6 已优化采样链路 + PPO 更新语义（run3 已证数值语义不可触碰）；
-- `meta_performance` 的 `np.mean(trades[-window:])` 与 `realized_volatility` 的 `np.std(rets)`（≤40 元素小数组）：numpy 调度开销占大头，但手写等价会引入归约序 1-2ulp 尾差——run4 corrcoef 同类双证失败，行为等价红线；
-- `factor_signal._push_ohlcv`（97,950 次）：子策略状态推进语义（回测/实盘同形状 ctx）。
-
-→ 该方向收敛。跨七轮累计（引擎侧）：因子挖掘管线 -54.8%（run4）/ 单轮 0.77s（run5 含 -82.8%）；策略 DRL 管线 -23.3%（run6）/ 单轮 4.07s；**meta 控制器管线 -19.8%（run7）/ 单轮 14.38s**。
-
-### 16.5 知识库索引（新增，run7）
-
-| 模式 | 适用场景 | 已验证 |
-|---|---|---|
-| env.step 内 pandas iloc 标量 → 预转 numpy 数组索引 | 逐步仿真环境热路径（96k 步/回合） | ✅ E1（-20%，逐位一致） |
-| **反模式**：小数组 np.mean/std 手写替换 | ≤40 元素统计量 | ❌ 归约序尾差红线（run4 同证） |
-
----
+> ⚠️ **本节实验记录已移除（2026-09-28）**：该轮优化对象是元策略**训练**管线的单轮耗时，
+> 而元策略训练功能已整体删除，对应基准脚本与变更清单随之失效，故正文不再保留。
+> 节编号与标题保留，以免打断 run8 及其后各轮"起点：run2-7 保留项之上"的交叉引用。
+> 保留的方法论结论：`env.step` 内 pandas `iloc` 标量访问应预转 numpy 数组索引；
+> 小数组 `np.mean/std` 手写替换因归约序尾差属反模式（run4/run7 双证）。
 
 ---
 
@@ -1007,48 +972,13 @@ profile 热点分解（tottime/cumtime）：
 
 ## 28. 第十九轮自治优化（2026-09-07）：run8 增量复测（run19，-13.5%）
 
-> 执行依据：《自治优化协议 v2》；契约：主目标=run8 增量复测（meta vol 整列预计算 E1 在干净环境下真实收益判定），min_gain=+5%，max_level=L2，预算 8 实验/4h
-> 起点：run2-18 保留项之上；测量 command=`.optim/bench_meta_controller.py 8 3`
-
-### 28.1 run19 基线快照（实际数值）
-
-| 项 | 数值 |
-|---|---|
-| meta 管线（8ep） | 12.028s（cv 1.0%） |
-| vol 逐步计算调用次数 | **96,900 次/回合**（8ep×n_episodes×步数） |
-| vol 占 meta wall | **9.2%**（11.6s 中 ~1.07s） |
-
-### 28.2 run19 变更清单（保留项）
-
-| 实验 | 变更文件 | 改动内容 | 增量 |
-|---|---|---|---|
-| E1 | `strategies/meta.py` | **meta 波动率特征整列预计算**：`build_meta_state` 新增 `vol_feature` 参数；`MetaControllerEnv.__init__` 一次 `_precompute_vol_feats`（sliding_window_view 主体 + t<window 边界逐点，1.4ms）；`_build_state` 查表传入 | **-13.5%**（12.028→10.408s，cv 0.1%） |
-
-### 28.3 门禁与等价性
-
-- 逐位等价（`.optim/verify_meta_vol_e1.py`）：归一版（含 `min(/SCALE,1)`）5000 点含 t<window 边界 **bitwise PASS**；预计算一次性仅 1.4ms
-- 实盘端 `build_meta_state` 不传 vol_feature 回落 `meta_vol_feature(vol_closes)`——训练/实盘口径一致
-- test_meta_oos_report + test_drl_optimizations + test_reconcile 回归 PASS；全量 pytest **exit 0**，测试未动
-- 回滚：撤销 build_meta_state vol_feature 参数 / _precompute_vol_feats / _vol_feats / 查表传入
-
-### 28.4 run8 回滚教训的修正（重要方法论）
-
-run8 当时用**整轮 bench**（21s 含三管线，cv 4.4%）测 E1 增量——1s 收益被噪声稀释至不可判定（-6.6% vs +0.3%）而回滚。本轮干净环境 + **单 meta 管线口径**（cv 0.1%）下同一候选 **-13.5% 明确达标**。
-
-> 方法学：**复测回滚项必须先切换到该热点所在模块的单管线口径**——整轮口径只适合验收（总收益），不适合发现（模块级增量）。
-
-run8 E2（meta_performance 去 list() 防御性复制）当时 -2.6% < 5% 回滚——收益不足而非噪声，维持回滚结论。
-
-### 28.5 知识库索引（新增，run19）
-
-| 模式 | 适用场景 | 已验证 |
-|---|---|---|
-| sliding_window_view 批量 np.std vs 逐步逐位一致 | 整列预计算替代热路径逐步计算 | ✅ E1（含边界，归一后仍 PASS） |
-| 复测回滚项先切单管线口径 | 整轮噪声掩盖模块级收益 | ✅ E1 从回滚→-13.5% 保留 |
-| 查表参数回落（vol_feature=None → 逐步） | 训练/实盘共用函数保口径一致 | ✅ E1 |
-
----
-
+> ⚠️ **本节实验记录已移除（2026-09-28）**：该轮复测对象是元策略**训练**环境的波动率特征
+> 预计算（单训练管线基准），训练功能已整体删除，对应变更清单与基准数据随之失效。
+> 节编号与标题保留，以免打断 run20 及其后各轮的交叉引用。
+> 保留的方法论结论（跨场景通用）：
+> - `sliding_window_view` 批量 `np.std` 与逐步计算可做到逐位一致，用于整列预计算替代热路径逐步计算；
+> - **复测回滚项必须先切到该热点所在模块的单口径基准**——整轮口径噪声会掩盖模块级收益；
+> - 训练端与实盘端共用函数时，用"参数回落"（预计算值缺省则逐步计算）保持口径一致。
 
 ---
 

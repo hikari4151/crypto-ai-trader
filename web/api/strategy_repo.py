@@ -164,7 +164,8 @@ async def repo_all(db=Depends(get_db)):
         if created_by == "repository":
             kind, source = "模板", "仓库模板"
         elif created_by == "evolve_engine":
-            # 持续进化引擎训练产物（rl_evolve / meta_controller）：此前落入
+            # 持续进化引擎训练产物（rl_evolve；历史库中还有 meta_controller 行，
+            # 该管线训练已于 2026-09-28 移除，既有策略仍照常展示）：此前落入
             # "AI设计" 兜底桶，前端「进化」徽标与筛选永远不亮
             kind, source = "进化", "持续进化"
         elif created_by == "drl_train":

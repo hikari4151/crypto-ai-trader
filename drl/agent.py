@@ -122,6 +122,18 @@ class ReplayBuffer:
     def __len__(self) -> int:
         return len(self._states)
 
+    def feature_dim(self) -> Optional[int]:
+        """已存轨迹的状态维度；空缓冲返回 None。
+
+        供跨训练轮复用缓冲区时做维度守卫：配置变更（state_window / 因子列）会
+        改变状态维度，此时旧轨迹与当前网络不符，必须在拼接前清空重建，否则
+        会在 np.concatenate 处维度崩溃。
+        """
+        if not self._states:
+            return None
+        arr = self._states[0]
+        return int(arr.shape[1]) if getattr(arr, "ndim", 0) == 2 else None
+
     def clear(self) -> None:
         self._states.clear()
         self._actions.clear()
@@ -513,7 +525,8 @@ class ACAgent:
 
 # ============ 训练器 ============
 
-def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = None) -> dict:
+def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = None,
+              extra_dfs: Optional[dict] = None) -> dict:
     """完整训练循环：在回测环境反复试错，产出训练好的智能体。
 
     cfg:
@@ -525,6 +538,13 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         cost_scale: 交易成本缩放
         start_cash / fee_rate
         seed
+        多标的混合训练（P0 经验广度，可选）：
+          extra_mix_ratio: 每条轨迹来自额外标的的概率（默认 0.5）
+          episode_window: 采样切片长度（0=主标的训练段长度）
+    extra_dfs: {name: df} 额外标的数据（可选）。传入后每个 episode 以
+        extra_mix_ratio 概率随机选一个额外标的、在其数据内随机时间窗切片
+        训练；否则（默认）只跑主标的训练段——行为与未传时完全一致。
+        额外标的只作为经验来源，不参与 val/OOS 判据（部署语义仍由主标的承担）。
     on_progress(info): 每轮回调 {episode, total_ret, final_equity, best_ret, epsilon, ...}
     返回 {agent, history, best_ret, cfg}
     """
@@ -661,6 +681,74 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     # 算一遍（未传 precomputed_features）、worker 又算一遍，大 DataFrame 下
     # 启动即重复一次滚动窗口计算（cupy 后端更是双份 GPU 编译+拷贝）
     _precomputed_features = _precompute_features(train_df, backend=backend)
+    # ---- P0 多标的混合训练：构建标的池（经验广度） ----
+    # 单标的模式（未传 extra_dfs）：pool 只有主标的，sample() 恒返回主标的
+    # 完整训练段——行为与旧路径完全一致（start=0、window=len(train_df)）。
+    # 多标的模式：每 episode 以 extra_mix_ratio 概率随机选额外标的并在其
+    # 数据内随机时间窗切片，网络共享，把"见过的局面"扩到多个标的多年行情。
+    # 额外标的只作为经验来源，不参与 val/OOS 判据（部署语义仍由主标的承担）。
+    extra_dfs = extra_dfs or {}
+    extra_mix_ratio = float(cfg.get("extra_mix_ratio", 0.5))
+    episode_window = int(cfg.get("episode_window", 0) or 0)
+    factor_builder = None
+    if extra_dfs:
+        # 跨标因子列构建器：主标的有因子列时，额外标的必须能重建同维度因子列
+        # 才能共享网络。来源二选一：
+        # 1. factor_composite 配方（factor_miner 级联组合因子）：配方可在任意
+        #    标的 df 上复算（expanding z 无前视，与部署端同口径）
+        # 2. factor_expression 表达式：FactorExecutor 对任意 df 计算同一表达式
+        # 仅有预计算数组 factor_values（无配方无表达式）无法跨标重建 → 不传
+        # factor_builder，pool 会因主标的带因子列而排除全部额外标的（降级单标）。
+        if factor_composite:
+            _weights = (factor_composite.get("weights") or {})
+            if _weights:
+                from .multi_asset import _build_composite_factor
+                _comp_mu, _comp_sd = factor_mu, factor_sd
+
+                def _fb(df, _w=_weights, _mu=_comp_mu, _sd=_comp_sd):
+                    vals = _build_composite_factor(df, _w)
+                    if vals is None:
+                        return None
+                    vals = (vals - _mu) / (_sd if _sd and _sd > 0 else 1.0)
+                    return np.nan_to_num(vals, nan=0.0)
+                factor_builder = _fb
+        elif factor_expr:
+            _expr = factor_expr
+            _expr_mu, _expr_sd = factor_mu, factor_sd
+
+            def _fb(df, _e=_expr, _mu=_expr_mu, _sd=_expr_sd):
+                try:
+                    from factors.mining import FactorExecutor
+                    vals = FactorExecutor(_e).eval(df).astype(float).to_numpy(float)
+                    vals = (vals - _mu) / (_sd if _sd and _sd > 0 else 1.0)
+                    return np.nan_to_num(vals, nan=0.0)
+                except Exception:  # noqa: BLE001
+                    return None
+            factor_builder = _fb
+        elif factor_values is not None:
+            log.warning("[drl] 多标的训练：主标的因子为预计算数组（无复算配方），"
+                        "额外标的无法重建同维度因子列，本轮降级为单标的训练")
+    if extra_dfs:
+        from .multi_asset import MultiAssetPool
+        main_factors = (extra_factors_all[:len(train_df)].reshape(-1)
+                        if extra_factors_all is not None else None)
+        try:
+            asset_pool = MultiAssetPool(
+                train_df, _precomputed_features, main_factors=main_factors,
+                extra_dfs=extra_dfs, state_window=state_window, backend=backend,
+                factor_builder=factor_builder, window_len=episode_window,
+                extra_mix_ratio=extra_mix_ratio, log=log)
+            if asset_pool.extra_names:
+                log.info("[drl] 多标的混合训练已启用: 额外标的 %s (mix_ratio=%.2f, window=%d)",
+                         asset_pool.extra_names, extra_mix_ratio, asset_pool.window_len)
+            elif extra_dfs:
+                log.warning("[drl] 多标的混合训练：所有额外标的均被排除"
+                            "（维度/长度不符），降级为单标的训练")
+        except Exception as e:  # noqa: BLE001
+            log.warning("[drl] 多标的池构建失败，降级为单标的训练: %s", e)
+            asset_pool = None
+    else:
+        asset_pool = None
     env = TradingEnv(train_df, start_cash=float(cfg.get("start_cash", 10000.0)),
                      fee_rate=float(cfg.get("fee_rate", 0.001)),
                      vol_penalty=vol_penalty, cost_scale=cost_scale,
@@ -731,11 +819,27 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
 
     # 经验回放缓冲区（可选）：capacity>0 时启用，混合旧轨迹提升样本效率。
     # 旧轨迹经重要性采样比率自然衰减，PPO 兼容（ratio=exp(logp_new-logp_old)）。
-    replay_capacity = int(cfg.get("replay_capacity", 0))  # 0=禁用
+    #
+    # cfg["replay_buffer"]：调用方可传入既有缓冲区以**跨训练轮存活**——持续进化
+    # 引擎据此让上一轮（甚至更早窗口）的轨迹参与本轮更新，这是对抗灾难性遗忘的
+    # 关键：每轮只训 8ep 时，若缓冲每轮重建，则旧行情经验在轮间被完全丢弃。
+    # 未传入时维持旧行为（每次调用内新建，只在同轮内混合）。
     replay_mix_ratio = float(cfg.get("replay_mix_ratio", 0.3))
-    replay_buf = ReplayBuffer(capacity=replay_capacity) if replay_capacity > 0 else None
+    replay_buf = cfg.get("replay_buffer")
     if replay_buf is not None:
-        log.info("[drl] 经验回放已启用: capacity=%d mix_ratio=%.2f", replay_capacity, replay_mix_ratio)
+        _prev_dim = replay_buf.feature_dim()
+        if _prev_dim is not None and _prev_dim != agent.state_dim:
+            # 维度守卫：配置变更后旧轨迹维度不符，复用会在 concatenate 处崩溃
+            log.warning("[drl] 回放缓冲区维度不符（缓冲 %s vs 当前 %s），已清空重建",
+                        _prev_dim, agent.state_dim)
+            replay_buf.clear()
+        replay_capacity = int(replay_buf.capacity)
+    else:
+        replay_capacity = int(cfg.get("replay_capacity", 0))  # 0=禁用
+        replay_buf = ReplayBuffer(capacity=replay_capacity) if replay_capacity > 0 else None
+    if replay_buf is not None:
+        log.info("[drl] 经验回放已启用: capacity=%d mix_ratio=%.2f 复用轨迹=%d",
+                 replay_capacity, replay_mix_ratio, len(replay_buf))
 
     history: list[dict] = []
     best_train_ret = -1e9
@@ -804,23 +908,31 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         D1：每个 worker 用独立 rng（seed 派生，可复现）——绝不共享 agent._rng，
         numpy Generator 非线程安全，共享会导致采样非确定/竞态。"""
         ep_i, worker_i = args
-        extra_for_worker = extra_factors_all[:len(train_df)] if extra_factors_all is not None else None
-        local_env = TradingEnv(train_df, start_cash=float(cfg.get("start_cash", 10000.0)),
-                                fee_rate=float(cfg.get("fee_rate", 0.001)),
-                                vol_penalty=vol_penalty, cost_scale=cost_scale,
-                                slippage=slippage,
-                                min_trade_zone=float(cfg.get("min_trade_zone", 0.05)),
-                                backend=backend,
-                                extra_factors=extra_for_worker,
-                                state_window=state_window,
-                                reward_dd_penalty=float(cfg.get("reward_dd_penalty", 0.0)),
-                                reward_losing_penalty=float(cfg.get("reward_losing_penalty", 0.0)),
-                                reward_trend_align=float(cfg.get("reward_trend_align", 0.0)),
-                                tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
-                                participation_rate=float(cfg.get("participation_rate", 0.0)),
-                                funding_rate=float(cfg.get("funding_rate", 0.0)),
-                                precomputed_features=_precomputed_features)
         local_rng = np.random.default_rng(seed + ep_i * 1000 + worker_i)
+        if asset_pool is not None:
+            # 多标的：随机标的 × 随机时间窗切片（pool 内部线程安全，rng 独立）
+            sample = asset_pool.sample(local_rng)
+            from .multi_asset import make_worker_env
+            local_env = make_worker_env(sample, cfg, backend=backend)
+        else:
+            # 单标的：主标的完整训练段（旧路径，行为不变）
+            extra_for_worker = (extra_factors_all[:len(train_df)]
+                                if extra_factors_all is not None else None)
+            local_env = TradingEnv(train_df, start_cash=float(cfg.get("start_cash", 10000.0)),
+                                   fee_rate=float(cfg.get("fee_rate", 0.001)),
+                                   vol_penalty=vol_penalty, cost_scale=cost_scale,
+                                   slippage=slippage,
+                                   min_trade_zone=float(cfg.get("min_trade_zone", 0.05)),
+                                   backend=backend,
+                                   extra_factors=extra_for_worker,
+                                   state_window=state_window,
+                                   reward_dd_penalty=float(cfg.get("reward_dd_penalty", 0.0)),
+                                   reward_losing_penalty=float(cfg.get("reward_losing_penalty", 0.0)),
+                                   reward_trend_align=float(cfg.get("reward_trend_align", 0.0)),
+                                   tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
+                                   participation_rate=float(cfg.get("participation_rate", 0.0)),
+                                   funding_rate=float(cfg.get("funding_rate", 0.0)),
+                                   precomputed_features=_precomputed_features)
         return agent.collect_episode(local_env, rng=local_rng)
 
     pool = ThreadPoolExecutor(max_workers=min(n_episodes, 4))
@@ -1151,6 +1263,13 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     "mini_batch_size": mini_batch_size, "clip_eps": 0.2,
                     "factor_expression": factor_expr,
                     "replay": {"capacity": replay_capacity, "mix_ratio": replay_mix_ratio}},
+        # P0 多标的混合训练元数据（单标的训练时 extra_names=[] / multi_symbol=False）
+        "multi_symbol": bool(asset_pool is not None
+                             and asset_pool.extra_names),
+        "multi_extra_names": (list(asset_pool.extra_names)
+                              if asset_pool is not None else []),
+        "multi_mix_ratio": (asset_pool.extra_mix_ratio
+                            if asset_pool is not None else 0.0),
         "time_budget": time_budget,
         "factor_expression": factor_expr,
         "factor_mu": factor_mu,

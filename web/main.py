@@ -20,6 +20,26 @@ log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 TOKEN_FILE = Path(settings.data_dir) / "api_token.txt"
 
+# 静态文件后缀 → media type（vendor 预压缩伺服用）
+_VENDOR_MEDIA = {
+    ".js": "text/javascript",
+    ".css": "text/css",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".html": "text/html",
+}
+
+
+def _accepts_gzip(request: Request) -> bool:
+    """客户端是否声明支持 gzip（与 GZipMiddleware 的协商一致）。"""
+    return "gzip" in request.headers.get("accept-encoding", "")
+
+
+def _media_type_for(suffix: str) -> str:
+    return _VENDOR_MEDIA.get(suffix.lower(), "application/octet-stream")
+
 
 def _load_or_create_token() -> str:
     """API 令牌：.env 配置优先；否则持久化到 data/api_token.txt（重启复用）。
@@ -170,23 +190,37 @@ async def health():
 @app.get("/")
 async def index():
     # no-cache：浏览器每次 revalidate（etag/304，代价极低），确保前端页面始终是最新版——
-    # 曾因浏览器沿用旧缓存页面，出现"新功能不生效/点击无反应"的用户环境问题
+    # 曾因浏览器沿用旧缓存页面，出现"新功能不生效/点击无反应"的用户环境问题。
+    # 注：index.html 不做预压缩伺服（no-cache + 并行编辑频繁，.gz 同步有陈旧风险），
+    # 由 GZipMiddleware 兜底（单次压缩 ~14ms，可接受）。预压缩仅用于 immutable vendor。
     return FileResponse(STATIC_DIR / "index.html",
                         headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/static/vendor/{filename}")
-async def vendor_file(filename: str):
+async def vendor_file(filename: str, request: Request):
     """vendor/ 第三方库（echarts/tailwind/vue）内容不可变：immutable 长缓存。
 
     与 /static mount 的路由优先级：本路由先于 app.mount 注册，FastAPI 按
     注册顺序匹配，vendor 请求命中此处、其余静态资源落到 mount。
     内容变更时改文件名或升级库版本即可（文件路径变 → 新缓存键）。
+    第十五轮：对 gzip 客户端伺服 <file>.gz 预压缩副本（precompress_static.py 生成），
+    消除 GZipMiddleware 每次重复压缩（vendor immutable 缓存一年但多 worker/多用户
+    每次仍实时 gzip，实测并发延迟 85% 来自重复压缩）。
     """
-    path = (STATIC_DIR / "vendor" / filename).resolve()
-    if not str(path).startswith(str((STATIC_DIR / "vendor").resolve())) or not path.is_file():
+    base = (STATIC_DIR / "vendor" / filename).resolve()
+    vdir = (STATIC_DIR / "vendor").resolve()
+    if not str(base).startswith(str(vdir)) or not base.is_file():
         raise HTTPException(status_code=404, detail="vendor 文件不存在")
-    return FileResponse(path, headers={
+    if _accepts_gzip(request):
+        gz = base.with_suffix(base.suffix + ".gz")
+        if gz.is_file() and gz.stat().st_mtime >= base.stat().st_mtime:
+            media = _media_type_for(base.suffix)
+            return FileResponse(gz, media_type=media,
+                                headers={"Cache-Control": "public, max-age=31536000, immutable",
+                                         "Content-Encoding": "gzip",
+                                         "Vary": "Accept-Encoding"})
+    return FileResponse(base, headers={
         "Cache-Control": "public, max-age=31536000, immutable",
     })
 

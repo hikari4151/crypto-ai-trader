@@ -26,7 +26,7 @@
 |---|---|---|
 | 编译检查 | `.venv\Scripts\python -m compileall -q ai backtest core drl engine exchange factors indicators net strategies web config scripts run.py` | ✅ |
 | 测试 | `.venv\Scripts\python -m pytest -q` | ✅ **全部通过**（2026-09-27 实测：收集 **1020** 例 / 快路径 `-m "not slow"` 亦全绿；数量以"全绿"为准，不要写死——用 `pytest --collect-only -q | 求和` 复核） |
-| 前端 JS 语法 | `.venv\Scripts\python scripts\check_js.py` | ✅（esprima，本机无 node） |
+| 前端 JS 语法 | `.venv\Scripts\python scripts\check_js.py` | ✅（esprima/无 node 回退；**第十六轮起含 Vue 模板表达式检查**——`:class="{fr-hidden:...}"` 这类未加引号的连字符 key 会在此拦截，防整页白屏） |
 | 双引擎一致性 | `.venv\Scripts\python run.py backtest --source demo --strategy dual_ma` | **ret=-0.206239 / trades=37 / final_equity=7937.6077** |
 
 **基线变更纪律**：

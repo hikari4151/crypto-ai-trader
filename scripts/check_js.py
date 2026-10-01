@@ -21,6 +21,7 @@ in-DOM 模板里 {{...}} 与 :xxx="..." / v-xxx="..." 的表达式逐条 node �
 默认检查 web/static/index.html 的全部内联脚本 + Vue 模板表达式。
 退出码 0=全部通过；1=存在语法错误。作为提交前验证链的一环。
 """
+import json
 import re
 import shutil
 import subprocess
@@ -172,21 +173,30 @@ def check_vue_template_exprs(name: str, text: str) -> list[str]:
             exprs.append((e, _line_no(tpl, mm.start())))
     if not exprs:
         return []
-    # 一次 node 调用检查全部表达式（逐条 new Function，报错即停止该条）
+    # 一次 node 调用，逐条独立 new Function 构造：
+    # - 构造失败 = 编译期语法错误（如 {fr-hidden:...} 的 Unexpected token '-'）→ 精确报；
+    # - 构造成功但运行抛 ReferenceError/TypeError = 引用 setup 作用域变量（合法）→ 跳过。
+    # 不能合并成一个程序：语法错误在整体构造时抛 SyntaxError，无法定位到具体表达式。
     src_lines = []
     for idx, (e, _ln) in enumerate(exprs):
-        src_lines.append(f"const __e{idx} = (function(){{ try {{ return ({e}); }} catch (err) {{ "
-                         f"console.log('EXPR_FAIL|{idx}|' + err.message); }} }})();")
+        e_js = json.dumps(e)  # 安全嵌入（含引号/换行）
+        src_lines.append(
+            f"try {{ const __f{idx} = new Function('return (' + {e_js} + ')'); "
+            f"__f{idx}(); }} "
+            f"catch (err) {{ if (err instanceof SyntaxError) "
+            f"console.log('EXPR_FAIL|{idx}|' + err.message); }}"
+        )
     prog = "\n".join(src_lines)
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
         f.write(prog)
         path = f.name
     try:
         r = subprocess.run([_NODE, path], capture_output=True, text=True,
-                           timeout=60, encoding="utf-8", errors="replace")
+                           timeout=120, encoding="utf-8", errors="replace")
     finally:
         Path(path).unlink(missing_ok=True)
-    # 解析失败标记
+    # 只报编译期语法错误（SyntaxError）。运行期引用错误（is not defined 等）
+    # 不报——Vue 表达式可引用 setup 作用域变量（如 liveStatus），独立执行看不到。
     failed = []
     for line in r.stdout.splitlines():
         if line.startswith("EXPR_FAIL|"):

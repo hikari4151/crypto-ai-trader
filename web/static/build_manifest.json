@@ -2,7 +2,7 @@
  "file": "web\\static\\index.html",
  "size_bytes": 642552,
  "sha256": "5237343b3e4cfa36cf8cf10ad48751d6b7e9e37a10c33d3a2787331b819f5eef",
- "mtime_utc": "2026-10-01T03:26:21Z",
+ "mtime_utc": "2026-10-01T03:58:45Z",
  "scripts": 5,
  "style_blocks": 1,
  "checks": {
@@ -16,5 +16,5 @@
   "静态引用 # i-lock 未在文档中找到 id（可能是模板条件渲染，仅警告）",
   "静态引用 # i-warn 未在文档中找到 id（可能是模板条件渲染，仅警告）"
  ],
- "built_at": "2026-10-01T03:50:46Z"
+ "built_at": "2026-10-01T04:00:51Z"
 }

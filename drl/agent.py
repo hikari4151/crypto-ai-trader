@@ -24,6 +24,24 @@ import numpy as np
 from .env import ACTION_BUCKETS, ACTION_NAMES, TradingEnv, run_episode, _precompute_features
 from .nnet import MLP, _log_softmax
 
+
+def _resolve_collect_workers(n_episodes: int, cfg_workers: int = 0) -> int:
+    """解析并行收集线程数（P0 并行采样上量）。
+
+    背景（2026-10）：并行收集的 worker 上限此前硬编码 min(n_episodes, 4)，
+    是经验规模的吞吐瓶颈——n_episodes 提到 16/32 时仍只有 4 条同时在跑。
+    本函数按配置 + CPU 核数解析实际线程数：
+    - cfg_workers > 0：显式指定（夹到 [1, n_episodes]）
+    - cfg_workers <= 0：自动——min(n_episodes, max(4, cpu_count))，
+      至少 4 个（短数据上也有并行收益），不超 n_episodes（不造空线程），
+      不超物理核数（超线程并行收益递减且抢内存带宽）。
+    """
+    n_episodes = max(1, int(n_episodes))
+    if cfg_workers is not None and int(cfg_workers) > 0:
+        return max(1, min(n_episodes, int(cfg_workers)))
+    n_cpu = os.cpu_count() or 4
+    return max(1, min(n_episodes, max(4, n_cpu)))
+
 log = logging.getLogger(__name__)
 
 
@@ -181,17 +199,35 @@ class ACAgent:
     """Actor-Critic 智能体（REINFORCE with baseline）。"""
 
     def __init__(self, state_dim: int, n_actions: int,
-                 hidden: tuple[int, int] = (32, 32),
+                 hidden: tuple[int, ...] = (32, 32),
                  lr_actor: float = 1e-3, lr_critic: float = 3e-3,
                  gamma: float = 0.99, seed: Optional[int] = None,
                  entropy_coef: float = 0.01,
-                 state_window: int = 1) -> None:
+                 state_window: int = 1,
+                 backbone: str = "mlp",
+                 gru_hidden: int = 32) -> None:
         self.state_dim = state_dim
         self.n_actions = n_actions
         # 状态窗口：训练时环境的特征堆叠数（部署时 rl_adaptive 必须用同一窗口重建状态）
         self.state_window = max(1, int(state_window))
-        dims = [state_dim, *hidden, n_actions]
-        self.actor = MLP(dims, seed=seed, lr=lr_actor)
+        self.backbone = backbone if backbone in ("mlp", "gru") else "mlp"
+        # P1 时序网络升级：backbone="gru" 时 actor 用 GRU 序列编码（GRUActor），
+        # 突破 MLP 的"只看最近 N 根各自孤立"——学到形态/惯性等跨帧模式。
+        # GRU 只替换 actor 输入编码（输出 5 档 softmax 不变）；critic 保持
+        # MLP（价值预测无时序强需求，且保持简单）。GRU actor 无法直接导出
+        # Pine，但蒸馏路径（P2）把 GRU teacher 压成 MLP student 供 TradingView。
+        if self.backbone == "gru":
+            from .nnet_temporal import GRUActor
+            self.actor = GRUActor(state_dim, n_actions,
+                                  state_window=self.state_window,
+                                  gru_hidden=int(gru_hidden),
+                                  head_hidden=tuple(hidden),
+                                  seed=seed, lr=lr_actor)
+            self._gru_hidden = int(gru_hidden)
+        else:
+            dims = [state_dim, *hidden, n_actions]
+            self.actor = MLP(dims, seed=seed, lr=lr_actor)
+            self._gru_hidden = 0
         self.critic = MLP([state_dim, *hidden, 1], seed=(seed or 0) + 1, lr=lr_critic)
         self.gamma = gamma
         self.entropy_coef = entropy_coef  # 熵正则：鼓励探索，防止过早收敛到单一动作
@@ -199,6 +235,13 @@ class ACAgent:
         self.epsilon_min = 0.05
         self.epsilon_decay = 0.999    # 乘法衰减（无 schedule 时兜底）
         self._rng = np.random.default_rng(seed)
+        # P2 蒸馏导出（Pine 体积门 × 网络容量）：可选的蒸馏小网络（student）。
+        # 大网络（self）用于软件内实盘；distill 装得进 Pine，供 TradingView
+        # 自动交易代码导出。None = 未蒸馏（teacher 本就可导出，向后兼容）。
+        self.distill: Optional["ACAgent"] = None
+        self.distill_meta: Optional[dict] = None
+        # 蒸馏标记：本 agent 是否为蒸馏版（student）。teacher 恒 False。
+        self.is_distilled = False
 
     def set_epsilon_schedule(self, episodes: int) -> None:
         """线性退火：从 1.0 → epsilon_min 在前 70% 训练轮内完成。
@@ -494,22 +537,49 @@ class ACAgent:
 
     # ---------- 序列化 ----------
     def to_dict(self) -> dict:
-        return {
+        d = {
             "state_dim": self.state_dim, "n_actions": self.n_actions,
             "gamma": self.gamma, "epsilon": self.epsilon,
             "entropy_coef": self.entropy_coef,
             "state_window": self.state_window,
+            "backbone": self.backbone,
+            "gru_hidden": int(getattr(self, "_gru_hidden", 0)),
             "actor": self.actor.to_dict(), "critic": self.critic.to_dict(),
+            # P2 蒸馏导出标记：该 agent 是否为蒸馏版（student）
+            "is_distilled": bool(getattr(self, "is_distilled", False)),
         }
+        # P2 蒸馏导出：student 随 teacher 一同序列化（distill 键）。
+        # 旧模型无该键 → from_dict 兜底 None，向后兼容。
+        if self.distill is not None:
+            d["distill_agent"] = self.distill.to_dict()
+            d["distill_meta"] = self.distill_meta or {}
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "ACAgent":
+        backbone = str(data.get("backbone", "mlp"))
+        gru_hidden = int(data.get("gru_hidden", 0) or 32)
         agent = cls(data["state_dim"], data["n_actions"], gamma=data.get("gamma", 0.99),
                     entropy_coef=float(data.get("entropy_coef", 0.01)),
-                    state_window=int(data.get("state_window", 1)))
-        agent.actor = MLP.from_dict(data["actor"], lr=agent.actor.lr)
+                    state_window=int(data.get("state_window", 1)),
+                    backbone=backbone, gru_hidden=gru_hidden)
+        if backbone == "gru" and data.get("actor", {}).get("type") == "gru":
+            from .nnet_temporal import GRUActor
+            agent.actor = GRUActor.from_dict(data["actor"], lr=agent.actor.lr)
+        else:
+            agent.actor = MLP.from_dict(data["actor"], lr=agent.actor.lr)
         agent.critic = MLP.from_dict(data["critic"], lr=agent.critic.lr)
         agent.epsilon = float(data.get("epsilon", 0.05))
+        # P2 蒸馏导出：恢复蒸馏标记与内嵌的 student（若存在）
+        if data.get("is_distilled"):
+            agent.is_distilled = True
+        if isinstance(data.get("distill_agent"), dict):
+            try:
+                agent.distill = cls.from_dict(data["distill_agent"])
+                agent.distill_meta = dict(data.get("distill_meta") or {})
+            except Exception:  # noqa: BLE001——蒸馏权重损坏不影响主模型加载
+                agent.distill = None
+                agent.distill_meta = None
         return agent
 
     def save(self, path: str) -> None:
@@ -560,6 +630,9 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     hidden = tuple(cfg.get("hidden", [32, 32]))
     # 每轮收集的轨迹数（批大小，A2C/PPO 标配：批量平均降方差）
     n_episodes = max(1, int(cfg.get("n_episodes", 4)))
+    # P0 并行采样上量：并行收集线程数（0=自动按 CPU 核数，见 _resolve_collect_workers）
+    collect_workers = int(cfg.get("collect_workers", 0) or 0)
+    n_collect_workers = _resolve_collect_workers(n_episodes, collect_workers)
     # PPO 多轮更新轮数（SB3 默认 10；小数据建议 3-5）
     ppo_epochs = max(1, int(cfg.get("ppo_epochs", 4)))
     mini_batch_size = max(8, int(cfg.get("mini_batch_size", 128)))
@@ -690,6 +763,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     extra_dfs = extra_dfs or {}
     extra_mix_ratio = float(cfg.get("extra_mix_ratio", 0.5))
     episode_window = int(cfg.get("episode_window", 0) or 0)
+    # P1 课程学习：训练早期只从低难度（低波动）窗口采样，随进度逐步放开。
+    # 默认关闭——不启用时采样行为与旧路径完全一致（向后兼容）。
+    curriculum = bool(cfg.get("curriculum", False))
+    curriculum_start = float(cfg.get("curriculum_start", 0.3))
     factor_builder = None
     if extra_dfs:
         # 跨标因子列构建器：主标的有因子列时，额外标的必须能重建同维度因子列
@@ -728,7 +805,7 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         elif factor_values is not None:
             log.warning("[drl] 多标的训练：主标的因子为预计算数组（无复算配方），"
                         "额外标的无法重建同维度因子列，本轮降级为单标的训练")
-    if extra_dfs:
+    if extra_dfs or curriculum:
         from .multi_asset import MultiAssetPool
         main_factors = (extra_factors_all[:len(train_df)].reshape(-1)
                         if extra_factors_all is not None else None)
@@ -737,13 +814,18 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                 train_df, _precomputed_features, main_factors=main_factors,
                 extra_dfs=extra_dfs, state_window=state_window, backend=backend,
                 factor_builder=factor_builder, window_len=episode_window,
-                extra_mix_ratio=extra_mix_ratio, log=log)
+                extra_mix_ratio=extra_mix_ratio,
+                curriculum=curriculum, curriculum_start=curriculum_start,
+                log=log)
             if asset_pool.extra_names:
                 log.info("[drl] 多标的混合训练已启用: 额外标的 %s (mix_ratio=%.2f, window=%d)",
                          asset_pool.extra_names, extra_mix_ratio, asset_pool.window_len)
             elif extra_dfs:
                 log.warning("[drl] 多标的混合训练：所有额外标的均被排除"
                             "（维度/长度不符），降级为单标的训练")
+            if curriculum:
+                log.info("[drl] 课程学习已启用: 起始难度分位=%.2f（训练早期只采样低波动段，"
+                         "随进度逐步放开）", curriculum_start)
         except Exception as e:  # noqa: BLE001
             log.warning("[drl] 多标的池构建失败，降级为单标的训练: %s", e)
             asset_pool = None
@@ -769,7 +851,9 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     lr_critic=float(cfg.get("lr_critic", 5e-3)),
                     gamma=float(cfg.get("gamma", 0.99)), seed=seed,
                     entropy_coef=float(cfg.get("entropy_coef", 0.05)),
-                    state_window=state_window)
+                    state_window=state_window,
+                    backbone=str(cfg.get("backbone", "mlp")),
+                    gru_hidden=int(cfg.get("gru_hidden", 32)))
     # 续训支持：两种起点（优先 base_agent，均为"在旧模型上继续学"）——
     # 1) base_agent：内存中的 ACAgent 对象（持续进化引擎用，已通过 zoo.load_agent
     #    加载，无需磁盘往返；必须 deepcopy 权重，否则训练会原地修改 best_agent，
@@ -910,8 +994,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         ep_i, worker_i = args
         local_rng = np.random.default_rng(seed + ep_i * 1000 + worker_i)
         if asset_pool is not None:
-            # 多标的：随机标的 × 随机时间窗切片（pool 内部线程安全，rng 独立）
-            sample = asset_pool.sample(local_rng)
+            # 多标的/课程学习：随机标的 × 随机时间窗切片（pool 内部线程安全，
+            # rng 独立）。课程模式把训练进度 frac 传给采样器，早期只采低难度段。
+            _frac = (ep_i / episodes) if curriculum else 1.0
+            sample = asset_pool.sample(local_rng, frac=_frac)
             from .multi_asset import make_worker_env
             local_env = make_worker_env(sample, cfg, backend=backend)
         else:
@@ -935,7 +1021,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                                    precomputed_features=_precomputed_features)
         return agent.collect_episode(local_env, rng=local_rng)
 
-    pool = ThreadPoolExecutor(max_workers=min(n_episodes, 4))
+    pool = ThreadPoolExecutor(max_workers=n_collect_workers)
+    if n_collect_workers > 4:
+        log.info("[drl] 并行收集上量: n_episodes=%d → %d 线程并行（自动按核数）",
+                 n_episodes, n_collect_workers)
     try:
         for ep in range(1, episodes + 1):
             # 时间预算：至少完成 1 轮后超时即提前收尾（保证 history 非空、best_agent 有值）
@@ -1238,6 +1327,20 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     _metrics = {"train_ret": round(best_train_ret, 4),
                 "oos_ret": round(oos_report.get("oos_ret", 0.0), 4) if oos_report.get("enabled") else "-",
                 "sharpe": round(oos_report.get("oos_sharpe", 0.0), 3) if oos_report.get("enabled") else "-"}
+    # ---- 蒸馏导出（Pine 体积门 × 网络容量的长期解） ----
+    # teacher（final_agent）负责软件内实盘；若它装不进 Pine（大网络/级联因子），
+    # 蒸馏一个可导出的小网络（student）专供 TradingView 自动交易代码。
+    # 配置：
+    #   distill: 是否启用蒸馏（默认 True——体积门拦截时自动蒸馏，不静默失败）
+    #   distill_hidden: student 网络（默认 [16,16]，实测可装进 Pine）
+    #   distill_epochs / distill_lr: 蒸馏训练超参
+    # teacher 本身可导出时跳过蒸馏（向后兼容，行为不变）。
+    distill_enabled = bool(cfg.get("distill", True))
+    distill_hidden = [int(h) for h in (cfg.get("distill_hidden") or [16, 16])]
+    distill_epochs = max(10, int(cfg.get("distill_epochs", 300)))
+    distill_lr = float(cfg.get("distill_lr", 5e-3))
+    distill_agent_obj = None   # student（可导出的小网络）
+    distill_meta = None
     if deployment_blocked:
         pine_code, pine_note = "", (oos_report.get("reason") or "OOS 硬门判定疑似过拟合，已拦截自动部署")
     else:
@@ -1245,6 +1348,35 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
             final_agent, str(cfg.get("name") or "rl_agent"),
             factor_expression=factor_expr, factor_mu=factor_mu, factor_sd=factor_sd,
             train_metrics=_metrics)
+        # teacher 装不进 Pine 且启用了蒸馏 → 蒸馏小网络再试导出
+        if not pine_code and distill_enabled:
+            try:
+                from .distill import distill_agent as _distill
+                from .pine_export import estimate_pine_bytes, PINE_MAX_BYTES
+                if estimate_pine_bytes(env.state_dim, distill_hidden,
+                                       len(ACTION_BUCKETS)) <= PINE_MAX_BYTES:
+                    log.info("[drl] teacher 装不进 Pine（%s），蒸馏小网络导出（hidden=%s）",
+                             pine_note[:60], distill_hidden)
+                    distill_agent_obj = _distill(
+                        final_agent, train_df, cfg,
+                        student_hidden=distill_hidden,
+                        epochs=distill_epochs, lr=distill_lr,
+                        seed=((int(seed) + 7) if seed is not None else 42))
+                    distill_meta = dict(getattr(distill_agent_obj, "distill_meta", {}))
+                    pine_code, pine_note = _build_drl_pine(
+                        distill_agent_obj, str(cfg.get("name") or "rl_agent"),
+                        factor_expression=factor_expr, factor_mu=factor_mu,
+                        factor_sd=factor_sd, train_metrics=_metrics)
+                    if pine_code:
+                        # 蒸馏版标记由 build_drl_pine 依据 is_distilled 自动写入
+                        # 头部（此处不再手动 replace——与模型文件重导路径同源）
+                        final_agent.distill = distill_agent_obj
+                        final_agent.distill_meta = distill_meta
+                        log.info("[drl] 蒸馏导出成功: Pine %d B（KL 收敛见日志）", len(pine_code))
+                    else:
+                        log.warning("[drl] 蒸馏后仍无法导出 Pine: %s", pine_note)
+            except Exception as e:  # noqa: BLE001
+                log.warning("[drl] 蒸馏失败（保持原不可导出状态）: %s", e)
 
     result = {
         "agent": final_agent,
@@ -1263,6 +1395,11 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     "mini_batch_size": mini_batch_size, "clip_eps": 0.2,
                     "factor_expression": factor_expr,
                     "replay": {"capacity": replay_capacity, "mix_ratio": replay_mix_ratio}},
+        # P0 并行采样上量：记录实际使用的并行线程数（诊断/审计可见）
+        "collect_workers": n_collect_workers,
+        # P1 课程学习：难度分层采样开关与起始难度分位（关闭时 False/0）
+        "curriculum": bool(curriculum),
+        "curriculum_start": round(curriculum_start, 4),
         # P0 多标的混合训练元数据（单标的训练时 extra_names=[] / multi_symbol=False）
         "multi_symbol": bool(asset_pool is not None
                              and asset_pool.extra_names),
@@ -1283,6 +1420,13 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         # D3：OOS 硬门触发时不产出 Pine（deployment_blocked=True），防止过拟合模型上线
         "pine_code": pine_code,
         "pine_note": pine_note,  # 装不进 Pine / 被拦截时的显式原因（供 UI 提示）
+        # 蒸馏导出（Pine 体积门解）：student 小网络（供 TradingView），
+        # teacher 仍为 final_agent（软件内实盘）。未蒸馏时 None。
+        # 也挂在 final_agent.distill 上随模型文件序列化（to_dict 持久化）。
+        "distill_agent": distill_agent_obj,
+        "distill_meta": distill_meta,
+        # UI/审计：本次训练是否实际走了蒸馏导出（大网络 → 小网络）
+        "distill_used": distill_agent_obj is not None,
         "deployment_blocked": deployment_blocked,  # D3：OOS 硬门状态
         "elapsed_sec": round(time.time() - t0, 2),
         "backend": backend,

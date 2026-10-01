@@ -128,12 +128,16 @@ def test_trainin_defaults():
 
 
 def test_trainin_other_defaults_unchanged():
-    """T2: Other fields unchanged (regression guard)."""
+    """T2: Other fields unchanged (regression guard).
+
+    注：hidden 默认已由 [64,64] 改为 [16,16]（Pine 导出修复：64 维必然超过
+    64KB 体积门，默认训练永远拿不到 Pine 自动交易代码）。
+    """
     from web.api.drl import TrainIn
     body = TrainIn()
     # Original defaults that should stay
     assert body.episodes == 80
-    assert body.hidden == [64, 64]
+    assert body.hidden == [16, 16]
     assert body.lr_actor == 0.004
     assert body.lr_critic == 0.01
     assert body.gamma == 0.99

@@ -33,7 +33,7 @@ _WARMUP = 60
 class _Asset:
     """单个标的的可训练资产：df + 预计算特征 + 可选因子列。"""
 
-    __slots__ = ("name", "df", "features", "factors")
+    __slots__ = ("name", "df", "features", "factors", "difficulty", "_diff_win")
 
     def __init__(self, name: str, df: pd.DataFrame, features: np.ndarray,
                  factors: Optional[np.ndarray]) -> None:
@@ -41,10 +41,46 @@ class _Asset:
         self.df = df
         self.features = features            # (n, feat_dim) 整段预计算
         self.factors = factors              # (n,) 或 None（长度 == n）
+        # 课程学习（P1）：各采样起点的窗口难度分位（[0,1]，0=最易/最低波动）。
+        # 惰性填充：sample() 需要时按 window_len 计算（成本 O(n log n) 一次）。
+        self.difficulty: Optional[np.ndarray] = None
 
     @property
     def n(self) -> int:
         return len(self.df)
+
+    def difficulty_ranks(self, window_len: int, rng_seed: int = 0) -> np.ndarray:
+        """各采样起点的窗口难度分位（长度 = n - win + 1，与起点一一对应）。
+
+        难度 = 窗口内 vol_5（特征矩阵第 4 列，5期已实现波动率，tanh 压缩）的
+        均值——低波动段（趋势清晰、奖励信号强）= 简单，高波动段 = 难。
+        用分位（argsort rank / max(1,n-1)）归一化到 [0,1]，跨标的可比
+        （"该窗口在本标的历史中属于前百分之几的难度"）。
+
+        window_len: 当前采样窗口长度。缓存按 window_len 区分（配置不变则
+        只需算一次；多线程下重复计算无害——纯只读，结果确定）。
+        """
+        win = max(1, int(window_len))
+        cached = self.difficulty
+        if cached is not None and cached.shape[0] == max(0, self.n - win + 1) \
+                and getattr(self, "_diff_win", None) == win:
+            return cached
+        n = self.n
+        if n < win:
+            arr: np.ndarray = np.zeros(1, dtype=float)
+            self.difficulty = arr
+            self._diff_win = win
+            return arr
+        vol = self.features[:, 4]  # _VOL_IDX=4：vol_5（tanh 压缩，单调→分位等价）
+        view = np.lib.stride_tricks.sliding_window_view(vol, win)
+        diff = view.mean(axis=1)                    # (n-win+1,)
+        order = np.argsort(diff, kind="stable")
+        ranks = np.empty_like(order, dtype=float)
+        ranks[order] = np.arange(len(order), dtype=float)
+        ranks /= max(1, len(ranks) - 1)             # [0,1]
+        self.difficulty = ranks
+        self._diff_win = win
+        return ranks
 
 
 class MultiAssetPool:
@@ -67,6 +103,8 @@ class MultiAssetPool:
                  factor_builder: Optional[Callable[[pd.DataFrame], Optional[np.ndarray]]] = None,
                  window_len: int = 0,
                  extra_mix_ratio: float = 0.5,
+                 curriculum: bool = False,
+                 curriculum_start: float = 0.3,
                  log=None) -> None:
         """构造标的池。
 
@@ -86,6 +124,11 @@ class MultiAssetPool:
                 （此时带因子的主标的将降级为单标的训练，见 train_drl）
             window_len: episode 切片长度（0=自动取主标的训练段长度）
             extra_mix_ratio: 轨迹来自额外标的的概率（0=只用主标的，1=只用额外）
+            curriculum: P1 课程学习——训练早期只从低难度（低波动）窗口采样，
+                随进度（sample 的 frac 参数）逐步放开高波动段。False=关闭
+                （采样行为与旧路径完全一致）。
+            curriculum_start: 课程起始难度分位（0=只采最易窗口，1=不限制）。
+                训练进度 frac 从 0→1 时，允许难度 = start + (1-start)*frac。
             log: 日志器（缺省静默）
         """
         self._log = log
@@ -93,6 +136,10 @@ class MultiAssetPool:
         self.backend = backend
         self.factor_composite = dict(factor_composite or {}) or None
         self.factor_builder = factor_builder
+        # P1 课程学习：钳到 [0,1]；curriculum_start>=1 视为关闭（不限制难度）
+        self.curriculum = bool(curriculum)
+        self.curriculum_start = float(min(1.0, max(0.0, curriculum_start)))
+        self._curriculum_on = bool(self.curriculum and self.curriculum_start < 1.0)
         # episode 窗口长度：主标的训练段长度（与旧单标的行为一致——主标的跑整段）
         self._main_len = len(main_df)
         if window_len and window_len > 0:
@@ -181,7 +228,20 @@ class MultiAssetPool:
 
     # ---- 采样 ----
 
-    def sample(self, rng: np.random.Generator) -> dict:
+    def _allowed_difficulty(self, frac: float) -> float:
+        """课程当前允许的最大窗口难度分位（frac∈[0,1] 为训练进度）。
+
+        线性课程：允许难度 = curriculum_start + (1 - curriculum_start) * frac。
+        - frac=0（训练刚开始）：只允许最低 curriculum_start 分位的窗口
+        - frac=1（训练尾声）：放开全部（难度 1.0 = 不限）
+        curriculum 关闭时恒返回 1.0（不限制，与旧路径一致）。
+        """
+        if not self._curriculum_on:
+            return 1.0
+        frac = float(min(1.0, max(0.0, frac)))
+        return self.curriculum_start + (1.0 - self.curriculum_start) * frac
+
+    def sample(self, rng: np.random.Generator, frac: float = 1.0) -> dict:
         """随机采样一个 episode 的训练切片。
 
         分布：
@@ -189,8 +249,12 @@ class MultiAssetPool:
           （单标的模式：额外标的列表为空 → 恒主标的，与旧行为一致）
         - 在所选标的的数据范围内随机起点取 window_len 长的切片
           （标的数据不足 window_len 时取整段，起点为 0）
+        - P1 课程学习：curriculum 开启且未到全放开阶段时，只从难度分位
+          ≤ _allowed_difficulty(frac) 的起点里采样（拒绝采样，最多重试
+          20 次，超限退回最低难度窗口——保证始终返回合法切片）。
 
         rng: per-worker 独立随机源（保证 seed 可复现、线程安全）。
+        frac: 训练进度 [0,1]（课程难度放开用；关闭时忽略）。
         返回 dict: {df_slice, features_slice, factors_slice, name, start, window_len}
         """
         usable = self._usable  # 已通过最小K线数守卫的标的
@@ -207,7 +271,26 @@ class MultiAssetPool:
         win = min(self.window_len, n)
         # 数据不足最小可学长度时用整段（起点 0）；否则随机起点
         max_start = max(0, n - win)
-        start = int(rng.integers(0, max_start + 1)) if max_start > 0 else 0
+        allowed = self._allowed_difficulty(frac)
+
+        start = 0
+        if max_start > 0:
+            if self._curriculum_on and allowed < 1.0:
+                # 课程拒绝采样：在难度分位 ≤ allowed 的起点里随机挑
+                ranks = asset.difficulty_ranks(win)
+                # 候选起点索引（rank 数组与起点一一对应）
+                feasible = np.nonzero(ranks[:max_start + 1] <= allowed)[0]
+                for _ in range(20):
+                    if feasible.size > 0:
+                        start = int(feasible[rng.integers(0, feasible.size)])
+                        break
+                    # 重试期窗口全被拒（罕见：数据整段高波动）→ 取最低难度
+                    start = int(np.argmin(ranks[:max_start + 1]))
+                    break
+                else:
+                    start = int(np.argmin(ranks[:max_start + 1]))
+            else:
+                start = int(rng.integers(0, max_start + 1))
 
         df_slice = asset.df.iloc[start:start + win]
         features_slice = asset.features[start:start + win]
@@ -242,13 +325,16 @@ def build_pool(main_df: pd.DataFrame, main_features: np.ndarray,
                factor_composite: Optional[dict] = None,
                window_len: int = 0,
                extra_mix_ratio: float = 0.5,
+               curriculum: bool = False,
+               curriculum_start: float = 0.3,
                log=None) -> MultiAssetPool:
     """便捷构造：main_features 可由调用方预计算（主标的复用旧路径特征）。"""
     return MultiAssetPool(
         main_df, main_features, extra_dfs=extra_dfs, extra_assets=extra_assets,
         state_window=state_window, backend=backend,
         factor_composite=factor_composite, window_len=window_len,
-        extra_mix_ratio=extra_mix_ratio, log=log)
+        extra_mix_ratio=extra_mix_ratio, curriculum=curriculum,
+        curriculum_start=curriculum_start, log=log)
 
 
 def _build_composite_factor(df: pd.DataFrame, weights: dict) -> Optional[np.ndarray]:

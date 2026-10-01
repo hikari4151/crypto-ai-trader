@@ -208,6 +208,15 @@ def build_drl_pine(agent, model_name: str = "rl_agent",
     Raises:
         PineExportError: 模型装不进 Pine（体积超限）或因子表达式不可翻译
     """
+    # P1 时序骨干（GRU）：无法直接内联为 Pine 前向（循环单元需逐步状态维护，
+    # TradingView 无法逐根重建 GRU 隐藏态）。给出明确原因而非 AttributeError——
+    # 训练端会走蒸馏路径（大网络/GRU teacher → MLP student）导出可运行代码。
+    if not hasattr(agent.actor, "W"):
+        arch = str(getattr(agent, "backbone", "gru"))
+        raise PineExportError(
+            f"模型无法直接导出 Pine：actor 为时序骨干（{arch}），Pine 无法逐根重建"
+            "GRU 隐藏状态。请通过蒸馏导出——训练时启用 distill（默认开启），"
+            "系统会把大网络蒸馏成可导出的 MLP 小网络（软件内实盘仍用本模型）。")
     W = agent.actor.W
     b = agent.actor.b
     in_dim = int(W[0].shape[0])
@@ -250,6 +259,10 @@ def build_drl_pine(agent, model_name: str = "rl_agent",
     push("//@version=5")
     push("// ╔════════════════════════════════════════════════════════════════╗")
     push(f"//  DRL 神经引擎自动交易 · {model_name}")
+    # 蒸馏版标记：大网络（teacher）用于软件内实盘，Pine 运行此近似版
+    if getattr(agent, "is_distilled", False):
+        push("//  【蒸馏版】— 由大网络（软件内实盘模型）蒸馏而来，行为近似而非完全相同；")
+        push("//   权重为本软件 DRL 训练后离线蒸馏固化。")
     push(f"//  {in_dim} 维状态（13 价量 × {state_window} 窗口 + {N_ACCOUNT_FEATURES} 账户"
          + (" + 1 因子" if has_factor else "") + f"）→ {n_actions} 档目标仓位")
     push("//  权重由本软件 DRL 训练固化，可直接粘贴到 TradingView Pine 编辑器")
@@ -371,6 +384,11 @@ def export_pine_from_model(model_path, model_name: str = "rl_agent") -> tuple[st
     注册策略时统一走这里，而不是复用训练返回值里的 pine_code：模型文件才是
     部署端/回测端实际运行的那份权重（回退、重启恢复、切换模型都只改文件），
     从它导出才能保证图上的买卖点与真实行为同源。
+
+    P2（Pine 体积门 × 网络容量）：模型文件可能同时含大网络（teacher，软件内
+    实盘）与蒸馏小网络（distill_agent，装得进 Pine）。优先从 distill_agent
+    导出（否则大网络必然超 64KB 体积门）；无蒸馏（teacher 本就可导出）时
+    直接从 teacher 导出——两种路径都是「部署一致」的。
     """
     import json as _json
     import os
@@ -381,13 +399,22 @@ def export_pine_from_model(model_path, model_name: str = "rl_agent") -> tuple[st
         with open(path, "r", encoding="utf-8") as f:
             data = _json.load(f)
         from .agent import ACAgent      # 延迟导入：避免与 drl.agent 循环依赖
-        agent = ACAgent.from_dict(data)
+        # 蒸馏优先：ACAgent.from_dict 已恢复内嵌的 distill（若模型文件由
+        # to_dict 保存，distill_agent 键在 agent.distill 上；兼容旧格式的
+        # 顶层 distill_agent 键也处理）。大网络（teacher）用于软件内实盘，
+        # 装不进 Pine，故导出用蒸馏小网络。
+        if isinstance(data.get("distill_agent"), dict):
+            export_agent = ACAgent.from_dict(data["distill_agent"])
+        else:
+            base_agent = ACAgent.from_dict(data)
+            dist = getattr(base_agent, "distill", None)
+            export_agent = dist if dist is not None else base_agent
     except Exception as e:  # noqa: BLE001
         return "", f"模型文件读取失败，无法导出 Pine：{e}"
     _tm = data.get("train_meta") or {}
     _oos = _tm.get("oos_report") or {}
     return try_build_drl_pine(
-        agent, model_name=model_name,
+        export_agent, model_name=model_name,
         factor_expression=str(data.get("factor_expression") or ""),
         factor_mu=float(data.get("factor_mu") or 0.0),
         factor_sd=float(data.get("factor_sd") or 1.0),

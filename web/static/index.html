@@ -643,6 +643,11 @@
   .pill.orange{background:var(--orange-soft);color:var(--orange-text)}
   .pill.purple{background:var(--purple-soft);color:var(--purple-text)}
   .pill.red{background:var(--red-soft);color:var(--red-text)}
+  /* P0 多标的混合训练/课程学习：分组旁的小徽标（不占新行） */
+  .drl-multi-badge{display:inline-block;margin-left:8px;padding:0 7px;height:18px;line-height:18px;border-radius:4px;font-size:var(--fs-caption);font-weight:600;background:var(--green-soft);color:var(--green-text);vertical-align:middle}
+  /* 课程学习未开启时隐藏"起始难度"输入（条件 class）：双类选择器特异性
+     高于 .mac-field-row 的 display:grid，无需优先级强制关键字（E7 红线限定数量） */
+  .mac-field-row.fr-hidden{display:none}
   .pill svg{width:11px;height:11px;flex:none}
   .divider{height:1px;background:var(--border);margin:16px 0}
   ::-webkit-scrollbar{width:8px;height:8px}
@@ -3879,8 +3884,56 @@
               <div class="fr-ctrl"><input id="drlEarlyStop" v-model.number="drlCfg.early_stop_patience" class="mac-input" type="number" min="0"/><span class="fr-unit">次</span></div>
             </div>
             <div class="mac-field-row">
-              <label class="fr-label" for="drlHidden" title="隐藏层维度（逗号分隔，如 32,32）。注意：超过约 [16,16] 的模型装不进 TradingView Pine 脚本（体积门 64KB），只能软件内运行、无法导出 Pine 自动交易代码">网络大小</label>
+              <label class="fr-label" for="drlHidden" title="隐藏层维度（逗号分隔，如 32,32）。超过 [16,16] 的大网络会自动蒸馏成可导出 Pine 的小网络（见下）">网络大小</label>
               <div class="fr-ctrl"><input id="drlHidden" v-model="drlCfg.hidden_text" class="mac-input" type="text" placeholder="16,16（装得进 Pine）"/></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlBackbone" title="actor 骨干：mlp=展平窗口向量（默认，向后兼容）；gru=GRU 序列编码（把窗口内 K 线建模为时序，学到形态/惯性等跨帧模式，能力更强）。GRU 由系统自动蒸馏成 MLP 小网络供 Pine 导出">网络骨干</label>
+              <div class="fr-ctrl">
+                <select id="drlBackbone" v-model="drlCfg.backbone" class="mac-input" style="padding:4px 8px">
+                  <option value="mlp">MLP（默认）</option>
+                  <option value="gru">GRU 时序</option>
+                </select>
+                <span class="fr-unit" v-if="drlCfg.backbone==='gru'">隐层 <input v-model.number="drlCfg.gru_hidden" class="mac-input" type="number" min="4" max="256" style="width:56px;padding:2px 6px"/></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="fr-group fr-span">蒸馏导出<span class="drl-multi-badge" v-if="drlCfg.distill" title="大网络自动蒸馏成可导出 Pine 的小网络：能力与导出两全">已启用</span></div>
+          <div class="fr-grid">
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlDistill" title="大网络（如 [64,64]）装不进 Pine 时自动蒸馏出 [16,16] 小网络用于 TradingView 导出；软件内实盘仍用大网络。关闭则大网络只能软件内运行">蒸馏导出</label>
+              <div class="fr-ctrl">
+                <div id="drlDistill" class="mac-toggle" role="switch" aria-label="DRL 蒸馏导出" :aria-checked="drlCfg.distill?true:false" tabindex="0" :class="drlCfg.distill?'on':''" @click="drlCfg.distill=!drlCfg.distill" @keydown.enter.prevent="drlCfg.distill=!drlCfg.distill" @keydown.space.prevent="drlCfg.distill=!drlCfg.distill"></div>
+                <span class="text-[length:var(--fs-caption)]" :class="drlCfg.distill?'pos':'text-slate-500'">{{drlCfg.distill?'已启用':'已关闭'}}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="fr-group fr-span">多标的混合训练<span class="drl-multi-badge" v-if="drlCfg.extra_symbols.length" title="经验广度：每个 episode 随机选额外标的×随机时间窗切片，网络共享">已启用</span></div>
+          <div class="fr-grid">
+            <div class="mac-field-row fr-span">
+              <label class="fr-label" for="drlExtraSymbols" title="逗号分隔的额外标的名（如 ETH/USDT,SOL/USDT）。训练时随机采样它们的行情作为额外经验，val/OOS/部署仍以主标为准">额外标的</label>
+              <div class="fr-ctrl"><input id="drlExtraSymbols" v-model="drlCfg.extra_symbols_text" class="mac-input" type="text" placeholder="ETH/USDT, SOL/USDT（留空=单标的训练）"/></div>
+            </div>
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlExtraMix" title="每条轨迹来自额外标的的概率，0=只用主标的 1=只用额外标的">混合比例</label>
+              <div class="fr-ctrl"><input id="drlExtraMix" v-model.number="drlCfg.extra_mix_ratio" class="mac-input" type="number" min="0" max="1" step="0.1"/></div>
+            </div>
+          </div>
+
+          <div class="fr-group fr-span">课程学习<span class="drl-multi-badge" v-if="drlCfg.curriculum" title="先易后难：早期只采低波动段，随进度放开高波动段">已启用</span></div>
+          <div class="fr-grid">
+            <div class="mac-field-row">
+              <label class="fr-label" for="drlCurriculum" title="训练早期只从低难度（低波动/趋势清晰）窗口采样，随进度逐步放开高波动段——先学何时持仓，再学何时降仓">课程学习</label>
+              <div class="fr-ctrl">
+                <div id="drlCurriculum" class="mac-toggle" role="switch" aria-label="DRL 课程学习" :aria-checked="drlCfg.curriculum?true:false" tabindex="0" :class="drlCfg.curriculum?'on':''" @click="drlCfg.curriculum=!drlCfg.curriculum" @keydown.enter.prevent="drlCfg.curriculum=!drlCfg.curriculum" @keydown.space.prevent="drlCfg.curriculum=!drlCfg.curriculum"></div>
+                <span class="text-[length:var(--fs-caption)]" :class="drlCfg.curriculum?'pos':'text-slate-500'">{{drlCfg.curriculum?'已启用':'已关闭'}}</span>
+              </div>
+            </div>
+            <div class="mac-field-row" :class="{'fr-hidden':!drlCfg.curriculum}">
+              <label class="fr-label" for="drlCurrStart" title="课程起始难度分位：0=只采最易窗口（最保守），1=不限制">起始难度</label>
+              <div class="fr-ctrl"><input id="drlCurrStart" v-model.number="drlCfg.curriculum_start" class="mac-input" type="number" min="0" max="1" step="0.05"/><span class="fr-unit">分位</span></div>
             </div>
           </div>
 
@@ -3972,6 +4025,12 @@
               <span class="pill green">最优收益 {{drlTrain.best_ret?.toFixed(4)}}</span>
               <span class="pill blue">模型 {{drlTrain.model_name}}</span>
               <span class="pill" :class="drlTrain.backend==='cupy'?'green':'orange'">{{drlTrain.backend==='cupy'?' GPU':'CPU'}}</span>
+              <span v-if="drlTrain.multi_extra_names?.length" class="pill blue" title="多标的混合训练：额外经验标的">多标×{{drlTrain.multi_extra_names.length}}</span>
+              <span v-if="drlTrain.collect_workers > 4" class="pill orange" title="并行收集线程数（经验规模上量）">{{drlTrain.collect_workers}}×线程</span>
+              <span v-if="drlTrain.curriculum" class="pill purple" title="课程学习：先易后难难度分层采样">课程</span>
+              <span v-if="drlTrain.distill_used" class="pill purple" title="蒸馏导出：大网络(软件内实盘)蒸馏出小网络供 TradingView，见 Pine 代码头部说明">蒸馏导出</span>
+              <span v-if="drlTrain.backbone==='gru'" class="pill purple" title="GRU 时序骨干：窗口内 K 线建模为时序（跨帧形态/惯性）">GRU</span>
+              <span v-if="drlTrain.pine_code" class="pill green" title="可导出 TradingView Pine 自动交易代码">Pine✓</span>
               <span class="text-[length:var(--fs-caption)] text-slate-500">耗时 {{drlTrain.elapsed_sec}}s</span>
             </div>
             <div v-if="drlTrain.error" class="text-[length:var(--fs-caption)] text-red-400 mt-1 flex items-center gap-1"><svg width="12" height="12" style="flex:none"><use href="#i-alert"/></svg>{{drlTrain.error}}</div>
@@ -4844,8 +4903,11 @@ const app = createApp({
     const xsSelected = ref('xs_mom');
     const synthResult = ref(null);
     const drlCfg = reactive({episodes:300, limit:1200, vol_penalty:20, entropy_coef:0.05, lr_actor:0.002, lr_critic:0.005, gamma:0.99, start_cash:10000, use_gpu:false, base_model:'', force_train:false, early_stop_patience:0,
-                           reward_dd_penalty:0.5, reward_losing_penalty:0.2, reward_trend_align:0.1, reward_val_gap_penalty:0.5});
-    const drlTrain = reactive({running:false, done:false, episode:0, episodes:0, total_ret:null, best_ret:null, epsilon:null, policy_loss:null, model_name:'', error:'', history:[], elapsed_sec:null, backend:'numpy', pine_code:'', pine_note:''});
+                           reward_dd_penalty:0.5, reward_losing_penalty:0.2, reward_trend_align:0.1, reward_val_gap_penalty:0.5,
+                           hidden_text:'16,16', extra_symbols_text:'', extra_mix_ratio:0.5,
+                           collect_workers:0, curriculum:false, curriculum_start:0.3, distill:true,
+                           backbone:'mlp', gru_hidden:32});
+    const drlTrain = reactive({running:false, done:false, episode:0, episodes:0, total_ret:null, best_ret:null, epsilon:null, policy_loss:null, model_name:'', error:'', history:[], elapsed_sec:null, backend:'numpy', pine_code:'', pine_note:'', multi_extra_names:[], collect_workers:0, curriculum:false, distill_used:false, backbone:'mlp'});
     const drlPineOpen = ref(false);
     // DRL 模式：strategy=训练自适应策略（传统）/ factor=RL 因子组合挖掘
     const drlMode = ref('factor');
@@ -4858,6 +4920,15 @@ const app = createApp({
     // 故此处只列真实模型，避免空值选项被 label 逻辑判为「未选中」而降级成 placeholder 重复显示。
     const drlBaseModelOptions = computed(()=> (drlModels.value || []).map(m => ({v: m.path, l: m.name})));
     const drlOosModelOptions = computed(()=> (drlModels.value || []).map(m => ({v: m.name, l: m.name})));
+    // 网络大小：逗号分隔解析为数组（去空、钳每层 4-512）
+    const drlHidden = computed(()=> {
+      const raw = (drlCfg.hidden_text||'16,16').split(',').map(s=>parseInt(s.trim(),10)).filter(n=>Number.isFinite(n)&&n>=4&&n<=512);
+      return raw.length? raw.slice(0,4) : [16,16];
+    });
+    // P0 多标的混合训练（经验广度）：把逗号分隔的额外标的名解析为数组（去空、去重）
+    const drlExtraSymbols = computed(()=>
+      (drlCfg.extra_symbols_text||'').split(',').map(s=>s.trim()).filter(Boolean)
+        .filter((v,i,a)=>a.indexOf(v)===i));
     const drlEvalResult = ref(null);
     const drlCurveShown = ref(false);
     const drlOos = reactive({model:'', data_source:'demo', symbol:'BTC/USDT', timeframe:'4h',
@@ -7920,7 +7991,13 @@ const app = createApp({
           start_cash:drlCfg.start_cash, use_gpu:drlCfg.use_gpu, base_model:drlCfg.base_model,
           force_train:drlCfg.force_train, early_stop_patience:drlCfg.early_stop_patience,
           reward_dd_penalty:drlCfg.reward_dd_penalty, reward_losing_penalty:drlCfg.reward_losing_penalty,
-          reward_trend_align:drlCfg.reward_trend_align, reward_val_gap_penalty:drlCfg.reward_val_gap_penalty})});
+          reward_trend_align:drlCfg.reward_trend_align, reward_val_gap_penalty:drlCfg.reward_val_gap_penalty,
+          hidden:drlHidden.value,
+          extra_symbols:drlExtraSymbols.value, extra_mix_ratio:drlCfg.extra_mix_ratio,
+          collect_workers:drlCfg.collect_workers,
+          curriculum:drlCfg.curriculum, curriculum_start:drlCfg.curriculum_start,
+          distill:drlCfg.distill,
+          backbone:drlCfg.backbone, gru_hidden:drlCfg.gru_hidden})});
         await new Promise(r=>setTimeout(r,300));
         // 轮询上限 30 分钟（3600 次 × 500ms）——DRL 训练 episodes=300 常需 5-15 分钟，
         // 曾 600 次×500ms=300 秒硬超时：后端仍在训练、前端却提示"超时"并停止轮询
@@ -7943,6 +8020,11 @@ const app = createApp({
                 drlTrain.oos_report = p.oos_report || null;
                 drlTrain.pine_code = p.pine_code || '';
                 drlTrain.pine_note = p.pine_note || '';
+                drlTrain.multi_extra_names = p.multi_extra_names || [];
+                if (p.collect_workers != null && p.collect_workers > 4) drlTrain.collect_workers = p.collect_workers;
+                if (p.curriculum) drlTrain.curriculum = p.curriculum;
+                if (p.distill_used) drlTrain.distill_used = p.distill_used;
+                if (p.backbone) drlTrain.backbone = p.backbone;
                 if (p.backend) drlTrain.backend = p.backend;
                 toast('训练完成！模型：'+p.model_name+' 最优收益 '+String(p.best_ret?.toFixed(4)),'ok');
                 loadDrlModels();

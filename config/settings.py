@@ -208,9 +208,10 @@ class Settings(BaseSettings):
     # 重要性采样比率自然衰减，PPO 兼容）。0=禁用（保持旧行为）。
     #
     # 内存口径（实测 2026-09-28，5m/5000根/state_window=4）：单条轨迹 ≈1.24MB
-    # （2939 步 × 54 维 float64），每轮推入 n_episodes×episodes = 8×8 = 64 条 ≈77MB。
-    # 故 capacity=64 恰好覆盖"上一轮"，约 77MB；128≈155MB；400≈484MB（不建议）。
-    # 调大前请按此公式估算常驻内存。
+    # （2939 步 × 54 维 float64）。P0 并行采样上量后 n_episodes=16 → 每轮推入
+    # 16×8 = 128 条 ≈155MB；capacity 按"保留最近一次训练的部分轨迹 + 上一轮尾部"
+    # 权衡，默认 64 ≈77MB 覆盖最近半轮，混采时旧轨迹经重要性比率自然衰减。
+    # 128≈155MB；400≈484MB（不建议）。调大前请按此公式估算常驻内存。
     evolve_strategy_drl_replay_capacity: int = 64
     evolve_strategy_drl_replay_mix_ratio: float = 0.3   # 每批中来自回放的历史轨迹比例
     # P0 多标的混合训练（2026-10 经验广度）：开启后策略 DRL 每轮把 evolve_symbols
@@ -265,7 +266,26 @@ class Settings(BaseSettings):
     # 与 PPO 更新轮数（ppo_epochs）。4→8 提升样本效率/去方差，观察模型是否从
     # "只在训练段交易"变成 val/OOS 段也交易。两参数不进 _training_identity，
     # 改动不触发锚点身份不可比。0=回退引擎默认（4/4）。
-    evolve_strategy_drl_n_episodes: int = 8
+    # P0 并行采样上量（2026-10）：默认 16——多标的混合训练后每 episode 是
+    # 独立的"标的×时间窗"切片，批量越大、每轮见过的局面越多，PPO 梯度越稳。
+    # 并行线程数放开（见 collect_workers，默认自动按 CPU 核数），16 条轨迹不再
+    # 是 4 条串行收 4 轮，而是并行一次收齐，墙钟成本几乎不变。
+    evolve_strategy_drl_n_episodes: int = 16
+    # 并行收集线程数：0=自动（min(n_episodes, max(4, cpu_count))）；>0 显式指定。
+    # 此前硬编码 min(n_episodes,4) 是吞吐瓶颈。线程数过高在超线程机抢内存带宽，
+    # 自动模式封顶物理核数；低配机可显式设 2-4 省 CPU。
+    evolve_strategy_drl_collect_workers: int = 0
+    # P1 课程学习（能力层次）：训练早期只从低难度（低波动/趋势清晰）窗口采样，
+    # 随训练进度逐步放开高波动段——先学"什么时候该持仓"，再学"什么时候该降仓"。
+    # 难度 = 窗口内已实现波动率分位。False=关闭（采样行为与旧路径完全一致）；
+    # 开启后 curriculum_start 为起始难度分位（0=只采最易窗口，1=不限）。
+    # 注意：开启会走标的池采样（单标的主标的也按难度过滤），与多标的正交叠加。
+    evolve_strategy_drl_curriculum: bool = False
+    evolve_strategy_drl_curriculum_start: float = 0.3
+    # P1 时序网络升级：actor 骨干。默认 mlp（持续进化行为不变）；
+    # gru=GRU 序列编码（能力更强，Pine 导出走蒸馏——GRU teacher→MLP student）。
+    evolve_strategy_drl_backbone: str = "mlp"
+    evolve_strategy_drl_gru_hidden: int = 32
     evolve_strategy_drl_ppo_epochs: int = 8
     # walk-forward 同品种多折观测（2026-09-19，用户选"1"）：每轮 strategy DRL
     # 真实训练后，用部署中的最佳模型在最近 N 根K线上做多折评估（不改接受逻辑），

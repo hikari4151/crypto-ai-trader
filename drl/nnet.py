@@ -257,6 +257,33 @@ class MLP:
                     )
         return list(reversed(gW)), list(reversed(gb))
 
+    def backward_input_grad(self, acts: list[np.ndarray], dout: np.ndarray) -> np.ndarray:
+        """计算输入层梯度 dL/dx（不返回参数梯度，只用于上游传播）。
+
+        与 backward 的反传路径完全一致（含 ReLU 与可选 LN 反传），但把梯度
+        一路反传到输入层（多一步 W[0]^T，输入无 ReLU 掩码）。GRUActor（时序
+        骨干）用它把 head 的 dout 反传到 concat 输入，从而得到 GRU 末态
+        梯度——避免调用方手工重写反传。
+        """
+        d = dout
+        for i in range(len(self.W) - 1, -1, -1):
+            if i == 0:
+                d = d @ self.W[0].T   # 输入层无 ReLU（acts[0]=x）
+                break
+            dh = d @ self.W[i].T
+            d = dh * (acts[i] > 0)  # ReLU 导数
+            if self.use_ln and (i - 1) < len(self._ln_cache):
+                mu, sigma, z_norm = self._ln_cache[i - 1]
+                d_ln = d
+                n_feat = z_norm.shape[-1]
+                d_z_norm = d_ln * self.ln_gamma[i - 1]
+                d = (1.0 / (n_feat * sigma)) * (
+                    n_feat * d_z_norm
+                    - d_z_norm.sum(axis=-1, keepdims=True)
+                    - z_norm * (d_z_norm * z_norm).sum(axis=-1, keepdims=True)
+                )
+        return d
+
     def step(self, gW: list[np.ndarray], gb: list[np.ndarray], t: int,
              g_ln_gamma: Optional[list] = None, g_ln_beta: Optional[list] = None) -> None:
         """Adam 更新，t = 当前步数（bias correction 用）。

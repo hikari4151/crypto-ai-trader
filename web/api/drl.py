@@ -56,7 +56,15 @@ class TrainIn(BaseModel):
     timeframe: str = "1h"
     limit: int = Field(default=1500, ge=100, le=5000)   # 封顶防任意大值阻塞
     episodes: int = 80
-    hidden: list[int] = [64, 64]
+    # 隐藏层维度（默认 [16,16]：装得进 TradingView Pine 脚本，训练完可导出自动
+    # 交易代码）。调大（如 [64,64]）能提升模型容量但脚本超过 64KB 体积门，
+    # 训练结果会明确标注"装不进 Pine"，只能软件内运行（rl_adaptive）。
+    hidden: list[int] = [16, 16]
+    # P1 时序网络升级：actor 骨干。默认 "mlp"（向后兼容）；
+    # "gru" 用 GRU 序列编码（窗口内 K 线建模为时序，突破纯展平堆叠）。
+    # GRU 无法直接导出 Pine 循环——系统自动蒸馏成 MLP 小网络导出（distill）。
+    backbone: str = "mlp"
+    gru_hidden: int = 32           # backbone="gru" 时的 GRU 隐层规模
     lr_actor: float = 0.004
     lr_critic: float = 0.01
     gamma: float = 0.99
@@ -73,7 +81,10 @@ class TrainIn(BaseModel):
     force_train: bool = False # 强制自动训练：触发早停后不中断，继续训练到用户设置轮数
     early_stop_patience: int = 0  # 早停保护：验证收益连续 N 次无改善则提前停止（0=禁用）
     # ---- 真 PPO 训练参数 ----
-    n_episodes: int = 4           # 每轮收集的轨迹数（批量平均降方差）
+    n_episodes: int = 8           # 每轮收集的轨迹数（批量平均降方差）
+    # P0 并行采样上量：并行收集线程数。0=自动（min(n_episodes, max(4, CPU核数))），
+    # 此前硬编码 4 线程是吞吐瓶颈；显式指定（如 2）可在低配机省 CPU。
+    collect_workers: int = 0
     ppo_epochs: int = 4           # PPO 多轮更新轮数（SB3 默认 10，小数据建议 3-5）
     mini_batch_size: int = 128    # PPO mini-batch 大小
     state_window: int = 1         # 状态窗口：堆叠最近 N 根K线特征（时序记忆，1=单点）
@@ -91,6 +102,14 @@ class TrainIn(BaseModel):
     # 额外标的的概率，可由 extra_mix_ratio 调整。
     extra_symbols: list[str] = []
     extra_mix_ratio: float = 0.5
+    # P1 课程学习（能力层次）：训练早期只从低难度（低波动）窗口采样，随进度
+    # 逐步放开高波动段。默认关闭（采样行为与旧路径完全一致）。
+    curriculum: bool = False
+    curriculum_start: float = 0.3   # 课程起始难度分位（0=只采最易窗口，1=不限）
+    # P2 蒸馏导出（Pine 体积门 × 网络容量的长期解）：大网络（如 [64,64]）装不进
+    # TradingView Pine 脚本（64KB 体积门）时，自动蒸馏出 [16,16] 小网络供导出；
+    # 软件内实盘（rl_adaptive）仍用大网络。默认开启；关闭则大网络只能软件内运行。
+    distill: bool = True
 
 
 def _validate_train(body: TrainIn) -> None:
@@ -99,8 +118,12 @@ def _validate_train(body: TrainIn) -> None:
         raise HTTPException(status_code=400, detail="episodes 须在 1-5000 之间")
     if not 1 <= len(body.hidden) <= 4 or any(not 4 <= x <= 512 for x in body.hidden):
         raise HTTPException(status_code=400, detail="hidden 须为 1-4 层，每层 4-512 维")
-    if not 1 <= body.n_episodes <= 32:
-        raise HTTPException(status_code=400, detail="n_episodes 须在 1-32 之间")
+    if not 1 <= body.n_episodes <= 256:
+        raise HTTPException(status_code=400, detail="n_episodes 须在 1-256 之间")
+    if not 0 <= body.collect_workers <= 64:
+        raise HTTPException(status_code=400, detail="collect_workers 须在 0-64 之间")
+    if not 0.0 <= body.curriculum_start <= 1.0:
+        raise HTTPException(status_code=400, detail="curriculum_start 须在 [0,1] 之间")
     if not 1 <= body.ppo_epochs <= 20:
         raise HTTPException(status_code=400, detail="ppo_epochs 须在 1-20 之间")
     if not 8 <= body.mini_batch_size <= 4096:
@@ -111,6 +134,11 @@ def _validate_train(body: TrainIn) -> None:
         raise HTTPException(status_code=400, detail="学习率须在 (0,1) 之间")
     if not 0 <= body.vol_penalty <= 1000:
         raise HTTPException(status_code=400, detail="vol_penalty 须在 [0,1000] 之间")
+    # P1 时序网络升级：backbone 白名单 + GRU 规模边界
+    if body.backbone not in ("mlp", "gru"):
+        raise HTTPException(status_code=400, detail="backbone 须为 mlp 或 gru")
+    if not 4 <= body.gru_hidden <= 256:
+        raise HTTPException(status_code=400, detail="gru_hidden 须在 4-256 之间")
 
 
 class FactorMineTrainIn(BaseModel):
@@ -305,6 +333,9 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                 df = await _load_df(body)
                 cfg = body.model_dump()
                 cfg["hidden"] = tuple(body.hidden)
+                # P1 时序网络升级：backbone/gru_hidden 由 model_dump 自动带入（默认 mlp 向后兼容）
+                if body.backbone not in ("mlp", "gru"):
+                    body.backbone = "mlp"  # 防御：非法值回退（_validate 已拦，双保险）
                 # 奖励塑形参数（QUANT_ADVICE 推荐默认已开启，显式传 0 可关闭）
                 cfg["reward_dd_penalty"] = body.reward_dd_penalty
                 cfg["reward_losing_penalty"] = body.reward_losing_penalty
@@ -348,6 +379,9 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                 with PROGRESS_LOCK:
                     _TRAINING[task_id] = {**_TRAINING.get(task_id, {}),
                                           "backend": used_backend}
+                # 保存模型：大网络（teacher）用于软件内实盘；若训练时蒸馏了可导出的小网络
+                #（distill），ACAgent.to_dict 已把蒸馏版内嵌进 distill_agent 键，
+                # 导出 Pine 时 export_pine_from_model 会优先用它。
                 result["agent"].save(str(model_path))
 
                 # 附加训练元数据（OOS报告/数据范围），供后续跨行情评估对比泛化
@@ -366,6 +400,17 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                         # P0 多标的混合训练元数据（单标的训练时为空列表）
                         "multi_extra_names": result.get("multi_extra_names") or [],
                         "multi_mix_ratio": result.get("multi_mix_ratio", 0.0),
+                        # P0 并行采样上量：实际使用的并行线程数
+                        "collect_workers": result.get("collect_workers", 0),
+                        # P1 课程学习：难度分层采样开关
+                        "curriculum": bool(result.get("curriculum")),
+                        "curriculum_start": result.get("curriculum_start", 0.0),
+                        # P2 蒸馏导出（Pine 体积门解）：大网络 → 蒸馏小网络
+                        "distill_used": bool(result.get("distill_used")),
+                        "distill_meta": result.get("distill_meta") or {},
+                        # P1 时序网络升级：actor 骨干（mlp/gru）
+                        "backbone": body.backbone,
+                        "gru_hidden": body.gru_hidden,
                     }
                     # 因子列标准化统计量（训练段拟合）——部署端 rl_adaptive 用同一
                     # mu/sd 标准化，否则喂原始因子值给模型，状态分布与训练完全不同
@@ -409,6 +454,10 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                     # 前端给 rl_* 策略套通用模板，图上买卖点与模型无关
                     "pine_code": result.get("pine_code") or "",
                     "pine_note": result.get("pine_note") or "",
+                    # 装不进 Pine（大网络/级联因子）→ 显式标记"仅软件内运行"，
+                    # 前端策略列表据此显示橙色徽标（与 evolve rl_evolve 同口径）
+                    "internal_only": bool(not result.get("pine_code")
+                                          and result.get("pine_note")),
                 }
                 register_dynamic(strategy_name, spec)
                 # 持久化到 AiStrategy 表（重启后 _load_dynamic_strategies 可恢复，全部策略可见）
@@ -439,6 +488,21 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                         "history_points": len(result["history"]),
                         "elapsed_sec": result["elapsed_sec"],
                         "oos_report": result.get("oos_report"),
+                        # P0 多标的混合训练元数据（前端展示"多标×N"徽标）
+                        "multi_symbol": bool(result.get("multi_symbol")),
+                        "multi_extra_names": result.get("multi_extra_names") or [],
+                        "multi_mix_ratio": result.get("multi_mix_ratio", 0.0),
+                        # P0 并行采样上量：实际使用的并行线程数（审计/徽标）
+                        "collect_workers": result.get("collect_workers", 0),
+                        # P1 课程学习：难度分层采样开关（前端徽标/审计）
+                        "curriculum": bool(result.get("curriculum")),
+                        "curriculum_start": result.get("curriculum_start", 0.0),
+                        # P2 蒸馏导出（Pine 体积门解）：大网络 → 蒸馏小网络
+                        "distill_used": bool(result.get("distill_used")),
+                        "distill_meta": result.get("distill_meta") or {},
+                        # P1 时序网络升级：actor 骨干（mlp/gru）
+                        "backbone": result.get("agent", None).backbone
+                        if result.get("agent") is not None else "mlp",
                         # DRL 神经引擎 Pine 自动交易代码（训练产物）
                         "pine_code": result.get("pine_code") or "",
                         "pine_note": result.get("pine_note") or "",
@@ -548,6 +612,8 @@ async def use_model(name: str, engine=Depends(get_engine)):
             "risk_tips": ["训练分布外可能失效"],
             "created_by": "drl_train", "version": "v1.0",
             "pine_code": pine_code, "pine_note": pine_note,
+            # 装不进 Pine（大网络/级联因子）→ 标记"仅软件内运行"（前端徽标）
+            "internal_only": bool(not pine_code and pine_note),
         })
         await engine.select_strategy(strategy_name)
         return {"ok": True, "strategy": strategy_name, "model": name}

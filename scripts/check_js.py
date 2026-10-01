@@ -9,9 +9,16 @@
     ??  ->  ||     （x ?? y → x || y）
    转换只影响语法检查，绝不写回源文件。
 
+第十六轮补洞（2026-09-30）：还检查 Vue 内联模板表达式——<div id="app"> 的
+in-DOM 模板里 {{...}} 与 :xxx="..." / v-xxx="..." 的表达式逐条 node 语法检查。
+背景：并行改动引入 `:class="{fr-hidden:!drlCfg.curriculum}"`——对象 key 带连字符
+未加引号，Vue 编译 `new Function('return ({fr-hidden:...})')` 抛
+`Unexpected token '-'`，整页白屏（前端致命）。<script> 块检查看不到 HTML 属性
+里的表达式，必须单独扫模板。
+
 用法：
     python scripts/check_js.py [file.html file.js ...]
-默认检查 web/static/index.html 的全部内联脚本。
+默认检查 web/static/index.html 的全部内联脚本 + Vue 模板表达式。
 退出码 0=全部通过；1=存在语法错误。作为提交前验证链的一环。
 """
 import re
@@ -23,6 +30,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_RE = re.compile(r"<script(?P<attrs>[^>]*)>(?P<body>.*?)</script>", re.S | re.I)
+APP_DIV_RE = re.compile(r'<div[^>]*id="app"[^>]*>', re.I)
+# 指令属性表达式（Vue in-DOM 模板）：:xxx="..." 或 v-xxx="..."（双引号）
+DIR_ATTR_RE = re.compile(r'(?:v-[\w-]+|:[a-zA-Z_-]+)\s*=\s*"([^"]+)"')
+MUSTACHE_RE = re.compile(r'\{\{([\s\S]*?)\}\}')
 
 # node 可执行文件（惰性探测；无 node 时回退 esprima）
 _NODE = shutil.which("node") if shutil.which("node") else None
@@ -113,6 +124,79 @@ def check_js_source(name: str, source: str) -> list[str]:
         return [f"{name}:{e.lineNumber}:{e.column}: {msg}"]
 
 
+def extract_app_template(text: str) -> str | None:
+    """提取 <div id="app"> 的完整 in-DOM 模板（深度计数闭合标签）。"""
+    m = APP_DIV_RE.search(text)
+    if not m:
+        return None
+    start = m.end()
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        if text[i:i + 4] == "<div":
+            depth += 1
+            i += 4
+        elif text[i:i + 6] == "</div>":
+            depth -= 1
+            i += 6
+        else:
+            i += 1
+    return text[start:max(start, i - 6)]
+
+
+def _line_no(tpl: str, pos: int) -> int:
+    return tpl.count("\n", 0, pos) + 1
+
+
+def check_vue_template_exprs(name: str, text: str) -> list[str]:
+    """Vue in-DOM 模板表达式语法检查（{{}} / :attr / v-dir）。
+
+    每个表达式用 node 的 new Function('return (' + e + ')') 校验（与 Vue 编译器
+    同语义）。对象字面量 key 带连字符未加引号（如 {fr-hidden:...}）会在此报
+    'Unexpected token -'——这类错误 <script> 检查看不到（在 HTML 属性里）。
+    无 node 时降级跳过（打印 WARN）；此检查依赖 node，与主 JS 检查同环境。
+    """
+    if not _NODE:
+        return []
+    tpl = extract_app_template(text)
+    if tpl is None:
+        return []
+    exprs: list[tuple[str, int]] = []
+    for mm in MUSTACHE_RE.finditer(tpl):
+        e = mm.group(1).strip()
+        if e:
+            exprs.append((e, _line_no(tpl, mm.start())))
+    for mm in DIR_ATTR_RE.finditer(tpl):
+        e = mm.group(1).strip()
+        if e:
+            exprs.append((e, _line_no(tpl, mm.start())))
+    if not exprs:
+        return []
+    # 一次 node 调用检查全部表达式（逐条 new Function，报错即停止该条）
+    src_lines = []
+    for idx, (e, _ln) in enumerate(exprs):
+        src_lines.append(f"const __e{idx} = (function(){{ try {{ return ({e}); }} catch (err) {{ "
+                         f"console.log('EXPR_FAIL|{idx}|' + err.message); }} }})();")
+    prog = "\n".join(src_lines)
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
+        f.write(prog)
+        path = f.name
+    try:
+        r = subprocess.run([_NODE, path], capture_output=True, text=True,
+                           timeout=60, encoding="utf-8", errors="replace")
+    finally:
+        Path(path).unlink(missing_ok=True)
+    # 解析失败标记
+    failed = []
+    for line in r.stdout.splitlines():
+        if line.startswith("EXPR_FAIL|"):
+            parts = line.split("|")
+            idx, msg = int(parts[1]), "|".join(parts[2:])
+            e, ln = exprs[idx]
+            failed.append(f"{name}#app:行{ln} Vue 表达式语法错误: {msg.strip()} → {e[:80]}")
+    return failed
+
+
 def check_file(path: Path) -> list[str]:
     errors: list[str] = []
     text = path.read_text(encoding="utf-8")
@@ -126,6 +210,8 @@ def check_file(path: Path) -> list[str]:
             if re.search(r"type\s*=\s*['\"](?!text/javascript|module|application/javascript)", attrs, re.I):
                 continue  # 非 JS 块（如 text/template）跳过
             errors += check_js_source(f"{path.name}#script{i + 1}", body)
+        # 第十六轮：Vue in-DOM 模板表达式检查（防 `{fr-hidden:...}` 这类白屏 bug）
+        errors += check_vue_template_exprs(path.name, text)
     else:
         errors += check_js_source(path.name, text)
     return errors

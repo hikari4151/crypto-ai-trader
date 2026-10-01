@@ -10,6 +10,7 @@
   python scripts/verify_all.py --skip-pytest --skip-backtest   # fast 门禁（pre-commit 用）
 """
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,7 +28,14 @@ COMPILE_DIRS = ("core", "engine", "ai", "web", "scripts", "backtest",
 
 def run(cmd: list[str], label: str) -> bool:
     print(f"[verify] {label}: {' '.join(cmd)}", flush=True)
-    r = subprocess.run(cmd)
+    # Windows GBK 控制台：precompress/tailwind/echarts 构建脚本输出 ✅/❌ emoji，
+    # Python 默认按 GBK 编码 stdout 会抛 UnicodeEncodeError 并 exit 1（门禁误报）。
+    # 强制子进程 stdout 用 UTF-8——只影响这三个前端产物校验脚本，其余步骤行为不变。
+    env = dict(os.environ)
+    if label in ("check_precompressed", "check_tailwind_artifact",
+                 "check_echarts_artifact"):
+        env["PYTHONIOENCODING"] = "utf-8"
+    r = subprocess.run(cmd, env=env)
     if r.returncode != 0:
         print(f"[verify][FAIL] {label} exit={r.returncode}", flush=True)
         return False

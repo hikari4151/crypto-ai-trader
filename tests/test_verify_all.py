@@ -71,7 +71,7 @@ def test_build_frontend_check_only_locally():
 def test_main_returns_zero_when_all_steps_pass(monkeypatch, capsys):
     calls: list[list[str]] = []
 
-    def fake_run(cmd):
+    def fake_run(cmd, env=None):
         calls.append(list(cmd))
         return subprocess.CompletedProcess(cmd, 0)
 
@@ -99,7 +99,7 @@ def test_staged_mode_only_checks_staged_files():
 
 
 def test_main_returns_one_when_step_fails(monkeypatch, capsys):
-    def fake_run(cmd):
+    def fake_run(cmd, env=None):
         return subprocess.CompletedProcess(cmd, 1)
 
     monkeypatch.setattr(va.subprocess, "run", fake_run)

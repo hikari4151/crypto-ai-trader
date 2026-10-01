@@ -281,6 +281,7 @@ async def test_comparable_exchange_anchor_still_protects(engine):
     cfg = _strategy_drl_train_cfg(8)
     # P0 多标的：身份指纹须含 multi_symbol 键（引擎多标模式产出与单标不可比）；
     # 本用例是单标轮（_result 无 multi_extra_names → []），锚点必须同口径构造。
+    # P1 时序骨干：身份指纹还须含 backbone（GRU 与 MLP 产出不可互比回退）。
     identity = _training_identity(
         "strategy_drl", sym, tf,
         state_window=int(cfg["state_window"]),
@@ -290,6 +291,7 @@ async def test_comparable_exchange_anchor_still_protects(engine):
             "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
             "multi_symbol": False,
             "multi_extra_names": [],
+            "backbone": str(cfg.get("backbone", "mlp")),
         })
     _seed_anchor(eng, 9.0, "exchange", oos_ret=0.12, identity=identity)
     holder["result"] = _result(best_ret=0.30, oos_ret=0.01)

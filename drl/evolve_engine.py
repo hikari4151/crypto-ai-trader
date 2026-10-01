@@ -65,7 +65,8 @@ def _strategy_drl_train_cfg(episodes: int) -> dict:
     """
     return {
         "episodes": episodes,
-        "n_episodes": max(1, int(getattr(settings, "evolve_strategy_drl_n_episodes", 8) or 0) or 4),
+        "n_episodes": max(1, int(getattr(settings, "evolve_strategy_drl_n_episodes", 16) or 0) or 8),
+        "collect_workers": max(0, int(getattr(settings, "evolve_strategy_drl_collect_workers", 0) or 0)),
         "ppo_epochs": max(1, int(getattr(settings, "evolve_strategy_drl_ppo_epochs", 8) or 0) or 4),
         "mini_batch_size": 128,
         "hidden": [int(h) for h in getattr(settings, "evolve_strategy_drl_hidden", [16, 16])],
@@ -96,6 +97,15 @@ def _strategy_drl_train_cfg(episodes: int) -> dict:
         # 均经实验判定无益或有害，保持 0。
         "reward_losing_penalty": 0.5,
         "reward_trend_align": 0.0,
+        # P1 课程学习（能力层次）：早期只采低难度窗口，随进度放开。
+        # 不进入 _training_identity（同 episodes 语义，改动不触发锚点不可比）。
+        "curriculum": bool(getattr(settings, "evolve_strategy_drl_curriculum", False)),
+        "curriculum_start": float(getattr(settings, "evolve_strategy_drl_curriculum_start", 0.3)),
+        # P1 时序网络升级：actor 骨干。默认 mlp（向后兼容，持续进化行为不变）；
+        # "gru" 用 GRU 序列编码，能力更强但无法直接导出 Pine——依赖蒸馏（distill=True
+        # 默认开）把 GRU teacher 压成 MLP student 供 TradingView。
+        "backbone": str(getattr(settings, "evolve_strategy_drl_backbone", "mlp")),
+        "gru_hidden": int(getattr(settings, "evolve_strategy_drl_gru_hidden", 32)),
         # P1-5：OOS 安检门槛（settings.evolve_oos_min_bars，默认 250）
         # 与多段评估（3 段取中位数，降单段运气噪声）
         "oos_min_bars": getattr(settings, "evolve_oos_min_bars", 250),
@@ -1142,9 +1152,14 @@ class EvolveEngine(EvolveObservationsMixin):
             "train_on_demo": bool(getattr(settings, "evolve_train_on_demo", False)),
             "anchor_max_fitness": float(getattr(settings, "evolve_anchor_max_fitness", 50.0) or 0.0),
             "strategy_drl_population": bool(getattr(settings, "evolve_strategy_drl_population", True)),
-            # 训练能力参数（n_episodes/ppo_epochs，4→8 实验）
-            "strategy_drl_n_episodes": int(getattr(settings, "evolve_strategy_drl_n_episodes", 8) or 0),
+            # 训练能力参数（n_episodes/ppo_epochs，4→8→16 实验；collect_workers 并行上量）
+            "strategy_drl_n_episodes": int(getattr(settings, "evolve_strategy_drl_n_episodes", 16) or 0),
+            "strategy_drl_collect_workers": int(getattr(settings, "evolve_strategy_drl_collect_workers", 0) or 0),
             "strategy_drl_ppo_epochs": int(getattr(settings, "evolve_strategy_drl_ppo_epochs", 8) or 0),
+            # P1 课程学习（能力层次）：先易后难的难度分层采样
+            "strategy_drl_curriculum": bool(getattr(settings, "evolve_strategy_drl_curriculum", False)),
+            "strategy_drl_curriculum_start": float(getattr(
+                settings, "evolve_strategy_drl_curriculum_start", 0.3) or 0.0),
             "strategy_drl_min_trade_zone": float(getattr(settings, "evolve_strategy_drl_min_trade_zone", 0.10)),
             # 经验回放（跨轮存活，对抗遗忘）
             "strategy_drl_replay_capacity": int(getattr(
@@ -1292,7 +1307,16 @@ class EvolveEngine(EvolveObservationsMixin):
                     raise ValueError("strategy_drl_population 必须是布尔值")
                 pending.append(("evolve_strategy_drl_population", changes["strategy_drl_population"], None))
             _check("strategy_drl_n_episodes", "evolve_strategy_drl_n_episodes",
-                   conv=int, min_v=1, max_v=64)
+                   conv=int, min_v=1, max_v=256)
+            _check("strategy_drl_collect_workers", "evolve_strategy_drl_collect_workers",
+                   conv=int, min_v=0, max_v=64)
+            if "strategy_drl_curriculum" in changes and changes["strategy_drl_curriculum"] is not None:
+                if not isinstance(changes["strategy_drl_curriculum"], bool):
+                    raise ValueError("strategy_drl_curriculum 必须是布尔值")
+                pending.append(("evolve_strategy_drl_curriculum",
+                                changes["strategy_drl_curriculum"], None))
+            _check("strategy_drl_curriculum_start", "evolve_strategy_drl_curriculum_start",
+                   conv=float, min_v=0.0, max_v=1.0)
             _check("strategy_drl_ppo_epochs", "evolve_strategy_drl_ppo_epochs",
                    conv=int, min_v=1, max_v=64)
             _check("strategy_drl_min_trade_zone", "evolve_strategy_drl_min_trade_zone",
@@ -2380,6 +2404,9 @@ class EvolveEngine(EvolveObservationsMixin):
                 "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
                 "multi_symbol": bool(_multi_names),
                 "multi_extra_names": _multi_names,
+                # P1 时序网络升级：actor 骨干是训练口径——GRU 与 MLP 架构不同，
+                # 混入身份指纹，防止"GRU 训练产出"与"MLP 锚点"互相回退比较。
+                "backbone": str(train_cfg.get("backbone", "mlp")),
             })
 
         # 5.0 P4-E1：demo 合成数据轮短路——不回退比较、不跑 OOS 部署门。

@@ -24,7 +24,17 @@ evolve_factor_miner_fitness_mode: net
 evolve_factor_miner_cost_per_turn: 0.002
 evolve_factor_miner_net_fitness_scale: 500.0
 evolve_strategy_drl_episodes: 8
-evolve_strategy_drl_n_episodes: 8
+# P0 并行采样上量（2026-10）：批量 8→16（每轮见过的局面翻倍，PPO 梯度更稳）；
+# collect_workers=0 自动按 CPU 核数并行收集（此前硬编码 4 线程是吞吐瓶颈）。
+evolve_strategy_drl_n_episodes: 16
+evolve_strategy_drl_collect_workers: 0
+# P1 课程学习（能力层次）：早期只采低波动段、随进度放开。默认关闭（向后兼容）。
+evolve_strategy_drl_curriculum: false
+evolve_strategy_drl_curriculum_start: 0.3
+# P1 时序网络升级：actor 骨干。mlp=默认（向后兼容）；gru=GRU 序列编码（能力更强，
+# Pine 导出走蒸馏——GRU teacher 自动蒸馏成 MLP student 供 TradingView）。
+evolve_strategy_drl_backbone: mlp
+evolve_strategy_drl_gru_hidden: 32
 evolve_strategy_drl_ppo_epochs: 8
 evolve_strategy_drl_walkforward_obs: true
 evolve_strategy_drl_walkforward_folds: 2

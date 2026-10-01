@@ -167,7 +167,7 @@
 | G1 | 新增顶层包不进任何门禁 | 新包必须在 `scripts/check_doc_sync.py` 的 `CORE_DIRS` 登记，并同步 `ci.yml`（ruff+compileall）、`verify_all.py`（RUFF_DIRS/COMPILE_DIRS）、`.coveragerc`（source）、`coverage_gate.py`（THRESHOLDS） | `net/` 曾经整包（397 语句）漏出全部五处：门禁全绿但该包**从未被 lint/编译/覆盖**。"绿"不等于"查过" | `python scripts/check_doc_sync.py`（含"工作区新增顶层包未登记"自检） |
 | G2 | 门禁清单在多处各写一份 | 目录清单只在 `check_doc_sync.CORE_DIRS` 声明；mypy 范围只在 `pyproject.toml [tool.mypy].files` 声明 | 同一清单写 3 份（pyproject/verify_all/ci.yml），扩容必漂移（历史上发生过） | `tests/test_mypy_pilot.py`、`tests/test_doc_sync.py::test_check_ok_when_all_consistent` |
 | G3 | 入库生成物与源文件不一致 | `web/static/build_manifest.json` 的 `sha256`/`size_bytes` 必须**同按 LF 归一化字节**计算，且与当前 `index.html` 一致（CI 门禁 `--check-only --require-manifest`） | ① 原实现 sha256 用 `read_text`（LF）、size_bytes 用 `stat()`（工作区字节，本仓库 CRLF），两字段不同基底；② **不可**改成"统一用工作区原始字节"——`core.autocrlf=true` 且无 `.gitattributes` 会让该 sha256 变成平台相关，跨平台 CI 必挂；③ 该 sha256 前 8 位是 `web/api/ops.py` 暴露给运维的"部署版本"，清单过期=运维看到假版本号 | `tests/test_build_frontend.py`（含 CRLF/LF 同值用例）；`python scripts/build_frontend.py --check-only --require-manifest` |
-| G4 | 只靠本地 pre-commit 兜质量 | CI 是唯一不可绕过的防线；`.git/hooks/` 不入库，`--no-verify` 可绕过 | 2026-09-27 修的两处 ruff 红灯（F401/W292）正是已入库状态——本地钩子当时没拦住 | `python scripts/install_git_hooks.py --check`（exit 0=已装且与当前 verify_all 内容一致；新克隆仓库默认无钩子会报未安装）；CI 全绿；`git log` 无带红灯的提交 |
+| G4 | 只靠本地 pre-commit 兜质量 | CI 是唯一不可绕过的防线；`.git/hooks/` 不入库，`--no-verify` 可绕过。**第十六轮起本地 hook 走 staged 模式**（`verify_all.py --staged`）：ruff 只查本次暂存文件、check_redlines 的 E7 仅当 index.html 被本次暂存才执行——他人未完成工作（WIP）不再阻塞本提交；全量校验仍由 CI/手动完整链兜底 | 2026-09-27 修的两处 ruff 红灯（F401/W292）正是已入库状态——本地钩子当时没拦住；2026-09-30 旧 hook（全量校验）被并行 WIP 阻塞导致团队被迫 --no-verify | `python scripts/install_git_hooks.py --check`（exit 0=已装且与当前 verify_all 内容一致；新克隆仓库默认无钩子会报未安装）；CI 全绿；`git log` 无带红灯的提交 |
 | G5 | 测试改写受版本控制的产物 | 测试不得以写模式改动入库文件（如 `build_manifest.json`）；必须写完还原，或把输出指到 tmp | 曾有测试直接写模式跑 `build_frontend.py`，把入库清单改成"与未提交的 index.html 一致"，等于**本地自动掩盖清单漂移**——CI 才炸 | `grep build_frontend tests/`；跑完 `git status` 看入库产物是否被动过 |
 | G6 | 测试依赖实时网络行情 | 装配引擎的测试必须隔离数据源：`eng._current_snapshot = make_async(<本地快照>)`（helper 在 `tests/conftest.py`）；hub 为空/空 dict 时 `_current_snapshot` 会联网拉真实行情 | 引擎 math_ev 门（`signal_math_ev_gate=True` 默认开）在 hub 空时联网算期望收益；行情负期望会把"买入应成交"的测试全拦（2026-09-28 实测 11 个交易路径测试因此全红，且是**行情/网络侥幸性**——之前全绿只是当时 EV≥0）。单元测试的确定性被实时行情破坏 | 测试装配引擎处必须出现 `make_async`；`git grep -n "TradingEngine(" tests/` 的文件逐一核对；跑一次 `pytest` 全绿不算完——它可能只是行情侥幸 |
 
@@ -178,6 +178,10 @@
 ```bat
 .venv\Scripts\python scripts\verify_all.py                       :: 完整链（门禁 + pytest + 覆盖率 + 基线回测）
 .venv\Scripts\python scripts\verify_all.py --skip-pytest --skip-backtest   :: 快速门禁（提交前/pre-commit 用）
+.venv\Scripts\python scripts\verify_all.py --skip-pytest --skip-backtest --staged   :: staged 门禁（pre-commit hook 实际调用：只校验本次暂存文件）
+.venv\Scripts\python scripts\precompress_static.py --check        :: 前端产物校验（vendor .gz 最新）
+.venv\Scripts\python scripts\build_tailwind_css.py --check        :: tailwind 静态 CSS 产物 SRI 一致
+.venv\Scripts\python scripts\build_echarts_custom.py --check      :: echarts 产物 SRI 一致
 .venv\Scripts\python scripts\perf_baseline.py --report          :: 性能基线（关键路径耗时报告，不执行门禁）
 .venv\Scripts\python scripts\perf_baseline.py --update          :: 重新校准性能基线（谨慎：确认真实优化后再动）
 ```

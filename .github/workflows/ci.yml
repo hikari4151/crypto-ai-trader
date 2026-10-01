@@ -88,6 +88,12 @@ jobs:
       - name: 3) 前端构建链（只读校验 + 清单漂移门禁）
         run: python scripts/build_frontend.py --check-only --require-manifest
 
+      - name: 3a) 前端产物一致性门禁（precompress .gz / tailwind / echarts SRI）
+        run: |
+          python scripts/precompress_static.py --check
+          python scripts/build_tailwind_css.py --check
+          python scripts/build_echarts_custom.py --check
+
       - name: 4) 全包字节码编译
         run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl exchange factors net tests run.py
 
@@ -158,6 +164,12 @@ jobs:
 
       - name: 3) 前端构建链（只读校验 + 清单漂移门禁）
         run: python scripts/build_frontend.py --check-only --require-manifest
+
+      - name: 3a) 前端产物一致性门禁（precompress .gz / tailwind / echarts SRI）
+        run: |
+          python scripts/precompress_static.py --check
+          python scripts/build_tailwind_css.py --check
+          python scripts/build_echarts_custom.py --check
 
       - name: 4) 全包字节码编译
         run: python -m compileall -q core engine ai web scripts backtest strategies indicators config drl exchange factors net tests run.py

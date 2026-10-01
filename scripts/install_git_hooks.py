@@ -1,7 +1,7 @@
 """P1-B2：安装/卸载/检查本地 git pre-commit hook（免框架、Python-only）。
 
-hook 内容：调用 scripts/verify_all.py --skip-pytest --skip-backtest
-（check_lock / ruff / validate_config / check_js / build_frontend / compileall，
+hook 内容：调用 scripts/verify_all.py --skip-pytest --skip-backtest --staged
+（check_lock / ruff(staged) / validate_config / check_js / build_frontend / compileall，
 秒级~十几秒，适合拦截提交前的低级错误；全量 pytest 与基线回测留给 CI/手动）。
 
 背景（2026-09-27）：`.git/hooks/` 不入库，新克隆仓库没有钩子；`--no-verify`
@@ -10,6 +10,13 @@ hook 内容：调用 scripts/verify_all.py --skip-pytest --skip-backtest
   verify_all 步骤变了而旧钩子没更新，照样漏拦）。
 - `--force` 覆盖安装（内容变更后钩子需要重装）。
 - CI 里不装钩子（无意义），但 check_doc_sync 契约保证 `--check` 模式的入口存在。
+
+第十六轮（2026-09-30）：hook 改为 `--staged` 模式——只校验本次暂存文件。
+背景：此前 hook 全量校验，任何未完成工作（他人 WIP / 进行中编辑）都会阻塞
+他人提交，导致团队被迫 --no-verify 绕钩子。staged 模式语义：
+  - ruff 只查本次暂存文件；
+  - check_redlines 的 E7（index.html 全量扫描）仅当 index.html 被本次暂存才执行；
+  - 其余快步骤（check_js/check_encoding/compileall 等）保持全量（全局性契约）。
 
 用法：
   python scripts/install_git_hooks.py            # 安装（已存在则不覆盖）
@@ -36,7 +43,8 @@ def hook_script() -> str:
         '  echo "pre-commit: .venv not found; skipping (install dev deps first)"\n'
         "  exit 0\n"
         "fi\n"
-        'exec "$PY" "$ROOT/scripts/verify_all.py" --skip-pytest --skip-backtest\n'
+        # 第十六轮：staged 模式——只校验本次暂存文件，他人未完成工作（WIP）不阻塞提交。
+        'exec "$PY" "$ROOT/scripts/verify_all.py" --skip-pytest --skip-backtest --staged\n'
     )
 
 

@@ -113,6 +113,28 @@ def sh(cmd: list[str], cwd: Path, env: dict | None = None) -> subprocess.Complet
                           timeout=300, shell=os.name == "nt")
 
 
+def check_artifact() -> list[str]:
+    """校验 tailwind 静态 CSS 产物与 index.html 引用一致（防改产物忘更新 SRI）。"""
+    issues: list[str] = []
+    if not OUT.exists():
+        issues.append(f"缺 tailwind 产物: {OUT.relative_to(ROOT)}（运行 build_tailwind_css.py 构建）")
+        return issues
+    data = OUT.read_bytes()
+    b64 = base64.b64encode(hashlib.sha384(data).digest()).decode()
+    sri = f"sha384-{b64}"
+    html = INDEX.read_text(encoding="utf-8")
+    for m in re.finditer(r'<link[^>]*href="/static/vendor/tailwind\.static\.css"[^>]*>', html):
+        tag = m.group(0)
+        im = re.search(r'integrity="([^"]+)"', tag)
+        if not im:
+            issues.append("tailwind link 标签缺 integrity（SRI 防线缺失）")
+        elif im.group(1) != sri:
+            issues.append(
+                f"tailwind SRI 不匹配：index.html 写 {im.group(1)[:32]}… 产物实际 {sri[:32]}…\n"
+                "（改了 tailwind 产物必须同步更新 index.html integrity）")
+    return issues
+
+
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser()
@@ -120,7 +142,19 @@ def main() -> None:
     ap.add_argument("--use-local-cli", action="store_true",
                     help="复用 .optim/echarts_custom/node_modules 里已装的 tailwindcss "
                          "（避免每次临时 npm install；开发机推荐）")
+    ap.add_argument("--check", action="store_true",
+                    help="校验产物与 index.html SRI 一致（接入门禁链，不构建）")
     args = ap.parse_args()
+
+    if args.check:
+        issues = check_artifact()
+        if issues:
+            print("[tailwind] ❌ 产物校验失败：")
+            for i in issues:
+                print("   ", i)
+            raise SystemExit(1)
+        print(f"[tailwind] ✅ 产物存在且 SRI 与 index.html 一致（{OUT.relative_to(ROOT)}）")
+        return
 
     text = INDEX.read_text(encoding="utf-8")
     static, dyn = extract_classes(text)

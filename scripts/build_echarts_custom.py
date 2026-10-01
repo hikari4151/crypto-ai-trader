@@ -27,6 +27,7 @@
 """
 import hashlib
 import base64
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,6 +36,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 VENDOR = ROOT / "web" / "static" / "vendor"
 OUT = VENDOR / "echarts.custom.min.js"
+INDEX = ROOT / "web" / "static" / "index.html"
 
 ENTRY = r"""
 import * as echarts from 'echarts/core';
@@ -67,12 +69,51 @@ def sh(cmd: list[str], cwd: Path) -> None:
         sys.exit(f"命令失败 {cmd!r}\n{r.stdout}\n{r.stderr}")
 
 
+def check_artifact() -> list[str]:
+    """校验 echarts 产物与 index.html 引用的一致性（防改产物忘更新 SRI）。
+
+    第十六轮：接入门禁链的校验入口——产物存在 + index.html script 标签的
+    integrity sha384 必须等于产物实际 hash（SRI 不匹配浏览器会拒载脚本）。
+    """
+    issues: list[str] = []
+    if not OUT.exists():
+        issues.append(f"缺 echarts 产物: {OUT.relative_to(ROOT)}（运行 build_echarts_custom.py 构建）")
+        return issues
+    data = OUT.read_bytes()
+    b64 = base64.b64encode(hashlib.sha384(data).digest()).decode()
+    sri = f"sha384-{b64}"
+    html = INDEX.read_text(encoding="utf-8")
+    # 找 index.html 中引用该产物的 script 标签 integrity
+    for m in re.finditer(r"<script[^>]*src=\"/static/vendor/echarts\.custom\.min\.js\"[^>]*>", html):
+        tag = m.group(0)
+        im = re.search(r'integrity="([^"]+)"', tag)
+        if not im:
+            issues.append("echarts script 标签缺 integrity（SRI 防线缺失）")
+        elif im.group(1) != sri:
+            issues.append(
+                f"echarts SRI 不匹配：index.html 写 {im.group(1)[:32]}… 产物实际 {sri[:32]}…\n"
+                "（改了 echarts 产物必须同步更新 index.html integrity）")
+    return issues
+
+
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--entry-only", action="store_true",
                     help="只打印入口模块清单，不执行构建（离线检查用）")
+    ap.add_argument("--check", action="store_true",
+                    help="校验产物与 index.html SRI 一致（接入门禁链，不构建）")
     args = ap.parse_args()
+
+    if args.check:
+        issues = check_artifact()
+        if issues:
+            print("[echarts] ❌ 产物校验失败：")
+            for i in issues:
+                print("   ", i)
+            raise SystemExit(1)
+        print(f"[echarts] ✅ 产物存在且 SRI 与 index.html 一致（{OUT.relative_to(ROOT)}）")
+        return
 
     if args.entry_only:
         print(ENTRY.strip())

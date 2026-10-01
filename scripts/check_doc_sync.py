@@ -165,6 +165,21 @@ def check() -> list[str]:
         issues.append("ci.yml 未注册 perf_baseline.py（性能基线门禁）")
     if "perf_baseline.py" not in va_src:
         issues.append("verify_all.py 未注册 perf_baseline.py（性能基线门禁）")
+
+    # 前端构建产物脚本（第十六轮）：必须至少注册进 verify_all / ci.yml / tests 之一，
+    # 否则属于"脚本写了没接链"（A5 教训延伸：构建脚本脱链=产物无法在门禁中重建/校验）。
+    _frontend_build_scripts = {
+        "precompress_static.py": "预压缩 .gz（verify_all 已注册 --check）",
+        "build_tailwind_css.py": "tailwind 静态化（tests/test_tailwind_staticization.py 契约覆盖）",
+        "build_echarts_custom.py": "echarts 按需打包（SRI 由 build_frontend --require-manifest 校验）",
+    }
+    tests_src = " ".join(p.read_text(encoding="utf-8", errors="replace")
+                         for p in (ROOT / "tests").glob("test_*.py")
+                         if p.is_file())
+    for script, why in _frontend_build_scripts.items():
+        registered = script in ci or script in va_src or script in tests_src
+        if not registered:
+            issues.append(f"{script} 未注册进 ci.yml / verify_all / tests 任一（{why}）")
     return issues
 
 

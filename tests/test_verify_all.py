@@ -7,10 +7,11 @@ import scripts.verify_all as va
 def test_build_steps_fast_has_core_gates():
     steps = va.build_steps(skip_pytest=True, skip_backtest=True)
     labels = [label for label, _ in steps]
-    assert labels == ["check_lock", "ruff", "mypy_pilot", "validate_config",
-                      "check_doc_sync", "check_js", "check_encoding",
-                      "check_redlines", "build_frontend", "compileall",
-                      "perf_baseline"]
+    assert labels == ["check_lock", "ruff", "check_redlines", "mypy_pilot",
+                      "validate_config", "check_doc_sync", "check_js",
+                      "check_encoding", "build_frontend", "compileall",
+                      "check_precompressed", "check_tailwind_artifact",
+                      "check_echarts_artifact", "perf_baseline"]
 
 
 def test_build_steps_full_has_pytest_and_backtest():
@@ -79,11 +80,22 @@ def test_main_returns_zero_when_all_steps_pass(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "[verify] ALL PASS" in out
-    assert len(calls) == 11  # 8 步 + check_encoding + check_redlines + perf_baseline
+    assert len(calls) == 14  # 基础步 + check_encoding/check_redlines + 3 产物校验 + perf_baseline
     assert calls[1][0] == va.PY  # ruff 第一步首元素是 python
-    assert calls[2][-1] == "mypy"
-    assert any("check_doc_sync.py" in c for c in calls[4])
-    assert any("check_encoding.py" in c for c in calls[6])
+    assert calls[3][-1] == "mypy"
+    # 注意：c 是命令列表，须用 " ".join(c) 做子串（in 对 list 是相等比较，非子串）
+    flattened = [" ".join(c) for c in calls]
+    assert any("check_doc_sync.py" in p for p in flattened)
+    assert any("check_encoding.py" in p for p in flattened)
+    assert any("precompress_static.py" in p for p in flattened)  # 产物校验必须在链内
+
+
+def test_staged_mode_only_checks_staged_files():
+    """第十六轮：--staged 模式 ruff 只查暂存文件、未碰 index.html 时跳过 E7。"""
+    steps = va.build_steps(skip_pytest=True, skip_backtest=True, staged=True)
+    labels = [label for label, _ in steps]
+    assert "ruff(staged)" in labels, "staged 模式应有 ruff(staged) 步骤"
+    assert "check_redlines(skip-e7)" in labels, "未碰 index.html 时须跳过 E7 全量基线"
 
 
 def test_main_returns_one_when_step_fails(monkeypatch, capsys):

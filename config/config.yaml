@@ -73,7 +73,11 @@ evolve_strategy_drl_replay_mix_ratio: 0.3
 evolve_rollback_threshold: 0.95
 evolve_max_versions: 10
 evolve_symbols:
+- BTC/USDT
 - ETH/USDT
+- SOL/USDT
+- DOGE/USDT
+- XRP/USDT
 evolve_timeframe: 5m
 signal_math_ev_gate: true
 signal_math_ev_min: 0.0

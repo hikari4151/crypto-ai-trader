@@ -109,11 +109,13 @@ def _strategy_drl_train_cfg(episodes: int) -> dict:
         "val_segments": 3,
         "early_stop_patience": 0,
         "reward_dd_penalty": 0.0,
-        # E-EXP（2026-09 实验落地）：连亏抑制塑形。sweep_drl_rewards.py 30ep 双标的：
-        # baseline（vol20、无塑形）在 BTC OOS 为负（-0.006/sharpe-0.48）；vol40+此 0.5
-        # 后 OOS 转正（BTC +0.0005、ETH +0.0057/sharpe+0.42）。趋势塑形/尾部罚/回撤罚
-        # 均经实验判定无益或有害，保持 0。
-        "reward_losing_penalty": 0.5,
+        # 连亏抑制塑形（2026-10 扫参推翻旧结论）：旧 0.5 来自混淆实验（30ep 把
+        # vol40 与 0.5 一起改，提升记到了 0.5 头上）。5 标池 3-seed 扫参
+        # （.optim/exp_losing_sweep.py，levels 0.0/0.3/0.5/0.8）：
+        #   losing=0.0 → val中位 +0.12% / OOS中位 −0.73% / 正段 0,1,0
+        #   losing≥0.3 → val中位 −1.4%  / OOS中位 −4.5% / 正段全 0（差约 3.7pp）
+        # 连亏惩罚把模型推保守（交易稀少），在低波动窗口反而难赚——关闭。
+        "reward_losing_penalty": 0.0,
         "reward_trend_align": 0.0,
         # P1 课程学习（能力层次）：早期只采低难度窗口，随进度放开。
         # 不进入 _training_identity（同 episodes 语义，改动不触发锚点不可比）。

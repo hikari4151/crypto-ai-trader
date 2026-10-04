@@ -3641,8 +3641,9 @@
           <div class="evolve-curve-foot">
             <span><i class="evolve-legend-dot blue"></i>fitness（每轮训练目标）</span>
             <span><i class="evolve-legend-dot red"></i>拦截 / 回退轮次</span>
-            <span><i class="evolve-legend-dot orange"></i>挑战者未晋升</span>
+            <span><i class="evolve-legend-dot orange"></i>挑战者未晋升（下带）</span>
             <span><i class="evolve-legend-dash orange"></i>挑战者轮 fitness（虚线）</span>
+            <span class="evolve-legend-note">下带 = 挑战者未晋升（挑战者条带内）</span>
             <span v-if="evolveCurveNote">{{evolveCurveNote}}</span>
           </div>
         </div>
@@ -5694,7 +5695,9 @@ const app = createApp({
                        itemStyle:{color:ct.danger, opacity:.95}});
         }
         if (chalEvCount) {
-          series.push({type:'scatter', name:'挑战者未晋升', yAxisIndex:1, z:4,
+          // 2026-09-30 用户验收：未晋升点画进挑战者条带（grid1）——xAxisIndex:1 + yAxisIndex:3
+          //（条带事件轴底部坐标）；曾留在主图事件轨（yAxisIndex:1），主线下探被橙点切断。
+          series.push({type:'scatter', name:'挑战者未晋升', xAxisIndex:1, yAxisIndex:3, z:4,
                        data: chalEvPts, symbol:'circle',
                        symbolSize: (v, p) => bucketSize(chalBuckets, p.dataIndex),
                        itemStyle:{color:ct.orange, opacity:.95}});
@@ -5712,8 +5715,12 @@ const app = createApp({
         // 否则挑战者条带里会重复一遍轮次号。
         const xAxisChal = {type:'category', data:rows.map(r=>r.round_no||r.id), boundaryGap:false,
                gridIndex:1, axisLabel:{show:false}, axisTick:{show:false}, axisLine:{show:false}};
+                // 2026-09-30 用户验收（test_evolve_ui_contract）：条带开关 must 把事件点算进去——
+        // 挑战者轮 fitness 全空（无折线）但拦截/挑战者事件点存在的边界轮次，条带与 zoom
+        // 仍须存在（否则事件点退回主图、读图断层）。曾只按 chalLineCount 判定（丢事件）。
+        const hasChalBand = chalLineCount > 0 || chalEvCount > 0;
         const xAxisArr = [xAxisMain];
-        if (chalLineCount) xAxisArr.push(xAxisChal);
+        if (hasChalBand) xAxisArr.push(xAxisChal);
         // y 轴数组：[0] 主线量程（上方 nice-step 块产出）＋[1] 事件轨 ＋[2] 挑战者独立量程（仅有挑战者时）。
         // 事件散点仍走 yAxisIndex:1，语义与拆分前一致。
         const yAxisArr = [yAxisNum,
@@ -5723,7 +5730,7 @@ const app = createApp({
           // 所以只能用 0..1，并通过把事件值设为 0.05 让点精确落在绘图区底边上方 7px。
           {type:'value', min:0, max:1, show:false, gridIndex:0},
         ];
-        if (chalLineCount) {
+        if (hasChalBand) {
           // 挑战者独立量程（grid1）：按挑战者自身取值域留白 15%，且 Math.min/max(...,0) 强制含 0，
           // 全 0 的挑战者线因此落在自己的可读基线上；无有限值或区间退化时兜底 [-0.01, 0.01]。
           const chalFin = chalPts.filter(v=>v!=null && isFinite(v));
@@ -5739,10 +5746,13 @@ const app = createApp({
           yAxisArr.push({type:'value', gridIndex:1, min:chalMin, max:chalMax,
             axisLabel:{show:false}, axisLine:{show:false}, axisTick:{show:false},
             splitLine:{show:false}});
+          // 条带内事件轴（下标 3）：挑战者未晋升点在 grid1 的底部坐标
+          //（2026-09-30 验收：未晋升点落条带；事件轨 0..1 只属主图拦截/回退）。
+          yAxisArr.push({type:'value', min:0, max:1, show:false, gridIndex:1});
         }
-        // dataZoom 两 grid 共享：无挑战者时若下发 [0,1] 会引用不存在的第 2 根 x 轴 ⇒ ECharts 报错，
-        // 故按 chalLineCount 降为标量 0（该路径下 grid / x 轴数组长度均为 1，下标自洽）
-        const zoomX = chalLineCount ? [0,1] : 0;
+        // dataZoom 两 grid 共享：无挑战者条带时若下发 [0,1] 会引用不存在的第 2 根 x 轴 ⇒ ECharts 报错，
+        // 故按 hasChalBand 降为标量 0（该路径下 grid / x 轴数组长度均为 1，下标自洽）
+        const zoomX = hasChalBand ? [0,1] : 0;
         // ⚠️ notMerge 必须作为 setOption 的**第二个入参**下发，不能写成 option 里的字段。
         // 实测 vendor/echarts.min.js 5.5.0：`setOption(t,e,n)` 内部 `q(e)&&(... ,e=e.notMerge)`——
         // 它只从第二个入参读 notMerge。写成 `setOption({notMerge:true, ...})` 是**完全无效**的，
@@ -5788,7 +5798,7 @@ const app = createApp({
           // 主 grid top:16 .. 底边 172px（bottom:88），主 x 轴轮次号标签落在 172..190 的 18px 缝隙；
           // 挑战者条带 190..234px（bottom:26 + height:44）；dataZoom 滑块（bottom:4, height:14）
           // 在 242..256px，压在最下方、不与任何绘图区重叠。无挑战者时退回单 grid（数组长度 1）。
-          grid: chalLineCount
+          grid: hasChalBand
             ? [{left:56,right:18,top:16,bottom:88},{left:56,right:18,height:44,bottom:26}]
             : [{left:56,right:18,top:16,bottom:58}],
           xAxis: xAxisArr,

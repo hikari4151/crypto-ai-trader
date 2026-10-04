@@ -581,3 +581,19 @@ def test_trigger_rejected_after_stop(tmp_path):
 
     reason = asyncio.run(_run())
     assert "停止" in reason or "禁用" in reason, f"停止后手动触发应拒绝，实际 {reason!r}"
+
+
+# ============ 39. 塑形系数入身份指纹（业务面一致性） ============
+
+def test_shaping_params_change_identity_fingerprint():
+    """奖励塑形系数（连亏/回撤/趋势）是奖励语义的一部分，必须进 config_fingerprint——
+    不同塑形口径（扫参实证 losing=0.0 vs ≥0.3 差 3.7pp）产出不可互比。"""
+    from drl.evolve_engine import _training_identity, _strategy_drl_identity_config
+    cfg = _strategy_drl_identity_config({"state_window": 1}, [])
+    id_base = _training_identity("strategy_drl", "ETH/USDT", "1h",
+                                 state_window=1, config=cfg)
+    cfg_on = dict(cfg, reward_losing_penalty=0.5)
+    id_on = _training_identity("strategy_drl", "ETH/USDT", "1h",
+                               state_window=1, config=cfg_on)
+    assert id_base["config_fingerprint"] != id_on["config_fingerprint"], \
+        "连亏惩罚变更必须改变指纹（0.0 与 0.5 的奖励语义不同，不可互比）"

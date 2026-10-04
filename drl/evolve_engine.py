@@ -165,6 +165,12 @@ def _strategy_drl_identity_config(train_cfg: dict, multi_names: list) -> dict:
         "backbone": str(train_cfg.get("backbone", "mlp")),
         # 2026-10 根本性逻辑错误修复：奖励口径 / 决策间隔 / 风险系数 / 时间窗
         "reward_mode": str(train_cfg.get("reward_mode", "absolute")),
+        # 2026-10 一致性核验（业务面）：奖励**塑形系数**同样是奖励语义——连亏惩罚的
+        # 扫参实证影响 3.7pp（losing=0.0 vs ≥0.3），dd/trend 同族。此前不入指纹，
+        # 不同塑形口径的产出会被拿去互相回退比较（与 reward_mode 同一类漂移口）。
+        "reward_losing_penalty": float(train_cfg.get("reward_losing_penalty", 0.0)),
+        "reward_dd_penalty": float(train_cfg.get("reward_dd_penalty", 0.0)),
+        "reward_trend_align": float(train_cfg.get("reward_trend_align", 0.0)),
         "decision_interval": int(train_cfg.get("decision_interval", 1)),
         "risk_coef": float(train_cfg.get("risk_coef", 0.5)),
         "episode_window": int(train_cfg.get("episode_window", 0) or 0),

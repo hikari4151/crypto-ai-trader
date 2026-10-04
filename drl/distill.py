@@ -49,6 +49,9 @@ def _sample_states(teacher: ACAgent, df, cfg: dict, n_rollouts: int = 6,
     返回 (n, state_dim) 的 float 数组。
     """
     # 用与训练同口径的 env 收集状态（vol_penalty 不影响状态，只影响奖励）
+    # 口径走 policy_env_kwargs（reward_mode/decision_interval/short_enabled 等）：
+    # 蒸馏也要在"训练时那套环境"里采样状态，否则学生网络见到的状态分布与老师不同。
+    from .env import policy_env_kwargs as _policy_env_kwargs
     env = TradingEnv(
         df, start_cash=float(cfg.get("start_cash", 10000.0)),
         fee_rate=float(cfg.get("fee_rate", 0.001)),
@@ -63,10 +66,17 @@ def _sample_states(teacher: ACAgent, df, cfg: dict, n_rollouts: int = 6,
         tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
         participation_rate=float(cfg.get("participation_rate", 0.0)),
         funding_rate=float(cfg.get("funding_rate", 0.0)),
+        **_policy_env_kwargs(cfg),
     )
     states: list[np.ndarray] = []
+    # 2026-10 审计修复（LOW）：多次 rollout 用**随机起点**制造状态多样性——
+    # 曾每次 env.reset() 恒回 warmup，n_rollouts 次 rollout 是同一轨迹的重复
+    #（学生网络只见过单条轨迹的状态分布，蒸馏覆盖度被高估）。
+    _rng = np.random.default_rng(int(cfg.get("seed", 0) or 0) + 3)
+    _span = max(0, env.n - env.warmup - 200)
     for _ in range(n_rollouts):
-        # 用 teacher 的确定性策略 rollout（若数据足够，每轮起点随机）
+        # 用 teacher 的确定性策略 rollout（随机起点 → 覆盖不同行情窗口）
+        env.reset(start_offset=int(_rng.integers(0, _span + 1)) if _span > 0 else 0)
         traj = run_episode(env, lambda s: teacher.greedy_action(s))
         arr = traj.get("states")
         if arr is None or len(arr) == 0:
@@ -78,7 +88,6 @@ def _sample_states(teacher: ACAgent, df, cfg: dict, n_rollouts: int = 6,
             states.append(np.asarray(arr)[idx])
         else:
             states.append(np.asarray(arr))
-        env.reset()  # 每轮重开，覆盖不同起点
     if not states:
         raise ValueError("[distill] 未能收集到任何状态，无法蒸馏")
     out = np.concatenate(states, axis=0)

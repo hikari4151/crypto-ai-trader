@@ -282,7 +282,7 @@ async def test_engine_builds_extra_dfs_pool(tmp_path, monkeypatch):
     eth_df = _demo_df(n=500, seed=2)
     captured = {}
 
-    async def _fake_fetch(symbol: str = ""):
+    async def _fake_fetch(symbol: str = "", bars: int = 0):
         return btc_df if symbol == "BTC/USDT" else eth_df
     monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
     monkeypatch.setattr(eng, "_data_incremented", lambda *a, **k: True)
@@ -316,7 +316,7 @@ async def test_engine_multi_symbol_skips_cross_oos(tmp_path, monkeypatch):
     btc_df = _demo_df(n=500, seed=1)
     eth_df = _demo_df(n=500, seed=2)
 
-    async def _fake_fetch(symbol: str = ""):
+    async def _fake_fetch(symbol: str = "", bars: int = 0):
         return btc_df if symbol == "BTC/USDT" else eth_df
     monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
     monkeypatch.setattr(eng, "_data_incremented", lambda *a, **k: True)
@@ -354,7 +354,7 @@ async def test_engine_single_symbol_still_calls_cross_oos(tmp_path, monkeypatch)
     btc_df = _demo_df(n=500, seed=1)
     called_cross = {"n": 0}
 
-    async def _fake_fetch(symbol: str = ""):
+    async def _fake_fetch(symbol: str = "", bars: int = 0):
         return btc_df
     monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
     monkeypatch.setattr(eng, "_data_incremented", lambda *a, **k: True)
@@ -362,7 +362,7 @@ async def test_engine_single_symbol_still_calls_cross_oos(tmp_path, monkeypatch)
     monkeypatch.setattr(eng.zoo, "load_agent",
                         lambda name, version=None: fake_agent)
 
-    async def _fake_cross(agent, train_symbol, state_window):
+    async def _fake_cross(agent, train_symbol, state_window, train_cfg=None):
         called_cross["n"] += 1
         return {"symbol": "ETH/USDT", "ret": 0.02, "position_ratio": 0.5}
     monkeypatch.setattr(eng, "_cross_symbol_oos", _fake_cross)

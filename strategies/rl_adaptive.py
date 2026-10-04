@@ -25,11 +25,12 @@ from .base import Signal, Strategy
 log = logging.getLogger(__name__)
 
 try:
-    from drl.env import ACTION_BUCKETS
+    from drl.env import ACTION_BUCKETS, buckets_require_short
     from drl.agent import ACAgent
     _DRL_AVAILABLE = True
 except Exception:  # noqa: BLE001
     _DRL_AVAILABLE = False
+    buckets_require_short = None
     log.warning("[rl] DRL 模块导入失败，rl_adaptive 策略不可用")
 
 
@@ -68,6 +69,12 @@ class RLAdaptiveStrategy(Strategy):
         self._factor_expr_from_model: str = ""    # 模型文件内记录的训练表达式
         self._factor_composite: Optional[dict] = None  # 模型文件内的级联组合因子配方
         self._state_dim = 15  # 13 特征 + 持仓比例 + 浮动盈亏（+因子列时动态调整）
+        # 决策节奏（与训练 env.decision_interval 同源，见 _reload_agent）
+        self._decision_interval = 1
+        self._bars_since_decision = 10 ** 9   # 首次必然决策
+        self._last_target: Optional[float] = None
+        # 做空档 + 现货内核的告警去重（见 on_candle）
+        self._short_warned = False
         self._n_actions = len(ACTION_BUCKETS) if _DRL_AVAILABLE else 5
 
     def _load_agent(self) -> bool:
@@ -117,6 +124,11 @@ class RLAdaptiveStrategy(Strategy):
                     self._factor_composite = fc
                 if "min_trade_zone" in md:
                     self._trade_zone = float(md["min_trade_zone"])
+                # 决策间隔（2026-10 根本性逻辑错误修复）：训练时环境每 k 根K线才决策一次
+                # （env.decision_interval，见 docs/DRL训练根本性逻辑错误-诊断报告.md）。
+                # 部署端必须同节奏：否则"训练每 4 根决策、实盘每根决策"，
+                # 换手/成本/收益全都不是训练时学到的那回事。
+                self._decision_interval = max(1, int(md.get("decision_interval", 1) or 1))
             except Exception as e:  # noqa: BLE001
                 log.warning("[rl] 模型元数据读取失败: %s", e)
             return True
@@ -284,12 +296,50 @@ class RLAdaptiveStrategy(Strategy):
 
         # ---- 策略置信度：基于 softmax 分布的熵倒数 ----
         # 熵越高（分布越均匀）→ 策略越不确定 → 置信度越低
-        proba = self._agent.actor.predict_proba(state.reshape(1, -1))[0]
-        action = int(np.argmax(proba))
-        target = float(ACTION_BUCKETS[action])
-        ent = float(-np.sum(np.maximum(proba, 1e-12) * np.log(np.maximum(proba, 1e-12))))
-        # 用 n_actions 归一化：max_ent = log(n_actions)，conf = 1 - ent / max_ent ∈ [0, 1]
-        confidence = float(max(0.0, min(1.0, 1.0 - ent / math.log(max(self._n_actions, 2)))))
+        # 决策节奏：与训练环境同源——训练时每 decision_interval 根K线才决策一次、
+        # 其间保持目标仓位；部署端在间隔内沿用上一次目标，不再重新前向。
+        # 口径不一致会让"训练时学会的换手"在实盘被放大 k 倍（成本吞掉全部收益）。
+        self._bars_since_decision += 1
+        if (self._last_target is not None
+                and self._bars_since_decision < self._decision_interval):
+            # 2026-10 审计修复（MED）：间隔内**不调仓**。训练 env 是 semi-MDP：
+            # 一次动作后推进 k 根K线、期间不再按目标与仓位差撮合（价格漂移留到
+            # 下一决策点拉回）。此前部署端在间隔内沿用 _last_target 仍走 diff+zone
+            # 调仓 → 多出训练中不存在的撮合（换手/成本/仓位状态分布全漂移）——
+            # 注释（299-301 行）声称"其间保持目标仓位"，但训练端并没有这个行为。
+            return None
+        else:
+            proba = self._agent.actor.predict_proba(state.reshape(1, -1))[0]
+            action = int(np.argmax(proba))
+            # 档位随模型走（2026-10）：模型文件自带 action_buckets；旧模型无该键时
+            # 回退模块默认（长仓 5 档）。曾固定用模块常量——训练用 9 档（含做空）时
+            # 部署会按 5 档解释同一个 argmax，静默改变语义。
+            _buckets = getattr(self._agent, "action_buckets", None) or ACTION_BUCKETS
+            # 2026-10 审计修复（LOW）：运行时兜底——加载损坏/不一致模型缺键时
+            # argmax 可能超出档位长度，显式告警并跳过本根（不 IndexError 崩掉实时链）。
+            if action >= len(_buckets):
+                if not self._short_warned:
+                    log.warning("[rl] 模型动作索引越界（action=%d 超出 %d 档），"
+                                "模型文件动作空间损坏/不一致，本根不动作", action, len(_buckets))
+                    self._short_warned = True
+                return None
+            target = float(_buckets[action])
+            if target < 0 and buckets_require_short is not None \
+                    and buckets_require_short(_buckets):
+                # 执行层能力不足（现货内核无法建立负仓位）：绝不静默按多头/空仓执行，
+                # 也不假装在做空。此处按"不动作"处理并在首次触发时告警一次，
+                # 上游部署门（_strategy_deploy_gate）本就不允许这类模型上线。
+                if not self._short_warned:
+                    log.warning("[rl] 模型动作空间含做空档（target=%.2f），但执行内核为"
+                                "现货语义、无法做空：本策略不做任何调仓。"
+                                "请改用长仓模型或先完成交易内核做空支持。", target)
+                    self._short_warned = True
+                return None
+            ent = float(-np.sum(np.maximum(proba, 1e-12) * np.log(np.maximum(proba, 1e-12))))
+            # 用 n_actions 归一化：max_ent = log(n_actions)，conf = 1 - ent / max_ent ∈ [0, 1]
+            confidence = float(max(0.0, min(1.0, 1.0 - ent / math.log(max(self._n_actions, 2)))))
+            self._last_target = target
+            self._bars_since_decision = 0
         diff = target - pos_ratio
 
         if diff > zone and equity > 0 and cash > 0:

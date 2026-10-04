@@ -122,12 +122,20 @@ def test_drl_pine_supports_state_window_stacking():
 
 
 def test_drl_pine_target_ternary_is_valid_pine():
-    """target 档位映射必须是合法三元链（曾因拼接符误用 ' ? ' 产出非法语句）。"""
+    """target 档位映射必须是合法三元链（曾因拼接符误用 ' ? ' 产出非法语句）。
+
+    2026-10 审计修复（LOW）：决策节奏包裹后 target 行在 `if isDecision` 块内
+    （`target :=` 赋值），三元链本身不变；缺省 k=1 时 isDecision 恒真（逐根决策，
+    与旧行为语义一致）。
+    """
     from drl.pine_export import build_drl_pine
-    line = next(line for line in build_drl_pine(_agent(15)).splitlines() if line.startswith("target ="))
-    assert line == ("target = bestIdx == 0 ? 0.0 : bestIdx == 1 ? 0.25"
-                    " : bestIdx == 2 ? 0.5 : bestIdx == 3 ? 0.75 : 1.0")
-    assert line.count("?") == line.count(":")
+    lines = build_drl_pine(_agent(15)).splitlines()
+    tline = next(line for line in lines if "target :=" in line and "?" in line)
+    assert "target := bestIdx == 0 ? 0.0 : bestIdx == 1 ? 0.25" in tline
+    assert " : bestIdx == 2 ? 0.5 : bestIdx == 3 ? 0.75 : 1.0" in tline
+    # 三元链分隔冒号 = ? 数 +1（`target :=` 的赋值冒号另行扣除）
+    assert tline.count("?") == tline.count(":") - 1
+    assert any("isDecision" in line for line in lines), "缺决策节奏（semi-MDP k）"
 
 
 def test_drl_pine_features_use_training_normalization():

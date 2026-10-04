@@ -21,14 +21,22 @@ import pytest
 
 
 def test_train_drl_default_hidden_exports_pine():
-    """train_drl 用 API 默认 hidden=[16,16] 训练：必须产出可导出的 Pine 代码。"""
+    """train_drl 用 API 默认 hidden=[16,16] 训练：必须产出可导出的 Pine 代码。
+
+    本用例只验证 **Pine 体积门/导出链路**，故关闭 OOS 硬门（`oos_hard_gate: False`）：
+    2026-10 起过拟合衰减改走**超额**口径（docs/DRL成本标定-决策频率与滑点复核.md §4.1），
+    在 `generate_demo` 的随机游走数据上"空仓在下跌段白拿超额"会被判为不可复现 →
+    deployment_blocked=True → 没有 Pine 代码。那是判据的正确行为（由
+    tests/test_deploy_gate_benchmark.py 覆盖），与"网络装不装得进 Pine"无关。
+    """
     from backtest.data_loader import generate_demo
     from drl.agent import train_drl
     df = generate_demo(timeframe="5m", n=700, seed=7)
     cfg = {"episodes": 2, "hidden": [16, 16], "n_episodes": 2, "ppo_epochs": 2,
            "mini_batch_size": 32, "vol_penalty": 20, "seed": 1,
            "start_cash": 10000, "fee_rate": 0.001, "slippage": 0.0005,
-           "state_window": 1, "oos_min_bars": 80, "time_budget": 0}
+           "state_window": 1, "oos_min_bars": 80, "time_budget": 0,
+           "oos_hard_gate": False}
     res = train_drl(df, cfg)
     assert res.get("pine_code"), "默认 [16,16] 训练必须产出 Pine 代码"
     assert not res.get("pine_note")
@@ -39,7 +47,8 @@ def test_train_drl_large_hidden_gives_explicit_note():
     """用户调大 hidden=[64,64] 且关闭蒸馏：明确给出"装不进 Pine"的原因，不静默。
 
     （蒸馏开启时大网络会自动蒸馏导出 Pine——见 test_drl_distill.py；
-    本测试覆盖"关闭蒸馏"的旧行为：仍要显式原因而非静默。）
+    本测试覆盖"关闭蒸馏"的旧行为：仍要显式原因而非静默。
+    同上级：关闭 OOS 硬门，隔离"体积门"这一个被测点。）
     """
     from backtest.data_loader import generate_demo
     from drl.agent import train_drl
@@ -48,7 +57,7 @@ def test_train_drl_large_hidden_gives_explicit_note():
            "mini_batch_size": 32, "vol_penalty": 20, "seed": 1,
            "start_cash": 10000, "fee_rate": 0.001, "slippage": 0.0005,
            "state_window": 1, "oos_min_bars": 80, "time_budget": 0,
-           "distill": False}
+           "distill": False, "oos_hard_gate": False}
     res = train_drl(df, cfg)
     assert not res.get("pine_code"), "关闭蒸馏时大网络模型应被体积门拦截"
     note = res.get("pine_note") or ""
@@ -66,7 +75,7 @@ def test_train_drl_multi_symbol_still_exports_pine():
            "mini_batch_size": 32, "vol_penalty": 20, "seed": 1,
            "start_cash": 10000, "fee_rate": 0.001, "slippage": 0.0005,
            "state_window": 1, "oos_min_bars": 80, "time_budget": 0,
-           "extra_mix_ratio": 0.5}
+           "extra_mix_ratio": 0.5, "oos_hard_gate": False}
     res = train_drl(main_df, cfg, extra_dfs={"ETH/USDT": eth_df})
     assert res.get("multi_symbol") is True
     assert res.get("pine_code"), "多标训练 + 默认网络仍应可导出 Pine"

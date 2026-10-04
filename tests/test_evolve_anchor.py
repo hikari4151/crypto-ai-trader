@@ -222,7 +222,7 @@ def engine(tmp_path, monkeypatch):
     eng._rolling_window = 200
     df = generate_demo(timeframe="1h", n=400, seed=42)
 
-    async def _fake_fetch(symbol: str = ""):
+    async def _fake_fetch(symbol: str = "", bars: int = 0):
         return df
     monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
     holder = {"result": None}
@@ -232,7 +232,7 @@ def engine(tmp_path, monkeypatch):
     monkeypatch.setattr(ev, "register_dynamic", lambda name, spec: registered.append(name))
     monkeypatch.setattr(eng, "_register_rl_evolve", lambda: _noop_register(registered))
 
-    async def _no_cross(agent, train_symbol, state_window):
+    async def _no_cross(agent, train_symbol, state_window, train_cfg=None):
         return None
     # 跨标门与本题无关，桩掉以免结论受"维度不匹配恰好报错"这种偶然性影响
     monkeypatch.setattr(eng, "_cross_symbol_oos", _no_cross)
@@ -275,24 +275,19 @@ async def test_comparable_exchange_anchor_still_protects(engine):
     eng, registered, holder = engine
     # 锚点必须与当前训练轮同身份（symbol/timeframe/state_window/config_fingerprint）
     # 才会进入回退比较——缺身份字段的旧锚点按 unknown 处理，不压新模型。
-    from drl.evolve_engine import _training_identity, _strategy_drl_train_cfg
+    from drl.evolve_engine import (_training_identity, _strategy_drl_train_cfg,
+                                   _strategy_drl_identity_config)
     tf = eng._effective_timeframe()
     sym = eng._symbols[eng._symbol_idx % len(eng._symbols)]  # 不推进轮换索引
     cfg = _strategy_drl_train_cfg(8)
     # P0 多标的：身份指纹须含 multi_symbol 键（引擎多标模式产出与单标不可比）；
     # 本用例是单标轮（_result 无 multi_extra_names → []），锚点必须同口径构造。
-    # P1 时序骨干：身份指纹还须含 backbone（GRU 与 MLP 产出不可互比回退）。
+    # 身份配置由 _strategy_drl_identity_config 单点生成（与引擎同源），
+    # 避免每次训练口径扩容（骨干/奖励口径/决策间隔…）后本用例手工清单漂移。
     identity = _training_identity(
         "strategy_drl", sym, tf,
         state_window=int(cfg["state_window"]),
-        config={
-            "episodes": int(getattr(settings, "evolve_strategy_drl_episodes", 8)),
-            "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 20.0)),
-            "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
-            "multi_symbol": False,
-            "multi_extra_names": [],
-            "backbone": str(cfg.get("backbone", "mlp")),
-        })
+        config=_strategy_drl_identity_config(cfg, []))
     _seed_anchor(eng, 9.0, "exchange", oos_ret=0.12, identity=identity)
     holder["result"] = _result(best_ret=0.30, oos_ret=0.01)
 

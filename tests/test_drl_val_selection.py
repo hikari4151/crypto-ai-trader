@@ -82,7 +82,7 @@ def _make_engine(tmp_path, monkeypatch, result_extras):
     eng._rolling_window = 200
     df = generate_demo(timeframe="5m", n=500, seed=42)
 
-    async def _fake_fetch(symbol: str = ""):
+    async def _fake_fetch(symbol: str = "", bars: int = 0):
         return df
     monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
     monkeypatch.setattr(eng, "_data_incremented", lambda *a, **k: True)

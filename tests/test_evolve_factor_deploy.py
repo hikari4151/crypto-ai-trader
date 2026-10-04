@@ -209,7 +209,7 @@ async def test_passing_factor_miner_auto_deploys(tmp_path, monkeypatch):
     eng = _engine(tmp_path)
     eng._rolling_window = 200
     df = generate_demo(timeframe="1h", n=400, seed=42)
-    async def _stub_fetch(symbol=""):
+    async def _stub_fetch(symbol="", bars: int = 0):
         return df
     monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
     holder = {"result": _factor_result()}
@@ -258,7 +258,7 @@ async def test_rejected_factor_miner_does_not_deploy(tmp_path, monkeypatch):
     eng = _engine(tmp_path)
     eng._rolling_window = 200
     df = generate_demo(timeframe="1h", n=400, seed=42)
-    async def _stub_fetch(symbol=""):
+    async def _stub_fetch(symbol="", bars: int = 0):
         return df
     monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
     holder = {"result": _factor_result(valid=False)}
@@ -280,7 +280,7 @@ async def test_empty_weights_skips_deploy_with_error(tmp_path, monkeypatch):
     eng = _engine(tmp_path)
     eng._rolling_window = 200
     df = generate_demo(timeframe="1h", n=400, seed=42)
-    async def _stub_fetch(symbol=""):
+    async def _stub_fetch(symbol="", bars: int = 0):
         return df
     monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
     holder = {"result": _factor_result(weights={})}
@@ -304,7 +304,7 @@ async def test_deploy_exception_does_not_break_training(tmp_path, monkeypatch):
     eng = _engine(tmp_path)
     eng._rolling_window = 200
     df = generate_demo(timeframe="1h", n=400, seed=42)
-    async def _stub_fetch(symbol=""):
+    async def _stub_fetch(symbol="", bars: int = 0):
         return df
     monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
     holder = {"result": _factor_result()}
@@ -364,7 +364,7 @@ async def test_cascade_report_companion_written_on_accepted_round(tmp_path, monk
     eng = _engine(tmp_path)
     eng._rolling_window = 200
     df = generate_demo(timeframe="1h", n=400, seed=42)
-    async def _stub_fetch(symbol=""):
+    async def _stub_fetch(symbol="", bars: int = 0):
         return df
     monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
     holder = {"result": _factor_result()}
@@ -399,7 +399,7 @@ async def test_factor_miner_identity_excludes_selected_factors(tmp_path, monkeyp
     eng = _engine(tmp_path)
     eng._rolling_window = 200
     df = generate_demo(timeframe="1h", n=400, seed=42)
-    async def _stub_fetch(symbol=""):
+    async def _stub_fetch(symbol="", bars: int = 0):
         return df
     monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
     holder = {"result": _factor_result()}
@@ -439,7 +439,7 @@ async def test_combo_health_computed_on_pass_round(tmp_path, monkeypatch):
     eng = _engine(tmp_path)
     eng._rolling_window = 200
     df = generate_demo(timeframe="1h", n=400, seed=42)
-    async def _stub_fetch(symbol=""):
+    async def _stub_fetch(symbol="", bars: int = 0):
         return df
     monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
     holder = {"result": _factor_result()}  # weights={"vol_ratio": 0.5}
@@ -475,7 +475,7 @@ async def test_health_refreshed_on_reject_round_for_deployed(tmp_path, monkeypat
         {"enabled": True, "valid": True}, {"fitness": 0.02, "round_no": 1})
     eng._factor_miner_status["combo_strategy"] = "evolve_combo_BTC_USDT"
     try:
-        async def _stub_fetch(symbol=""):
+        async def _stub_fetch(symbol="", bars: int = 0):
             return df
         monkeypatch.setattr(eng, "_fetch_latest_data", _stub_fetch)
         holder = {"result": _factor_result(valid=False)}  # 本轮被 OOS 拒

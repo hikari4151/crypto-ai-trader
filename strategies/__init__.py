@@ -1,4 +1,5 @@
 """策略注册表：内置策略 + AI 动态设计策略。"""
+import threading
 from typing import Optional
 from .base import Strategy
 from .dual_ma import DualMAStrategy
@@ -16,6 +17,10 @@ _REGISTRY: dict[str, type[Strategy]] = {
     FactorSignalStrategy.name: FactorSignalStrategy,
     MetaController.name: MetaController,
 }
+# 2026-10 审计修复（MED）：_DYNAMIC 被 web 请求线程（register/remove）与引擎主循环
+# 线程（list/get）共享读写。不加锁时，迭代期间另一线程插入会抛
+# "dictionary changed size during iteration"（500）或读到半更新 spec。
+_DYNAMIC_LOCK = threading.RLock()
 _DYNAMIC: dict[str, dict] = {}   # AI 设计策略 -> {name, title, description, logic, params, executor}
 
 
@@ -62,21 +67,23 @@ def register_dynamic(name: str, spec: dict) -> None:
     # 重新长成"正常策略"。显式带合法 status 的以显式为准（留给"人工提升为可用"）。
     if spec.get("status") not in ("active", "draft"):
         spec["status"] = "draft" if _draft_reason_from_flags(spec) else "active"
-    _DYNAMIC[name] = spec
+    with _DYNAMIC_LOCK:
+        _DYNAMIC[name] = spec
 
 
 def get_strategy(name: str) -> Strategy:
     # 动态策略优先：AI 迭代/设计会覆盖内置同名策略（如迭代 dual_ma 后参数应生效）
-    if name in _DYNAMIC:
-        executor = _DYNAMIC[name].get("executor", "price_action")
-        base = _REGISTRY.get(executor)
-        if base is None:
-            raise ValueError(f"动态策略 {name} 的 executor 无效: {executor}")
-        st = base()
-        st.name = name
-        st.description = _DYNAMIC[name].get("description", st.description)
-        st.update_params(_DYNAMIC[name].get("params", {}))
-        return st
+    with _DYNAMIC_LOCK:
+        if name in _DYNAMIC:
+            executor = _DYNAMIC[name].get("executor", "price_action")
+            base = _REGISTRY.get(executor)
+            if base is None:
+                raise ValueError(f"动态策略 {name} 的 executor 无效: {executor}")
+            st = base()
+            st.name = name
+            st.description = _DYNAMIC[name].get("description", st.description)
+            st.update_params(_DYNAMIC[name].get("params", {}))
+            return st
     if name in _REGISTRY:
         return _REGISTRY[name]()
     raise ValueError(f"未知策略: {name}，可用: {[s['name'] for s in list_strategies()]}")
@@ -94,36 +101,38 @@ def list_strategies() -> list[dict]:
          "source": "builtin", "builtin": True}
         for cls in _REGISTRY.values() if cls.name not in _DYNAMIC
     ]
-    for name, spec in _DYNAMIC.items():
-        out.append({
-            "name": name, "description": spec.get("description", ""),
-            "default_params": dict(spec.get("params", {})),
-            "param_schema": dict(spec.get("param_schema", {})),
-            "executor": spec.get("executor", "price_action"),
-            "title": spec.get("title", ""),
-            "logic": spec.get("logic", ""),
-            "risk_tips": spec.get("risk_tips", []),
-            "version": spec.get("version", ""),
-            "iter_no": spec.get("iter_no"),
-            "based_on": spec.get("based_on", ""),
-            "created_by": spec.get("created_by", ""),
-            "overfit": spec.get("overfit"),
-            "blocked_by_overfit": spec.get("blocked_by_overfit", False),
-            # L2：草稿状态。"draft" = 未证明（过拟合未过 / 样本外证据不足），
-            # 前端据此分区显示，迭代父代选择与引擎 AI 热更新据此排除。
-            "status": spec.get("status", "active"),
-            "draft": spec.get("status") == "draft",
-            "draft_reason": spec.get("draft_reason") or _draft_reason_from_flags(spec),
-            "overfit_inconclusive": spec.get("overfit_inconclusive", False),
-            "model_path": (spec.get("params") or {}).get("model_path", ""),
-            "source": "ai",
-            "ai_designed": True,
-        })
+    with _DYNAMIC_LOCK:
+        for name, spec in _DYNAMIC.items():
+            out.append({
+                "name": name, "description": spec.get("description", ""),
+                "default_params": dict(spec.get("params", {})),
+                "param_schema": dict(spec.get("param_schema", {})),
+                "executor": spec.get("executor", "price_action"),
+                "title": spec.get("title", ""),
+                "logic": spec.get("logic", ""),
+                "risk_tips": spec.get("risk_tips", []),
+                "version": spec.get("version", ""),
+                "iter_no": spec.get("iter_no"),
+                "based_on": spec.get("based_on", ""),
+                "created_by": spec.get("created_by", ""),
+                "overfit": spec.get("overfit"),
+                "blocked_by_overfit": spec.get("blocked_by_overfit", False),
+                # L2：草稿状态。"draft" = 未证明（过拟合未过 / 样本外证据不足），
+                # 前端据此分区显示，迭代父代选择与引擎 AI 热更新据此排除。
+                "status": spec.get("status", "active"),
+                "draft": spec.get("status") == "draft",
+                "draft_reason": spec.get("draft_reason") or _draft_reason_from_flags(spec),
+                "overfit_inconclusive": spec.get("overfit_inconclusive", False),
+                "model_path": (spec.get("params") or {}).get("model_path", ""),
+                "source": "ai",
+                "ai_designed": True,
+            })
     return out
 
 
 def get_dynamic(name: str) -> Optional[dict]:
-    return _DYNAMIC.get(name)
+    with _DYNAMIC_LOCK:
+        return _DYNAMIC.get(name)
 
 
 def is_draft(name: str) -> bool:
@@ -133,28 +142,32 @@ def is_draft(name: str) -> bool:
     但：① 不能作为迭代链的父代（避免低交易/过拟合特征被继承放大）；
         ② 引擎的 AI 参数热更新通道不采用（人工启用的策略由人负责，AI 不接管）。
     """
-    return (_DYNAMIC.get(name) or {}).get("status") == "draft"
+    with _DYNAMIC_LOCK:
+        return (_DYNAMIC.get(name) or {}).get("status") == "draft"
 
 
 def rename_dynamic(old_name: str, new_name: str) -> bool:
     """重命名动态策略（内置策略不可改名）。返回是否成功。"""
-    if old_name not in _DYNAMIC:
-        return False
-    if new_name in _REGISTRY or new_name in _DYNAMIC:
-        raise ValueError(f"策略名 {new_name} 已被占用")
-    spec = _DYNAMIC.pop(old_name)
-    spec["name"] = new_name
-    _DYNAMIC[new_name] = spec
-    return True
+    with _DYNAMIC_LOCK:
+        if old_name not in _DYNAMIC:
+            return False
+        if new_name in _REGISTRY or new_name in _DYNAMIC:
+            raise ValueError(f"策略名 {new_name} 已被占用")
+        spec = _DYNAMIC.pop(old_name)
+        spec["name"] = new_name
+        _DYNAMIC[new_name] = spec
+        return True
 
 
 def remove_dynamic(name: str) -> bool:
     """删除动态策略（内置策略不可删除）。返回是否成功。"""
-    if name in _DYNAMIC:
-        _DYNAMIC.pop(name, None)
-        return True
-    return False
+    with _DYNAMIC_LOCK:
+        if name in _DYNAMIC:
+            _DYNAMIC.pop(name, None)
+            return True
+        return False
 
 
 def dynamic_names() -> list[str]:
-    return list(_DYNAMIC)
+    with _DYNAMIC_LOCK:
+        return list(_DYNAMIC)

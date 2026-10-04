@@ -75,13 +75,16 @@ class EvolveObservationsMixin:
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] walk-forward读取flat元数据失败（按无因子列）: %s", e)
 
-        from drl.env import TradingEnv, run_episode
+        from drl.env import TradingEnv, run_episode, policy_env_kwargs_from_settings
         from drl.walkforward import (build_factor_column, expanding_fold_bounds,
                                      metrics_from_traj, summarize_folds)
+        _policy_kw = policy_env_kwargs_from_settings()
+        # 2026-10 审计修复（MED）：死区与训练同源（曾硬编码 0.05，训练 0.10）
+        _train_zone = float(getattr(settings, "evolve_strategy_drl_min_trade_zone", 0.10) or 0.10)
         probe = TradingEnv(df.iloc[:min(200, len(df))], start_cash=10000.0, fee_rate=0.001,
                            vol_penalty=float(getattr(settings, "evolve_vol_penalty", 40.0)),
-                           slippage=0.0005, min_trade_zone=0.05,
-                           extra_factors=None, state_window=state_window)
+                           slippage=0.0005, min_trade_zone=_train_zone,
+                           extra_factors=None, state_window=state_window, **_policy_kw)
         base_dim = probe.state_dim
         factor_mode = "model_metadata" if factor_composite is not None else (
             "deployed_weights_fold_local_approx" if agent.state_dim > base_dim else "none")
@@ -109,8 +112,8 @@ class EvolveObservationsMixin:
                                 extra = (raw - mu) / sd
                     env = TradingEnv(seg, start_cash=10000.0, fee_rate=0.001,
                                      vol_penalty=float(getattr(settings, "evolve_vol_penalty", 40.0)),
-                                     slippage=0.0005, min_trade_zone=0.05,
-                                     extra_factors=extra, state_window=state_window)
+                                     slippage=0.0005, min_trade_zone=_train_zone,
+                                     extra_factors=extra, state_window=state_window, **_policy_kw)
                     if env.state_dim != agent.state_dim:
                         log.warning("[evolve] walk-forward跳过：模型state_dim=%d vs 环境%d",
                                     agent.state_dim, env.state_dim)
@@ -203,14 +206,17 @@ class EvolveObservationsMixin:
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] GAP-01读取flat元数据失败（按无因子列）: %s", e)
 
-        from drl.env import TradingEnv, run_episode
+        from drl.env import TradingEnv, run_episode, policy_env_kwargs_from_settings
         from drl.walkforward import (build_factor_column, expanding_fold_bounds,
                                      metrics_from_traj, summarize_folds)
         from drl.gap01 import summarize_gap01
         _vol = float(getattr(settings, "evolve_vol_penalty", 40.0))
+        _policy_kw = policy_env_kwargs_from_settings()
+        # 2026-10 审计修复（MED）：死区与训练同源（曾硬编码 0.05，训练 0.10）
+        _train_zone = float(getattr(settings, "evolve_strategy_drl_min_trade_zone", 0.10) or 0.10)
         probe = TradingEnv(df.iloc[:min(200, len(df))], start_cash=10000.0, fee_rate=0.001,
-                           vol_penalty=_vol, slippage=0.0005, min_trade_zone=0.05,
-                           extra_factors=None, state_window=state_window)
+                           vol_penalty=_vol, slippage=0.0005, min_trade_zone=_train_zone,
+                           extra_factors=None, state_window=state_window, **_policy_kw)
         base_dim = probe.state_dim
         factor_mode = ("model_metadata" if factor_composite is not None else
                        ("deployed_weights_fold_local_approx" if agent.state_dim > base_dim else "none"))
@@ -238,8 +244,8 @@ class EvolveObservationsMixin:
                                 extra = (raw - mu) / sd
                     env = TradingEnv(seg, start_cash=10000.0, fee_rate=fee_rate,
                                      vol_penalty=_vol, slippage=slippage,
-                                     min_trade_zone=0.05, extra_factors=extra,
-                                     state_window=state_window)
+                                     min_trade_zone=_train_zone, extra_factors=extra,
+                                     state_window=state_window, **_policy_kw)
                     if env.state_dim != agent.state_dim:
                         continue
                     traj = run_episode(env, lambda st: agent.greedy_action(st))
@@ -349,6 +355,10 @@ class EvolveObservationsMixin:
         self._strategy_drl_status["longwindow_30d_ret"] = ret30
         self._strategy_drl_status["longwindow_90d_ret"] = ret90
         report = {
+            # 2026-10 审计修复（LOW）：观测单文件被多标轮换覆盖——带 symbol/timeframe
+            # 归属标记（walkforward/gap01 已有，longwindow 补齐），前端可据此过滤。
+            "symbol": symbol, "timeframe": self._effective_timeframe(),
+            "model": "strategy_drl(best)",
             "verdict": verdict["verdict"], "reason": verdict["reason"],
             "30d_ret": ret30, "90d_ret": ret90,
             "bars_30d": len(df30), "bars_90d": len(df90),
@@ -386,39 +396,79 @@ class EvolveObservationsMixin:
                 limit=max_bars, max_candles=max_bars)
             if df is None or len(df) < 5000:
                 return True, "长窗数据不足（放行）"
-            import json as _json
-            import tempfile as _tmp
-            d = agent.to_dict()
-            d["factor_composite"] = factor_composite or {}
-            d["factor_mu"] = float(factor_mu or 0.0)
-            d["factor_sd"] = float(factor_sd or 1.0)
-            d["factor_expression"] = ""
-            d["state_window"] = int(train_cfg.get("state_window", 4))
-            with _tmp.NamedTemporaryFile("w", suffix=".json", delete=False,
-                                         encoding="utf-8") as f:
-                _json.dump(d, f)
-                fp = f.name
-            from backtest.engine import BacktestConfig, run_backtest
+            # 2026-10 审计修复（HIGH-1）：临时模型载荷带训练同源口径
+            #（decision_interval/min_trade_zone），并把 factor_* 也原样带入，
+            # 否则 rl_adaptive 按 k=1/zone=0.02 回放 k=8/zone=0.10 训练的候选。
+            tc = dict(train_cfg)
+            tc.update(factor_composite=factor_composite or {},
+                      factor_mu=factor_mu or 0.0, factor_sd=factor_sd or 1.0)
+            with _TempModelFile(_build_candidate_model_dict(agent, tc)) as tf:
+                fp = tf.name
+                from backtest.engine import BacktestConfig, run_backtest
 
-            async def _run_win(bars: int) -> Optional[float]:
-                dfp = df.iloc[-bars:]
-                cfg = BacktestConfig(symbol=symbol, timeframe=self._effective_timeframe(),
-                                     strategy_name="rl_adaptive",
-                                     strategy_params={"model_path": fp, "buy_zone": 0.02},
-                                     start_cash=10000.0, fee_rate=0.001, slippage=0.0005)
-                r = await asyncio.to_thread(run_backtest, dfp, cfg)
-                return float((r.get("metrics") or {}).get("total_return") or 0.0)
+                async def _run_win(bars: int) -> Optional[float]:
+                    dfp = df.iloc[-bars:]
+                    cfg = BacktestConfig(symbol=symbol, timeframe=self._effective_timeframe(),
+                                         strategy_name="rl_adaptive",
+                                         strategy_params={"model_path": fp, "buy_zone": 0.02},
+                                         start_cash=10000.0, fee_rate=0.001, slippage=0.0005)
+                    r = await asyncio.to_thread(run_backtest, dfp, cfg)
+                    return float((r.get("metrics") or {}).get("total_return") or 0.0)
 
-            # P2-③（2026-09-22）：多窗口并行回放（共用数据源 df）
-            _results = await asyncio.gather(*[_run_win(bars) for bars, _ in _windows])
-            for (bars, tag), ret in zip(_windows, _results):
-                if ret is None:
-                    return True, f"长窗{tag}回放失败（放行）"
-                if ret <= 0:
-                    return False, f"长窗{tag}={ret:+.4f}（FAIL，不部署）"
-            _tags = "/".join(t for _, t in _windows)
-            return True, f"长窗{_tags}均正（PASS）"
+                # P2-③（2026-09-22）：多窗口并行回放（共用数据源 df）
+                _results = await asyncio.gather(*[_run_win(bars) for bars, _ in _windows])
+                for (bars, tag), ret in zip(_windows, _results):
+                    if ret is None:
+                        return True, f"长窗{tag}回放失败（放行）"
+                    if ret <= 0:
+                        return False, f"长窗{tag}={ret:+.4f}（FAIL，不部署）"
+                _tags = "/".join(t for _, t in _windows)
+                return True, f"长窗{_tags}均正（PASS）"
         except Exception as e:  # noqa: BLE001
             log.warning("[evolve] 部署长窗门计算失败（放行）: %s", e)
             return True, f"长窗门计算失败（放行）: {e}"
+
+def _build_candidate_model_dict(agent, train_cfg: dict) -> dict:
+    """长窗门/任何"临时模型文件 → rl_adaptive 回放"的模型载荷（2026-10 审计修复 HIGH-1）。
+
+    必须带训练同源口径：decision_interval（rl_adaptive 缺省 k=1 → 逐根决策，换手/成本
+    与 k=8 训练不是一回事）、min_trade_zone（缺省 zone=0.02）。此前只带 factor/state_window，
+    长窗门回放按 k=1 评估 k=8 训练的候选，这道"部署前最后一道门"量错了节奏。
+    """
+    d = agent.to_dict()
+    d["factor_composite"] = train_cfg.get("factor_composite") or {}
+    d["factor_mu"] = float(train_cfg.get("factor_mu", 0.0) or 0.0)
+    d["factor_sd"] = float(train_cfg.get("factor_sd", 1.0) or 1.0)
+    d["factor_expression"] = str(train_cfg.get("factor_expression", "") or "").strip() or ""
+    d["state_window"] = int(train_cfg.get("state_window", 4))
+    d["decision_interval"] = max(1, int(train_cfg.get("decision_interval", 1) or 1))
+    d["min_trade_zone"] = float(train_cfg.get("min_trade_zone", 0.05))
+    d["short_enabled"] = bool(train_cfg.get("short_enabled", False))
+    return d
+
+
+class _TempModelFile:
+    """临时模型 JSON 的 with 式生命周期：退出即删除（审计修复：此前 delete=False 永不清理）。"""
+
+    def __init__(self, data: dict):
+        import json as _json
+        import tempfile as _tmp
+        self._tmp = _tmp.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                            encoding="utf-8")
+        _json.dump(data, self._tmp)
+        self._tmp.flush()
+        self.name = self._tmp.name
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        import os
+        try:
+            self._tmp.close()
+        finally:
+            try:
+                os.unlink(self.name)
+            except FileNotFoundError:
+                pass
 

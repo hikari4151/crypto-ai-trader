@@ -366,6 +366,7 @@ def make_worker_env(sample: dict, cfg: dict, backend: str = "numpy") -> TradingE
     透传 cfg。precomputed_features 用切片特征矩阵（不再重复计算）。
     """
     from .env import TradingEnv as _T
+    from .env import policy_env_kwargs as _policy_env_kwargs
     return _T(
         sample["df_slice"],
         start_cash=float(cfg.get("start_cash", 10000.0)),
@@ -384,4 +385,6 @@ def make_worker_env(sample: dict, cfg: dict, backend: str = "numpy") -> TradingE
         participation_rate=float(cfg.get("participation_rate", 0.0)),
         funding_rate=float(cfg.get("funding_rate", 0.0)),
         precomputed_features=sample["features_slice"],
+        # 奖励口径 / 决策间隔与主训练路径同源（见 env.policy_env_kwargs）
+        **_policy_env_kwargs(cfg),
     )

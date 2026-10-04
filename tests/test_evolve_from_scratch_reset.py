@@ -42,11 +42,15 @@ def _fake_result(oos_enabled=False):
 
 def _make_strategy_engine(tmp_path, monkeypatch):
     from backtest.data_loader import generate_demo
+    from config.settings import settings
+    # 本组测试只验证轮次/重置/连拒逻辑：把多 seed 钉到 1，避免
+    # evolve_strategy_drl_seeds=3 让桩训练被调用 3 次、计数断言失真
+    monkeypatch.setattr(settings, "evolve_strategy_drl_seeds", 1, raising=False)
     eng = EvolveEngine(_MetaDB(), EventBus(), tmp_path / "models")
     eng._rolling_window = 200
     df = generate_demo(timeframe="5m", n=500, seed=42)
 
-    async def _fake_fetch(symbol: str = ""):
+    async def _fake_fetch(symbol: str = "", bars: int = 0):
         return df
     monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
     fake_best = _agent()
@@ -236,7 +240,12 @@ async def test_replay_buffer_shared_across_symbols_multi(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_challenger_round_reset_does_not_clear_streak(tmp_path, monkeypatch):
-    """挑战者轮不参与该重置：既不清基线，也不清零计数（保持冠军轮阈值语义）。"""
+    """挑战者轮不参与该重置：既不清基线，也不清零计数（保持冠军轮阈值语义）。
+
+    2026-10 审计修复（MED）：挑战者轮**不递增** _reject_streak——challenger_kept/
+    degraded 是"晋级失败被冠军压住"的健康交替，计入 streak 会让选模合格的冠军约每
+    5 个挑战者轮被强制 from-scratch（丢经验）。旧断言 ==11（递增）锁的正是这个 bug。
+    """
     from config.settings import settings
     import drl.evolve_engine as ev
     eng, fake_best = _make_strategy_engine(tmp_path, monkeypatch)
@@ -253,6 +262,6 @@ async def test_challenger_round_reset_does_not_clear_streak(tmp_path, monkeypatc
 
     await eng._train_strategy_drl_once(force=False)
     assert captured.get("base_agent") is fake_best, "挑战者轮不应被 from-scratch 重置"
-    assert eng._reject_streak["strategy_drl"] == 11, "挑战者轮不清零"
+    assert eng._reject_streak["strategy_drl"] == 10, "挑战者轮不递增（健康交替不累积）"
 
 

@@ -26,7 +26,7 @@ async def test_gap01_refetches_when_df_shorter_than_bars(tmp_path, monkeypatch):
     eng = EvolveEngine(_MetaDB(), EventBus(), tmp_path / "models")
     small = generate_demo(timeframe="5m", n=3000, seed=7)
 
-    async def _fake_fetch(symbol: str = ""):
+    async def _fake_fetch(symbol: str = "", bars: int = 0):
         return small
     monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
 
@@ -59,7 +59,7 @@ async def test_walkforward_refetches_when_df_shorter_than_bars(tmp_path, monkeyp
     eng = EvolveEngine(_MetaDB(), EventBus(), tmp_path / "models")
     small = generate_demo(timeframe="5m", n=3000, seed=7)
 
-    async def _fake_fetch(symbol: str = ""):
+    async def _fake_fetch(symbol: str = "", bars: int = 0):
         return small
     monkeypatch.setattr(eng, "_fetch_latest_data", _fake_fetch)
 

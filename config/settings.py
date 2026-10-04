@@ -192,7 +192,14 @@ class Settings(BaseSettings):
     evolve_factor_miner_fitness_mode: str = "net"
     evolve_factor_miner_cost_per_turn: float = 0.002   # 方向翻转双边费率（fee 0.1% ×2）
     evolve_factor_miner_net_fitness_scale: float = 500.0
-    evolve_strategy_drl_episodes: int = 8          # 每轮策略 DRL 训练轮数（连续训练取小值）
+    # 策略 DRL 每轮训练轮数。8 → 32 → 128（2026-10 修复配套 + 成本标定后的训练量）：
+    # 实测（.optim/exp_f3_history.py、exp_g_deep_train.py）同一份数据下
+    #   episodes=8   → val -0.0031、OOS -0.0084（学不出东西）
+    #   episodes=40  → val +0.0130、OOS -0.0032
+    #   episodes=150 → val +0.0196、OOS +0.0161（仅手续费口径；含滑点 -0.0129）
+    # 8 轮远在学习曲线的起点之前；1h/k=8 下 32 轮实测 14.2s，128 轮 ≈57s，
+    # 仍在 evolve_train_time_budget=120s 预算内（预算本身就是 CPU 上限，超时提前收尾）。
+    evolve_strategy_drl_episodes: int = 128
     # 策略 DRL 网络规模：导出 Pine 时权重必须整段内联，故默认取「装得进 Pine」的组合。
     # 旧配置 state_window=20 + hidden=[64,64] = 21184 权重 ≈700KB 脚本 → 进化产物
     # 永远没有可运行的自动交易代码（图上买卖点无从谈起）。改回大网络即放弃 Pine 导出。
@@ -208,11 +215,13 @@ class Settings(BaseSettings):
     # 重要性采样比率自然衰减，PPO 兼容）。0=禁用（保持旧行为）。
     #
     # 内存口径（实测 2026-09-28，5m/5000根/state_window=4）：单条轨迹 ≈1.24MB
-    # （2939 步 × 54 维 float64）。P0 并行采样上量后 n_episodes=16 → 每轮推入
-    # 16×8 = 128 条 ≈155MB；capacity 按"保留最近一次训练的部分轨迹 + 上一轮尾部"
-    # 权衡，默认 64 ≈77MB 覆盖最近半轮，混采时旧轨迹经重要性比率自然衰减。
-    # 128≈155MB；400≈484MB（不建议）。调大前请按此公式估算常驻内存。
-    evolve_strategy_drl_replay_capacity: int = 64
+    # （2939 步 × 54 维 float64）。P0 并行采样上量后 n_episodes=16、episodes=128 →
+    # 每轮推入 128×16 ≈2048 条 ≈2.5GB——**不可能全留**（2048×1.24MB 常驻不可行）。
+    # 2026-10 审计修复（MED）：capacity 是"保留最近一小段"的内存取舍而非"完整跨轮
+    # 记忆"——默认 128 ≈155MB，保留最近 ~1/16 轮（约 8 次 PPO 迭代 ×16 并行轨迹）；
+    # 老轨迹经重要性采样比率自然衰减（PPO 兼容）。要更强跨轮记忆按此公式调大，
+    # 400≈484MB（不建议）。
+    evolve_strategy_drl_replay_capacity: int = 128
     evolve_strategy_drl_replay_mix_ratio: float = 0.3   # 每批中来自回放的历史轨迹比例
     # P0 多标的混合训练（2026-10 经验广度）：开启后策略 DRL 每轮把 evolve_symbols
     # 池中的全部标的喂给 train_drl，每个 episode 随机选标的×随机时间窗切片，
@@ -287,6 +296,75 @@ class Settings(BaseSettings):
     evolve_strategy_drl_backbone: str = "mlp"
     evolve_strategy_drl_gru_hidden: int = 32
     evolve_strategy_drl_ppo_epochs: int = 8
+    # ============ 2026-10 根本性逻辑错误修复（诊断报告 docs/DRL训练根本性逻辑错误-诊断报告.md）============
+    # 背景（实测）：旧口径下奖励 = 组合收益(bp) - 40·(仓位·vol%)²——风险项单位与收益项差 10⁴、
+    # 且是对持仓的无条件扣分，空仓奖励恒为 0。实测行情涨 8.6%~26.9%、持仓账户收益为正，
+    # 但持仓累计奖励全是大负数、躺平恰好 0 = 全局最优 ⇒ DRL 把全部算力学成"永不交易"，
+    # 产线 501 轮里 452 轮被 OOS 门拒（fitness 多为 0.0，即一手没做）。
+    #   "excess" = 基准相对奖励：奖励 = tanh(相对基准的超额收益) - risk_coef·(偏离基准·vol%)²，
+    #              空仓在上涨行情里同样要付机会成本，"躺平"不再是免费的全局最优。
+    #   "absolute" = 旧行为（保留以便回退/对照实验）。
+    # 注意：reward_mode / decision_interval / risk_coef 属于训练语义，已进 _training_identity，
+    # 改动会让旧锚点判为不可比（不再拿"躺平模型"的 fitness 0 去回退新模型）。
+    evolve_strategy_drl_reward_mode: str = "excess"
+    evolve_strategy_drl_benchmark_position: float = 1.0   # 基准仓位（1.0=买入持有）
+    # 跟踪误差惩罚系数（bp 量级 / (%波动率)²）。旧 vol_penalty=40 在 1h/vol≈0.6% 时
+    # 满仓每根约扣 14bp，是行情自身漂移的数十倍；0.5 时约 0.18bp，只做平局裁决。
+    evolve_strategy_drl_risk_coef: float = 0.5
+    # 决策间隔（每 k 根K线决策一次，其间保持仓位）。旧行为 k=1：每根都重新决策，
+    # 初始近均匀策略平均 |Δ仓位|≈0.4 ⇒ 每根 0.06% 摩擦 ⇒ 2939 根亏 83%（实测 -82%）。
+    # 也就是说"随机试错"本身是自杀，优势里"别交易"的信号压过真实行情信号。
+    # k>1：探索成本降 k 倍，且每个决策覆盖 k 根行情（同样墙钟见 k 倍行情 = 样本效率）。
+    # 2026-10 成本标定：与 evolve_timeframe=1h 配套取 8（81 小时持有）——
+    # 成本壁垒表要求年化夏普 0.40（可争取）；5m 上同样换手纪律要 12~48（不可能）。
+    # 见 docs/DRL成本标定-决策频率与滑点复核.md §2。
+    evolve_strategy_drl_decision_interval: int = 8
+    # 策略 DRL 训练用的历史深度（K线根数）。0=沿用 evolve_rolling_window（旧行为：
+    # 5m 下只有 17 天，且每 60s 在同一段上重训）。>0 时拉取该深度并随机采样时间窗，
+    # 让本地 3.4 年历史真正进入训练，而不是 17 天反复背。
+    evolve_strategy_drl_history_bars: int = 30000
+    # 单条 episode 的时间窗长度（0=整段训练段）。与 history_bars 配合：
+    # 每 episode 随机取一个 window_bars 长的年代切片，批量 16 条即覆盖 16 个不同年代。
+    evolve_strategy_drl_episode_window: int = 3000
+    # ============ 2026-10 验收口径与基准对齐（docs/DRL成本标定-决策频率与滑点复核.md §4）============
+    # 旧判据 `oos_ret > 0` 与训练目标（基准相对超额）和动作空间（只能做多/空仓）互相矛盾：
+    # OOS 是熊市时，多头策略最优解 = 全程空仓 = 0%，而 0 被 `>0` 拒掉 ⇒ 结构上不可能
+    # 有任何模型过门（产线实测 452/501 轮被拒，fitness 多为 0.0）。
+    # True：`oos_ret - 同段买入持有 > 0` 才算过门——熊市里保护住资本合格，
+    #       牛市里"只会满仓躺赢"（超额 0）被拒，只有真择时能过。
+    # 报告缺基准字段（老模型/精简报告）时自动退回旧绝对判据。
+    evolve_strategy_drl_deploy_requires_benchmark: bool = True
+    # 活跃度守卫：OOS 段实收换手基数低于此值判为"几乎没交易"，不构成择时能力。
+    # 必要性：基准相对验收下，"从不交易"在下跌窗口会白拿正超额（那是没参与，不是会择时）。
+    # 单位=被收费的名义/权益（1.0 ≈ 满仓换一次）。可用 oos_trades / 段末持仓比例回退。
+    evolve_strategy_drl_deploy_min_oos_turnover: float = 0.5
+    # 分段稳健性（2026-10）：正超额子段必须 ≥ ceil(OOS段数 × 此比例)，默认 2/3。
+    # 必要性：中位数超额会被一段灾难行情掩盖——如 [-0.45, +0.02, +0.03] 中位 +0.02>0，
+    # 旧门可过，但 3 段里 2 段亏损，"择时能力"并不存在。
+    # <=0 = 关闭（回到只查中位超额）；缺逐段字段的老报告自动跳过（向前兼容）。
+    evolve_strategy_drl_deploy_min_positive_fraction: float = 2.0 / 3.0
+    # fitness 口径：True=验证段**超额**（val_ret − 同段买入持有），False=旧的绝对收益。
+    # 同一轮内基准是常数、排序等价（选模不变），但跨轮/跨窗口可比性只有超额能给：
+    # 牛市的 0% 与熊市的 0% 在绝对值口径下会被当成同一个数去比锚点。
+    evolve_strategy_drl_fitness_excess: bool = True
+    # ============ 2026-10 做空（动作空间 −1~+1）============
+    # 默认 **False**。为什么默认关：撮合内核 backtest/_matching.py 是现货语义
+    #（`sell` 要求 position>0 且 qty ≤ position），纸面/实盘同样没有做空路径——
+    # 训练会做空、实盘执行不了 = 训练与部署彻底不是一回事。
+    # True 只用于**离线实验/评估**（量出"做空到底能不能在熊市创造超额"）；
+    # 含做空档的模型会被部署门显式阻断（_strategy_deploy_gate），Pine 导出同样拒绝。
+    # 要真正部署做空，需先完成交易内核改造（撮合/纸面/实盘/Pine 四处，见
+    # docs/DRL做空支持-评估与落地.md）。
+    evolve_strategy_drl_short_enabled: bool = False
+    # ============ 2026-10 训练种子与多 seed 选模（解决"单轮判据像抽奖"）============
+    # 实测（docs/DRL做空支持-评估与落地.md §4，生产配置 3 个 seed）：
+    # 验证段超额 13.1%/6.4%/16.0%、OOS 超额 +2.4%/−1.5%/−5.3%——单次训练成败接近抛硬币。
+    # 固定种子：单 seed 时结果可复现、跨重启可比（旧值 None=每轮随机）。
+    # seeds>1：本轮训 N 个 seed、按**验证段超额中位数**选模（OOS 不参与选模——
+    # 它是选完之后的独立安检，用它选模等于把样本外泄漏进选择）。
+    # 总墙钟 ≈ N × 单 seed 时长（每个 seed 仍受 evolve_train_time_budget 约束）。
+    evolve_strategy_drl_seed: int = 42
+    evolve_strategy_drl_seeds: int = 1
     # walk-forward 同品种多折观测（2026-09-19，用户选"1"）：每轮 strategy DRL
     # 真实训练后，用部署中的最佳模型在最近 N 根K线上做多折评估（不改接受逻辑），
     # 结果写 models/walkforward_obs.json + 日志摘要，作为"换一段历史也赚"的常规可见指标。

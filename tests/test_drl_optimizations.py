@@ -516,11 +516,12 @@ def test_evolve_engine_has_replay_slot(tmp_path):
 def test_replay_settings_defaults_enabled():
     """默认启用回放：遗忘是本项目的现场故障，默认应修复。
 
-    capacity=64 是按实测内存定的（单轨迹≈1.24MB，64 条≈77MB ≈ 恰好覆盖上一轮的
-    8ep×8 轨迹）；不得盲目调大——400 会占约 484MB 常驻内存。
+    2026-10 审计修复（MED）：capacity 从 64 提到 128（episodes=128 时每轮推 2048 条
+    轨迹，64 只留最近 ~1/32 轮，"跨轮记忆"名不副实）；128 按实测内存口径
+    （单轨迹≈1.24MB，128 条≈155MB）是合理档，400 会占约 484MB 常驻内存（不建议）。
     """
     from config.settings import settings
-    assert settings.evolve_strategy_drl_replay_capacity == 64
+    assert settings.evolve_strategy_drl_replay_capacity == 128
     assert settings.evolve_strategy_drl_replay_mix_ratio == 0.3
     assert 0.0 < settings.evolve_strategy_drl_replay_mix_ratio < 1.0
 

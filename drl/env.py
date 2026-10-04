@@ -14,8 +14,78 @@ import numpy as np
 import pandas as pd
 
 # 离散动作 = 目标仓位档位
-ACTION_BUCKETS = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=float)
-ACTION_NAMES = ["清仓", "轻仓", "半仓", "重仓", "满仓"]
+# 长仓档（旧行为，默认）：只能做多/空仓
+LONG_ONLY_BUCKETS = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=float)
+LONG_ONLY_NAMES = ["清仓", "轻仓", "半仓", "重仓", "满仓"]
+# 对称档（short_enabled=True）：−1~+1，含做空与精确空仓。
+# 为什么需要它：动作空间只能做多/空仓时，熊市样本外"最优多头策略"就是全程空仓，
+# 相对基准的超额全靠"没参与"（见 docs/DRL成本标定-决策频率与滑点复核.md §4）——
+# 做空是多头市场之外唯一能真正创造正收益的路径。
+SHORT_BUCKETS = np.array([-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0], dtype=float)
+SHORT_NAMES = ["满空", "重空", "半空", "轻空", "清仓", "轻仓", "半仓", "重仓", "满仓"]
+
+# 兼容旧引用：模块级常量 = 默认（长仓）动作空间
+ACTION_BUCKETS = LONG_ONLY_BUCKETS
+ACTION_NAMES = LONG_ONLY_NAMES
+
+
+def action_buckets_for(short_enabled: bool = False) -> np.ndarray:
+    """动作空间（单一定义处）。
+
+    short_enabled=True → 对称 9 档（−1~+1）；False → 旧的 5 档长仓空间。
+    动作空间必须随**模型**走（写进模型文件、部署端按模型的档位执行），
+    否则"训练会做空、部署按长仓档位解释同一个 argmax"会静默漂移。
+    """
+    return SHORT_BUCKETS if short_enabled else LONG_ONLY_BUCKETS
+
+
+def action_names_for(short_enabled: bool = False) -> list:
+    """与动作空间配套的可读名（日志/前端用）。"""
+    return list(SHORT_NAMES if short_enabled else LONG_ONLY_NAMES)
+
+
+def buckets_require_short(buckets) -> bool:
+    """该动作空间是否含做空档（任一档位为负）。
+
+    部署端能力判定用：撮合内核（backtest/_matching.py）当前是现货语义
+    （`sell` 必须 position>0 且 qty≤position），**无法建立负仓位**——
+    含做空档的模型在执行层支持之前必须显式阻断部署，绝不允许静默按长仓执行。
+    """
+    try:
+        return bool(np.any(np.asarray(buckets, dtype=float) < -1e-12))
+    except Exception:  # noqa: BLE001 —— 形状异常按"不涉及做空"处理（保守回退旧语义）
+        return False
+
+# 奖励口径 / 决策间隔的配置键（训练·验证·OOS·长窗观测必须同源，否则口径漂移：
+# 训练时每 4 根决策一次、评估时每根决策一次，模型行为与收益就完全不是一回事）
+def policy_env_kwargs(cfg: dict) -> dict:
+    """从训练配置里取出环境口径参数（reward_mode/benchmark_position/risk_coef/decision_interval）。
+
+    单一定义处：train_drl 的主环境、并行 worker、val/val 子段、OOS 段、蒸馏取样、
+    持续进化的长窗观测全部用它，保证"训练时学的东西"和"评估时量的东西"同一口径。
+    缺键时返回旧行为（absolute / k=1），向后兼容。
+    """
+    cfg = cfg or {}
+    return {
+        "reward_mode": str(cfg.get("reward_mode", "absolute") or "absolute"),
+        "benchmark_position": float(cfg.get("benchmark_position", 1.0)),
+        "risk_coef": float(cfg.get("risk_coef", 0.5)),
+        "decision_interval": max(1, int(cfg.get("decision_interval", 1) or 1)),
+        "short_enabled": bool(cfg.get("short_enabled", False)),
+    }
+
+
+def policy_env_kwargs_from_settings(prefix: str = "evolve_strategy_drl") -> dict:
+    """同上，但直接读 settings（供不经过 train_drl 的观测/回放路径用）。"""
+    from config.settings import settings
+    return policy_env_kwargs({
+        "reward_mode": getattr(settings, f"{prefix}_reward_mode", "absolute"),
+        "benchmark_position": getattr(settings, f"{prefix}_benchmark_position", 1.0),
+        "risk_coef": getattr(settings, f"{prefix}_risk_coef", 0.5),
+        "decision_interval": getattr(settings, f"{prefix}_decision_interval", 1),
+        "short_enabled": getattr(settings, f"{prefix}_short_enabled", False),
+    })
+
 
 
 class TradingEnv:
@@ -41,11 +111,52 @@ class TradingEnv:
                  participation_rate: float = 0.0,     # 调仓数量上限 = 该K线成交量×参与率（0=不限）
                  funding_rate: float = 0.0,           # 每根K线按持仓价值收取的资金费率（0=关闭）
                  precomputed_features: Optional[np.ndarray] = None,  # 预计算特征，避免并行 worker 重复计算
+                 # ---- 2026-10 根本性逻辑错误修复（详见 docs/DRL训练根本性逻辑错误-诊断报告.md）----
+                 reward_mode: str = "absolute",       # "absolute"=旧行为 | "excess"=基准相对（推荐）
+                 benchmark_position: float = 1.0,     # excess 模式的基准仓位（1.0=买入持有）
+                 risk_coef: float = 0.5,              # excess 模式跟踪误差惩罚系数（bp 量级，见 _bar_reward）
+                 decision_interval: int = 1,          # 每 k 根K线决策一次（k=1=旧行为，逐根决策）
+                 short_enabled: bool = False,         # 动作空间是否含做空档（−1~+1）；False=旧的长仓 5 档
                  ) -> None:
         self.df = df
         self.start_cash = start_cash
         self.fee_rate = fee_rate
-        self.vol_penalty = vol_penalty      # 波动率惩罚系数
+        self.vol_penalty = vol_penalty      # 波动率惩罚系数（absolute 模式）
+        # ============ 奖励口径（F1：奖励最优解不能再是"永不交易"） ============
+        # 旧口径（absolute）的问题：奖励 = 组合收益(bp) - vol_penalty·(仓位·vol%)²，
+        # 风险项是无条件"持仓税"——只要持仓就扣分，与这笔仓位对不对无关；而空仓奖励
+        # 恒等于 0。随机游走下任何非零仓位的期望奖励 = -E[惩罚] < 0 ⇒ 全局最优解就是
+        # "永不交易"（实测：行情涨 8.6%~26.9%、账户收益为正，持仓策略累计奖励却全是
+        # 大幅负值，躺平恰好 0 为最大值）。RL 于是把全部算力学成了"不做任何事"。
+        # excess 口径：奖励 = 相对基准的超额收益 - 跟踪误差惩罚。
+        # 空仓在上涨行情里同样被扣分（机会成本），"躺平"不再免费；对称的跟踪惩罚
+        # 也让"高波动降仓"的意图重新成立（偏离基准才受罚）。
+        self.reward_mode = str(reward_mode or "absolute").lower()
+        if self.reward_mode not in ("absolute", "excess"):
+            self.reward_mode = "absolute"
+        self.benchmark_position = float(min(1.0, max(0.0, benchmark_position)))
+        # risk_coef：单位与收益项一致（bp / (%波动率)²）。量级标定说明：
+        # 旧 vol_penalty=40 在 bp 口径下的惩罚是 40·(pos·vol%)²，1h/vol≈0.6% 时满仓
+        # 每根约 14bp —— 是行情自身漂移（零点几 bp/根）的数十倍，等于"持仓必亏"。
+        # 0.5 时同样条件下约 0.18bp，只做"高波动别满仓"的平局裁决，不吞掉收益信号。
+        self.risk_coef = max(0.0, float(risk_coef))
+        # ============ 决策间隔（F2：探索成本与样本效率） ============
+        # 旧环境每根K线都重新决策，而动作是"目标仓位"：初始策略近均匀 ⇒ 平均 |Δ仓位|
+        # ≈0.4 ⇒ 每根 0.06% 摩擦 ⇒ 2939 根 ≈ -83%（实测 -82%）。也就是说"随机试错"
+        # 本身就是自杀，优势函数里"别交易"的信号压过一切真实行情信号。
+        # decision_interval=k 时：每 k 根K线只决策一次、其间保持仓位，成本收一次，
+        # 奖励按 k 根累计。探索成本降 k 倍，且每个决策覆盖 k 根行情 ⇒ 同样墙钟内
+        # 见过的行情多 k 倍（样本效率 = 用户要的"几个月顶几年"）。
+        self.decision_interval = max(1, int(decision_interval or 1))
+        # ============ 动作空间（F3：放开做空） ============
+        # 只能做多/空仓时，熊市样本外"最优多头策略"= 全程空仓，超额全靠"没参与"；
+        # 做空是唯一能在那类窗口真正创造正收益的路径。
+        # 幂等语义（与多头一致）：目标仓位是**权益比例**，价格漂移会被下一次决策
+        # 拉回目标（恒定比例再平衡）；做空仓位的保证金/爆仓由 equity≤0 守卫兜底。
+        self.short_enabled = bool(short_enabled)
+        self.action_buckets = action_buckets_for(self.short_enabled)
+        self.action_names = action_names_for(self.short_enabled)
+        self.n_actions = int(len(self.action_buckets))
         self.cost_scale = cost_scale        # 交易成本缩放
         # D2：滑点（比例）。默认 0 向后兼容；train_drl 按 cfg.slippage（默认 0.0005，
         # 与回测/纸面 paper_slippage 同口径）传入，消除"训练能赚、实盘亏在摩擦"偏差。
@@ -138,14 +249,24 @@ class TradingEnv:
         self._peak_equity = start_cash
         self._last_dd = 0.0
         self._losing_streak = 0
+        # 成本可观测性（只记账，不影响任何行为/数值）：累计被收费的换手基数与现金成本
+        self._turnover_units = 0.0
+        self._cost_paid = 0.0
+        self._bankrupt = False
 
     @property
     def state_dim(self) -> int:
         return self._state_dim
 
-    def reset(self) -> np.ndarray:
-        """回到起点，返回初始状态。"""
-        self._t = self.warmup
+    def reset(self, start_offset: int = 0) -> np.ndarray:
+        """回到起点，返回初始状态。
+
+        start_offset>0：从 warmup 后随机偏移处起跑（2026-10 审计修复 LOW——
+        蒸馏多次 rollout 用随机起点制造状态多样性；缺省 0 保持旧行为逐位兼容）。
+        """
+        self._t = self.warmup + max(0, int(start_offset or 0))
+        if self._t > self.n - 3:
+            self._t = max(self.warmup, self.n - 3)
         self._cash = self.start_cash
         self._qty = 0.0
         self._entry_price = None
@@ -156,6 +277,10 @@ class TradingEnv:
         self._peak_equity = self.start_cash
         self._last_dd = 0.0
         self._losing_streak = 0
+        # 成本记账随 episode 重置（跨 episode 累计会让换手/成本口径失真）
+        self._turnover_units = 0.0
+        self._cost_paid = 0.0
+        self._bankrupt = False
         # P4-E1：最终权益/仓位快照（episode 收尾后由 step 写入最后一次 equity_next）。
         # 曾直接读 _closes[_t]，而 done 分支把 _t 钳回 n-2——最后一根K线的收益
         # 计入 total_ret 却不在 final_equity 里（两指标互相矛盾的 off-by-one）。
@@ -197,8 +322,15 @@ class TradingEnv:
         return (self._qty * self._closes[self._t]) / self._prev_equity
 
     def _pnl_ratio(self) -> float:
+        """持仓浮动盈亏（状态特征）：做空时符号相反。
+
+        做空的"浮盈"是价格下跌，用 `(entry − price)/entry`；多头仍是
+        `(price − entry)/entry`。纯多头（qty>0）逐位不变。
+        """
         if not self._entry_price or self._entry_price <= 0:
             return 0.0
+        if self._qty < 0:
+            return (self._entry_price - self._closes[self._t]) / self._entry_price
         return (self._closes[self._t] - self._entry_price) / self._entry_price
 
     def _equity(self, price: float) -> float:
@@ -217,17 +349,17 @@ class TradingEnv:
     def step(self, action: int) -> tuple[np.ndarray, float, bool, dict]:
         """执行动作，推进一根K线。
 
-        action: ACTION_BUCKETS 的索引（目标仓位档位）。
+        action: 动作索引（目标仓位档位，见 self.action_buckets / 模块 ACTION_BUCKETS）。
         返回 (next_state, reward, done, info)。
         """
         assert not self._done, "环境已终止，请先 reset"
-        assert 0 <= action < len(ACTION_BUCKETS), f"非法动作 {action}"
+        assert 0 <= action < self.n_actions, f"非法动作 {action}"
 
         price_now = self._closes[self._t]
         price_next = self._closes[self._t + 1] if self._t + 1 < self.n else price_now
 
         # ---- 1. 按目标仓位在【当前收盘】调仓（下一根K线才产生收益，无前视） ----
-        target_ratio = ACTION_BUCKETS[action]
+        target_ratio = float(self.action_buckets[action])
         equity = self._equity(price_now)
         cur_value = self._qty * price_now
         cur_ratio = cur_value / max(equity, 1e-9)
@@ -235,10 +367,13 @@ class TradingEnv:
         # 调仓死区：与目标仓位差异过小则不交易，减少摩擦损耗
         if abs(diff) > self.min_trade_zone and equity > 0:
             qty_delta = (diff * equity) / price_now
-            # P2-12：成交量参与率约束——单根K线调仓数量不得超过该K线成交量×参与率
-            # （流动性限制，与回测 P0-2 participation_rate 同口径；0=不限，向后兼容）
+            # P2-12：成交量参与率约束——调仓数量不得超过决策期内累计成交量×参与率
+            # （流动性限制，与回测 P0-2 participation_rate 同口径；0=不限，向后兼容）。
+            # 2026-10 审计修复（LOW）：k>1 时一次调仓覆盖 k 根，按**单根**成交量算
+            # 上限会被系统性低估 k 倍（成交本可分摊到决策期各根）——用决策期累计。
             if self.participation_rate > 0:
-                vol_cap = self._volumes[self._t] * self.participation_rate
+                _k_end = min(self._t + self.decision_interval, self.n)
+                vol_cap = float(np.sum(self._volumes[self._t:_k_end])) * self.participation_rate
                 if vol_cap > 0:
                     max_delta = (abs(diff) * equity) / price_now
                     if qty_delta > 0:
@@ -256,64 +391,138 @@ class TradingEnv:
             # 全额退还（实测恒价 1 次往返末权益 9990.00 vs 解析解 9980.01，
             # 20 次往返退还 49.5%）。⇒ 训练学的是"交易半价"世界，
             # 且成本瓶颈的幅度被低估约一半。
-            if qty_delta > 0:
+            if qty_delta > 0 and not self.short_enabled:
+                # 现货语义的现金约束（只有旧的长仓模式适用）：买入数量夹到现金可支付
+                # 范围。做空模式是合约/保证金语义（目标仓位已封在 ±1 内，保证金
+                # 充足性由 equity≤0 守卫兜底），现金夹取会让"回补空头"失败并留下
+                # 残仓——那才是真正的失真。
                 max_affordable = self._cash / (price_now * (1.0 + unit_cost))
                 qty_delta = min(qty_delta, max(0.0, max_affordable))
             if abs(qty_delta) > 1e-12:
                 cost = abs(qty_delta) * price_now * unit_cost
                 self._cash -= cost
+                # 成本口径可观测性（2026-10 成本标定）：累计"实际成交的名义/权益"，
+                # 即成本基数。被收的现金 = 该值 × unit_cost × equity（严格恒等）。
+                # 为什么必须由环境自己记：外部用"相邻仓位差"求和会把**价格漂移**
+                # 造成的被动仓位变化也算成换手——实测 1h k=4 用外部口径得 159.6，
+                # 而真实被收费的换手只有约 1/3，breakeven 与 margin 全部失真。
+                _traded = abs(qty_delta) * price_now / max(equity, 1e-9)
+                self._turnover_units += _traded
+                self._cost_paid += cost
                 if diff > 0:  # 买入
                     self._cash -= qty_delta * price_now
                     self._qty += qty_delta
                 else:         # 卖出
                     self._cash += abs(qty_delta) * price_now
                     self._qty += qty_delta
-                if self._qty <= 1e-12:
+                # 2026-10 审计修复（LOW）：持仓均价按部分平/加仓重加权——
+                # 曾只在首次建仓记价，部分平仓后 _pnl_ratio（浮动盈亏特征）仍按原始
+                # 入场价算，与实际未实现盈亏脱节（做空模式同样失真）。
+                _old_qty = self._qty - qty_delta   # 成交前持仓
+                if abs(self._qty) <= 1e-12:
                     self._qty = 0.0
                     self._entry_price = None
-                elif self._entry_price is None:
+                elif abs(_old_qty) < 1e-12 or self._entry_price is None:
                     self._entry_price = price_now
+                elif abs(qty_delta) > 1e-12:
+                    self._entry_price = (
+                        _old_qty * self._entry_price + qty_delta * price_now
+                    ) / self._qty
                 # 现货账户不得透支：夹取后现金 ≥0 数学上成立，此处仅为浮点兜底
                 # （只归零 |cash|<1e-9 的尾差，不会退还任何真实成本）
-                if -1e-9 < self._cash < 0.0:
+                # 做空模式现金可为负（保证金语义），不做该兜底。
+                if not self.short_enabled and -1e-9 < self._cash < 0.0:
                     self._cash = 0.0
-        # 若目标清仓则重置入场价
-        if target_ratio <= 1e-9 and self._qty <= 1e-12:
+        # 若目标清仓则重置入场价（做空模式下 ±0 都算清仓）
+        if abs(target_ratio) <= 1e-9 and abs(self._qty) <= 1e-12:
             self._entry_price = None
 
-        # ---- 2. 按下一根收盘价计算收益（穿越到 t+1） ----
-        self._t += 1
-        if self._t >= self.n - 1:
-            self._t = self.n - 2
-            self._done = True
-        # P2-12：资金费率（永续合约持仓成本，可选）——按穿过的下一根K线持仓价值收取。
-        # 与回测 P0-3 funding_rate 同口径（每根K线按持仓价值×费率），0=关闭
-        if self.funding_rate != 0.0 and abs(self._qty) > 1e-12:
-            self._cash -= abs(self._qty) * price_next * self.funding_rate
-        equity_next = self._equity(price_next)
-        ret = (equity_next / max(self._prev_equity, 1e-9)) - 1.0
+        # ---- 2. 按决策间隔推进 k 根K线（k=1 时与旧行为逐位一致） ----
+        # 每根都累计奖励（semi-MDP：一个决策 = k 根行情的总收益总奖励），
+        # 但调仓成本只在决策点收一次。k>1 时：
+        #   - 探索的摩擦成本降 k 倍（旧行为下随机试错每回合亏 46~82%）；
+        #   - 一个决策覆盖 k 根行情 ⇒ 同样墙钟内见过 k 倍行情（样本效率）；
+        #   - 有效决策频率贴近人类交易节奏，而不是每 5 分钟翻一次仓。
+        reward = 0.0
+        # 决策期起点权益：info.ret_pct 必须是【整个决策期】的收益（k 根K线合计），
+        # 而不是最后一根K线的收益——run_episode/collect_episode 用
+        # total_ret *= (1+ret_pct/100) 连乘求总收益，若只上报末根收益会
+        # 严重低报（实测 k=4 时把它当总收益会得到 2.79% 而真实是 8.60%），
+        # 进而污染 best_train_ret / val 选模 / OOS 判据。
+        _entry_equity = self._prev_equity
+        for _ in range(self.decision_interval):
+            p_cur = self._closes[self._t]
+            price_next = self._closes[self._t + 1] if self._t + 1 < self.n else p_cur
+            self._t += 1
+            if self._t >= self.n - 1:
+                self._t = self.n - 2
+                self._done = True
+            # P2-12：资金费率（永续合约持仓成本，可选）——按穿过的下一根K线持仓价值收取。
+            # 与回测 P0-3 funding_rate 同口径（每根K线按持仓价值×费率），0=关闭。
+            # 2026-10 做空支持：改用**带符号**持仓（qty 而非 abs(qty)）——正费率下
+            # 多头付费、空头收钱，这是永续合约的定义。对纯多头（qty>0）逐位等价。
+            if self.funding_rate != 0.0 and abs(self._qty) > 1e-12:
+                self._cash -= self._qty * price_next * self.funding_rate
+            equity_next = self._equity(price_next)
+            ret = (equity_next / max(self._prev_equity, 1e-9)) - 1.0
+            # 标的本身这根K线的收益（未乘仓位）——excess 模式算"相对基准的超额"要用
+            asset_ret = (price_next / p_cur - 1.0) if p_cur > 0 else 0.0
+            reward += self._bar_reward(ret, asset_ret, equity_next)
+            self._prev_equity = equity_next
+            # P4-E1：记录最终权益/仓位快照（step 用 price_next=最后一根K线收盘价，
+            # 而 _t 在 done 分支被钳回 n-2——若 run_episode 事后读 _closes[_t] 会
+            # 漏掉最后一根K线的 PnL）。由 run_episode/collect_episode 直接取快照。
+            self._final_equity = equity_next
+            self._final_position_ratio = (self._qty * price_next) / max(equity_next, 1e-9)
+            # 爆仓守卫（仅做空模式）：空头在上涨中亏损无上限，权益击穿 0 即强平终止。
+            # 多仓模式权益理论上界为 0（价格跌到 0），不加该守卫以保持逐位兼容。
+            if self.short_enabled and equity_next <= 0.0:
+                self._bankrupt = True
+                self._done = True
+            if self._done:
+                break
 
-        # ---- 3. 奖励 = 收益 - 波动率风险惩罚（高波动满仓受罚） ----
-        # 风险调整奖励设计（关键：信号必须清晰可学）：
-        # - 收益用 bp（基点）但裁剪到 ±150bp，压低高波动段的噪声方差（否则 ±300bp
-        #   的噪声会淹没惩罚信号，REINFORCE 学不动）
-        # - 惩罚 = vol_penalty * (仓位 * 波动率/基准)²，随波动率平方放大，且用短周期
-        #   波动率（5根）快速响应 regime 切换
-        #   低波动趋势(vol≈0.8%)：+40 - 惩罚小 → 净正 → 学"趋势明朗加仓"
-        #   高波动(vol≈3%)：裁剪后均值≈0 - 惩罚大 → 净负 → 学"波动率上升降仓"
+        info = {
+            "equity": equity_next,
+            "ret_pct": (equity_next / max(_entry_equity, 1e-9) - 1.0) * 100.0,
+            "position_ratio": self._pos_ratio(), "vol": self._recent_vol_5(),
+            "price": price_next, "action": self.action_names[action],
+            "bankrupt": bool(getattr(self, "_bankrupt", False)),
+        }
+        return self._build_state(), reward, self._done, info
+
+    def _bar_reward(self, ret: float, asset_ret: float, equity_next: float) -> float:
+        """单根K线的奖励（F1 口径分离）。
+
+        absolute（旧行为，逐位一致）：reward = tanh 软裁剪的组合收益(bp) - vol_penalty·(仓位·vol%)²
+        excess（修复口径）：        reward = tanh 软裁剪的超额收益(bp) - risk_coef·(偏离基准·vol%)²
+
+        为什么必须区分（实测证据见诊断报告 §1）：
+        - absolute 的风险项与收益项**单位不一致**（bp vs 百分比平方，差 10⁴），
+          且是对持仓的**无条件**扣分 ⇒ "永不交易"成为全局最优；
+        - excess 把基准（默认买入持有）作为零点：空仓在上涨行情里要付机会成本，
+          惩罚只作用于"偏离基准"的部分，量级也以 bp 标定（risk_coef），
+          于是最优解从"别动"变成"择时"。
+        """
         vol = self._recent_vol_5()
         vol_ref = 1.0  # 正常波动率基准（%）
         pos = self._pos_ratio()
-        risk_penalty = self.vol_penalty * ((pos * vol / vol_ref) ** 2)
         # P0-3 优化：奖励软裁剪（原为 clip ±150 硬截断）。tanh 压缩保留极端行情的
         # 方向梯度（硬截断在边界饱和，智能体学不到"越极端越该调整"），
         # 且 |tanh|<=1 天然有界（无需 clip，数值更稳）。
         # 标定：ret*10000=±150bp 时 tanh(±1)=±0.7619，即软裁剪略缩中间值，
         # 但尾部仍保留 0.76~1.0 的梯度信号（原实现尾部直接饱和为 1）。
-        reward_bp = float(150.0 * np.tanh(ret * 10000.0 / 150.0))
+        if self.reward_mode == "excess":
+            excess_bp = (ret - self.benchmark_position * asset_ret) * 10000.0
+            reward_bp = float(150.0 * np.tanh(excess_bp / 150.0))
+            active = pos - self.benchmark_position
+            risk_penalty = self.risk_coef * ((active * vol / vol_ref) ** 2)
+        else:
+            reward_bp = float(150.0 * np.tanh(ret * 10000.0 / 150.0))
+            risk_penalty = self.vol_penalty * ((pos * vol / vol_ref) ** 2)
         reward = reward_bp - risk_penalty
 
-        # ---- 4. 可选奖励塑形（系数=0 即关闭；回撤惩罚对齐真实目标、连亏抑制
+        # ---- 可选奖励塑形（系数=0 即关闭；回撤惩罚对齐真实目标、连亏抑制
         #      "抄底死扛"、趋势一致性强化"趋势加仓"方向） ----
         if self.reward_dd_penalty > 0 or self.reward_losing_penalty > 0 or self.reward_trend_align > 0 or self.tail_risk_penalty > 0:
             self._peak_equity = max(self._peak_equity, equity_next)
@@ -330,7 +539,7 @@ class TradingEnv:
                 if self._losing_streak > 2:
                     reward -= self.reward_losing_penalty * ((self._losing_streak - 2) ** 2)
             if self.reward_trend_align > 0 and self._t >= 20 and vol > 0:
-                # 低波动趋势中持仓与方向一致才加分；高波动自动失效，不与 vol_penalty 冲突
+                # 低波动趋势中持仓与方向一致才加分；高波动自动失效，不与风险项冲突
                 ret20 = (self._closes[self._t] / self._closes[self._t - 20]) - 1.0
                 vol_factor = max(0.0, 1.0 - min(1.0, vol / 3.0))
                 reward += self.reward_trend_align * pos * (1.0 if ret20 > 0 else -1.0) * vol_factor
@@ -339,19 +548,7 @@ class TradingEnv:
                 # 训练时抑制"高波动满仓赌单根大K线"的极端行为。
                 if ret < -0.02:
                     reward -= self.tail_risk_penalty * (abs(ret) * 100.0) * pos
-
-        info = {
-            "equity": equity_next, "ret_pct": ret * 100.0,
-            "position_ratio": self._pos_ratio(), "vol": vol,
-            "price": price_next, "action": ACTION_NAMES[action],
-        }
-        self._prev_equity = equity_next
-        # P4-E1：记录最终权益/仓位快照（step 用 price_next=最后一根K线收盘价，
-        # 而 _t 在 done 分支被钳回 n-2——若 run_episode 事后读 _closes[_t] 会
-        # 漏掉最后一根K线的 PnL）。由 run_episode/collect_episode 直接取快照。
-        self._final_equity = equity_next
-        self._final_position_ratio = (self._qty * price_next) / max(equity_next, 1e-9)
-        return self._build_state(), reward, self._done, info
+        return float(reward)
 
 
 # 波动率特征在特征矩阵中的索引（由 _precompute_features 固定顺序）
@@ -382,7 +579,9 @@ def _precompute_features(df: pd.DataFrame, backend: str = "numpy") -> np.ndarray
     """
     xp = _get_xp(backend)
     c = df["close"]
-    v = df["volume"]
+    # 2026-10 审计修复（MED）：volume 缺列兜底与 TradingEnv.__init__ 的守卫同源
+    #（曾 KeyError 崩掉整个环境构造——init 对缺列做了 np.full 兜底，特征预计算没有）。
+    v = df["volume"] if "volume" in df.columns else pd.Series(1e12, index=df.index)
     ret = c.pct_change() * 100.0
     if xp is not np:
         # GPU 后端：核心窗口特征在 GPU 上向量化计算（cumsum 技巧），
@@ -658,6 +857,12 @@ def run_episode(env: TradingEnv, act_fn, max_steps: Optional[int] = None,
         "final_equity": env._final_equity,
         "steps": len(rewards),
         "final_position_ratio": env._final_position_ratio,
+        # 成本标定（2026-10）：被收费的换手基数与现金成本（严格：cost ≈ turnover×unit_cost×equity）
+        "turnover": float(getattr(env, "_turnover_units", 0.0)),
+        "cost_paid": float(getattr(env, "_cost_paid", 0.0)),
+        # 做空模式：权益击穿 0（空头被逼空强平）——评估时必须让它可见，
+        # 否则"平均收益很好看但中途爆过仓"的模型会被当成可用
+        "bankrupt": bool(getattr(env, "_bankrupt", False)),
     }
     if return_trajectory:
         out.update({

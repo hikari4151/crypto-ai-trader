@@ -220,6 +220,28 @@ def test_challenger_dual_grid_split():
     body = HTML[start:HTML.find("function setEvolveRange", start)]
     assert "gridIndex:1" in body
     assert "yAxisIndex:2" in body
-    assert "const zoomX = chalLineCount ? [0,1] : 0" in body
+    assert "const zoomX = hasChalBand ? [0,1] : 0" in body
     assert "xAxisIndex: zoomX" in body
     assert "bottom:88" in body and "height:44" in body
+
+
+def test_challenger_event_dots_never_on_main_grid():
+    """用户验收 2026-09-30：挑战者未晋升点必须落在 grid1，主图只剩紫线 + 主谱系红点。
+
+    现象：橙点留在主图事件轨上（yAxisIndex:1、行位 0.16 距主线 0 位约 6px，点径最大 8px）
+    ⇒ 主线每次下探被橙点切断，紫线读起来是"一段段"。断言用结构性口径固化修复：
+    ① 橙点 xAxisIndex:1 + yAxisIndex:3（挑战者条带）；
+    ② 条带 flag 必须把事件点算进去（否则"挑战者轮 fitness 全空"的边界轮次又退回主图）；
+    ③ 主图事件轨仍只服务拦截 / 回退红点。
+    """
+    start = HTML.find("function renderEvolveCurve")
+    body = HTML[start:HTML.find("function setEvolveRange", start)]
+    assert "const hasChalBand = chalLineCount > 0 || chalEvCount > 0" in body
+    seg = body[body.find("挑战者未晋升"):]
+    seg = seg[:seg.find("});") + 3]
+    assert "xAxisIndex:1" in seg and "yAxisIndex:3" in seg, "挑战者未晋升点必须画在 grid1 条带"
+    assert "yAxisIndex:1" not in seg, "挑战者未晋升点不得再落在主图事件轨"
+    assert "{type:'scatter', name:'拦截/回退', yAxisIndex:1" in body, "主图红点语义不得被改动"
+    # 图例 / 说明文案与图上位置同源（下带）
+    assert "挑战者未晋升（下带）" in _evolve_view()
+    assert "下带 = 挑战者未晋升（挑战者条带内）" in HTML

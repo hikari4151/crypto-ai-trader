@@ -3,7 +3,8 @@
 - Actor 网络：state → 各动作概率（softmax），负责学习"何时买入/卖出/调整仓位"
 - Critic 网络：state → 价值估计，作为策略梯度的基线降低方差
 - 训练：在回测环境反复跑 episode，用蒙特卡洛回报计算优势 (G - V)，策略梯度更新
-- 探索：epsilon-greedy（随训练衰减）保证"反复试错"
+- 探索：softmax 策略采样 + 熵正则（默认；epsilon-greedy 需显式开启
+  cfg["epsilon_explore"]，开启时按 ε 混合分布采样且 logp 同口径计算）
 - 无 torch 依赖，纯 numpy（MLP + Adam）
 
 学习目标示例（奖励塑造已内置在 env）：
@@ -21,7 +22,9 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .env import ACTION_BUCKETS, ACTION_NAMES, TradingEnv, run_episode, _precompute_features
+from .env import (ACTION_BUCKETS, TradingEnv, run_episode,
+                  _precompute_features, policy_env_kwargs, action_buckets_for,
+                  buckets_require_short)
 from .nnet import MLP, _log_softmax
 
 
@@ -66,15 +69,17 @@ class ReplayBuffer:
             agent.train_batch(...)
     """
 
-    def __init__(self, capacity: int = 200):
+    def __init__(self, capacity: int = 200, seed: Optional[int] = None):
         self.capacity = max(1, int(capacity))
         self._states: list[np.ndarray] = []
         self._actions: list[np.ndarray] = []
         self._rewards: list[np.ndarray] = []
         self._old_log_probs: list[np.ndarray] = []
         self._segment_lengths: list[int] = []
-        # P2：实例级 rng（sample 每调用新建 default_rng 无法复现且无必要）
-        self._rng = np.random.default_rng()
+        # P2：实例级 rng（sample 每调用新建 default_rng 无法复现且无必要）。
+        # 2026-10 审计修复（MED-2）：rng 必须派生自训练 seed——无种子时从 OS 熵
+        # 初始化，启用回放后同 seed 训练不可复现（其余随机源都已派生 seed）。
+        self._rng = np.random.default_rng(seed)
 
     def push(self, states: np.ndarray, actions: np.ndarray,
              rewards: np.ndarray, old_log_probs: np.ndarray) -> None:
@@ -175,6 +180,24 @@ def _oos_decay(train_ref: float, oos_ret: float) -> float:
     return 0.0
 
 
+def _bh_return(df) -> float:
+    """同段买入持有收益（基准口径，2026-10）。
+
+    为什么需要它：动作空间是 [0..1]（只能做多/空仓），在下跌的样本外窗口里
+    "最优多头策略"就是全程空仓 = 0%，而验收门要求 `oos_ret > 0` ⇒
+    **熊市窗口结构上没有任何多头策略能过门**（产线实测 452/501 轮被拒）。
+    基准相对（超额 = 模型收益 − 同段买入持有）才是与训练目标（excess 奖励）
+    一致的验收口径：熊市里保护住资本算合格，牛市里"只会满仓躺赢"（超额 0）被拒。
+    """
+    try:
+        c = df["close"].to_numpy(float)
+        if len(c) < 2 or c[0] <= 0:
+            return 0.0
+        return float(c[-1] / c[0] - 1.0)
+    except Exception:  # noqa: BLE001 —— 基准只是判据辅助，取不到就按 0（退化为旧绝对口径）
+        return 0.0
+
+
 def _clip_grad_norm(gW: list, gb: list, max_norm: float) -> tuple[list, list]:
     """全局梯度范数裁剪（D5）。max_norm<=0 时不裁剪（向后兼容）。
 
@@ -205,9 +228,15 @@ class ACAgent:
                  entropy_coef: float = 0.01,
                  state_window: int = 1,
                  backbone: str = "mlp",
-                 gru_hidden: int = 32) -> None:
+                 gru_hidden: int = 32,
+                 action_space=None) -> None:
         self.state_dim = state_dim
         self.n_actions = n_actions
+        # 动作空间随模型走（2026-10 做空支持）：模型文件记录自己训练时的档位，
+        # 部署端按模型的档位执行。此前档位只存在于模块级常量，训练用 9 档、
+        # 部署按 5 档解释同一个 argmax 会静默漂移（与"训练每4根决策/评估每根"同类）。
+        self.action_buckets = (action_space if action_space is not None
+                               else action_buckets_for(False))
         # 状态窗口：训练时环境的特征堆叠数（部署时 rl_adaptive 必须用同一窗口重建状态）
         self.state_window = max(1, int(state_window))
         self.backbone = backbone if backbone in ("mlp", "gru") else "mlp"
@@ -261,11 +290,19 @@ class ACAgent:
             self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
     def sample_action_with_logp(self, state: np.ndarray, rng=None,
-                                mask: Optional[np.ndarray] = None) -> tuple[int, float]:
-        """纯策略采样并返回 (action, log_prob)（PPO 收集旧策略概率用）。
+                                mask: Optional[np.ndarray] = None,
+                                use_epsilon: bool = False) -> tuple[int, float]:
+        """策略采样并返回 (action, log_prob)（PPO 收集旧策略概率用）。
 
-        关键：不叠加 epsilon 噪声——否则 log_prob 与真实行为策略不一致，
-        重要性采样比会失真（PPO 的探索由熵正则承担）。
+        use_epsilon=False（默认）：纯 softmax 策略采样，探索由熵正则承担。
+        关键：此时**不叠加** epsilon 噪声——否则 log_prob 与真实行为策略不一致，
+        重要性采样比会失真。
+        use_epsilon=True（2026-10 修复"epsilon 死代码"）：按 ε-greedy 混合分布
+        π_ε = (1-ε)·π + ε·uniform 采样，logp 也按**混合后**分布计算——
+        这样 old_log_probs 与真实行为策略严格一致，PPO 重要性采样比不失真。
+        修复前：set_epsilon_schedule/set_episode_epsilon 只写 self.epsilon，
+        动作选择从不读它，训练历史/进度条/模型文件却一直在上报"衰减中的探索率"，
+        即上报了一个与行为无关的数字（全仓 grep 只有赋值与序列化）。
         单次前向即取概率与采样，避免重复计算（曾每次算两次 predict_proba）。
 
         2026-08：改用 predict_log_proba（log_softmax 直接算 logp，消除下溢风险）。
@@ -277,6 +314,7 @@ class ACAgent:
         并重归一化（动作掩码标准做法：FactorMiningEnv 用它强制每步选新因子，
         杜绝 argmax=首动作的重复选择浪费步数）。logp 按掩码后的分布计算，
         exp(logp) 与采样概率严格一致（重要性采样比率不失真）。
+        ε 混合同样只在合法动作集上做（不会把非法动作的概率加回来）。
         """
         rng = rng or self._rng
         # P2：collect 路径前向不写 _ln_cache（多线程并行收集时共享 MLP 的
@@ -284,6 +322,7 @@ class ACAgent:
         logp_all = self.actor.predict_log_proba(state.reshape(1, -1),
                                                 cache_for_backward=False)[0]
         proba = np.exp(logp_all)  # 从 log_softmax 恢复概率（exp 无下溢，因为 logp >= -inf）
+        valid = np.ones_like(proba, dtype=bool)
         if mask is not None:
             valid = np.zeros_like(proba, dtype=bool)
             valid[np.asarray(mask, dtype=int)] = True
@@ -302,6 +341,18 @@ class ACAgent:
             # 其 logp 不受影响；用 errstate 压掉无害告警。
             with np.errstate(divide="ignore"):
                 logp_all = np.log(proba)
+        eps = float(self.epsilon) if use_epsilon else 0.0
+        if eps > 0:
+            # ε-greedy 混合（合法动作上的均匀分布）。用 errstate 压掉
+            # "非合法动作概率仍为 0 → log -inf" 的无害告警。
+            uniform = valid.astype(float)
+            uniform /= max(uniform.sum(), 1e-12)
+            proba = (1.0 - eps) * proba + eps * uniform
+            total = float(proba.sum())
+            if total > 0 and np.isfinite(total):
+                proba = proba / total
+            with np.errstate(divide="ignore"):
+                logp_all = np.log(proba)
         # run6 E1：手写 inverse-CDF 采样替代 rng.choice(n, p)——
         # Generator.choice 对 p 恰好消耗 1 个随机数且等价于
         # searchsorted(cumsum(p), u)（u 在同一序列同位置取）；
@@ -314,7 +365,7 @@ class ACAgent:
         logp = float(logp_all[action])
         return action, logp
 
-    def collect_episode(self, env, rng=None) -> dict:
+    def collect_episode(self, env, rng=None, use_epsilon: bool = False) -> dict:
         """跑完一个 episode 并收集轨迹（含旧策略 log_prob，供 PPO 使用）。
 
         env 需提供 reset/step；episode 长度上限优先取 env.max_steps
@@ -322,6 +373,8 @@ class ACAgent:
         rng：可选，透传给采样；多线程收集时传入 per-worker 独立 rng（见 D1）。
         env.use_action_mask=True 时每步先取 env.valid_actions() 作为动作掩码
         （强制选新动作；FactorMiningEnv 防重复选择浪费步数）。
+        use_epsilon：是否按 ε-greedy 混合分布采样（默认 False=纯 softmax +
+        熵探索；True 时 logp 也按混合分布算，PPO 重要性采样比仍严格一致）。
         """
         state = env.reset()
         states, actions, rewards, log_probs = [], [], [], []
@@ -330,7 +383,8 @@ class ACAgent:
         max_steps = getattr(env, "max_steps", None) or (env.n - env.warmup - 1)
         for _ in range(max_steps):
             mask = env.valid_actions() if use_mask else None
-            action, logp = self.sample_action_with_logp(state, rng=rng, mask=mask)
+            action, logp = self.sample_action_with_logp(state, rng=rng, mask=mask,
+                                                        use_epsilon=use_epsilon)
             nxt, reward, done, info = env.step(action)
             states.append(state)
             actions.append(action)
@@ -353,6 +407,9 @@ class ACAgent:
             "final_equity": getattr(env, "_final_equity",
                                     env._equity(env._closes[env._t]) if hasattr(env, "_equity") else 0.0),
             "steps": len(rewards),
+            # 成本标定：被收费的换手基数（训练日志/成本诊断用；非 TradingEnv 环境为 0）
+            "turnover": float(getattr(env, "_turnover_units", 0.0)),
+            "cost_paid": float(getattr(env, "_cost_paid", 0.0)),
         }
 
     def greedy_action(self, state: np.ndarray,
@@ -539,6 +596,7 @@ class ACAgent:
     def to_dict(self) -> dict:
         d = {
             "state_dim": self.state_dim, "n_actions": self.n_actions,
+            "action_buckets": [float(x) for x in self.action_buckets],
             "gamma": self.gamma, "epsilon": self.epsilon,
             "entropy_coef": self.entropy_coef,
             "state_window": self.state_window,
@@ -559,10 +617,23 @@ class ACAgent:
     def from_dict(cls, data: dict) -> "ACAgent":
         backbone = str(data.get("backbone", "mlp"))
         gru_hidden = int(data.get("gru_hidden", 0) or 32)
-        agent = cls(data["state_dim"], data["n_actions"], gamma=data.get("gamma", 0.99),
+        # 动作空间随模型恢复（旧模型无该键 → 长仓 5 档，向后兼容）
+        _buckets = data.get("action_buckets")
+        n_actions = int(data["n_actions"])
+        if not _buckets or len(_buckets) != n_actions:
+            # 2026-10 审计修复（LOW，倒查修正）：**不能**对"缺键且 n_actions>长仓档数"
+            # 直接报错——factor_miner（复合因子挖掘）是合法的"高 n_actions 无档位"
+            # 模型：其 26 维输出是因子权重组合、从不映射仓位，`长仓档[:n_actions]`
+            # 截断正是它对"长短不一致"的兼容方式。曾改为 ValueError，生产启动时最佳
+            # factor_miner 加载失败 → 回退 fitness=0 空模型续训（回归）。
+            # 真正的防线在动作策略一端：rl_adaptive 的运行时越界守卫（argmax≥档位长
+            # 时告警跳过，不 IndexError 崩实时链）——from_dict 保持兼容加载。
+            _buckets = list(action_buckets_for(False))[:n_actions]
+        agent = cls(data["state_dim"], n_actions, gamma=data.get("gamma", 0.99),
                     entropy_coef=float(data.get("entropy_coef", 0.01)),
                     state_window=int(data.get("state_window", 1)),
-                    backbone=backbone, gru_hidden=gru_hidden)
+                    backbone=backbone, gru_hidden=gru_hidden,
+                    action_space=_buckets)
         if backbone == "gru" and data.get("actor", {}).get("type") == "gru":
             from .nnet_temporal import GRUActor
             agent.actor = GRUActor.from_dict(data["actor"], lr=agent.actor.lr)
@@ -620,7 +691,9 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     """
     t0 = time.time()
     # PPO 默认超参（真 PPO：批量收集 + 多轮 mini-batch，比单轨迹更新更稳）
-    episodes = int(cfg.get("episodes", 300))
+    episodes = max(1, int(cfg.get("episodes", 300)))
+    # 2026-10 审计修复（LOW）：episodes=0 此前会导致训练循环空转、
+    # total_ret 未定义被 OOS 外层 try 吞成"无样本外证据"（失败原因被藏成业务原因）。
     # 单轮训练时间预算（秒）：>0 时训练到预算即提前结束（连续训练控成本用，
     # 续训场景下"学一点就停"优于"从头重训"，且超时后 OOS 门照常把关防过拟合）。
     # 0 = 不限时（手动训练全量跑满 episodes 用）。
@@ -805,7 +878,13 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         elif factor_values is not None:
             log.warning("[drl] 多标的训练：主标的因子为预计算数组（无复算配方），"
                         "额外标的无法重建同维度因子列，本轮降级为单标的训练")
-    if extra_dfs or curriculum:
+    if extra_dfs or curriculum or (0 < episode_window < len(train_df)):
+        # 2026-10：episode_window>0 时即使单标的也走标的池——每条 episode 随机取一个
+        # 时间窗切片，而不是"每次都从训练段开头跑到结尾"。这是"几年行情经验"的关键：
+        # 训练段 18000 根 + 窗口 3000 根时，16 条轨迹覆盖 16 个不同年代，
+        # 而不是同一段行情重复 16 遍（旧行为：5000 根里取 3000 根，反复背 10 天）。
+        # 窗口 ≥ 训练段长度时切片是空操作，直接走原路径（避免无意义地改写行为，
+        # 也保证小数据集/单测下的调用链与旧行为一致）。
         from .multi_asset import MultiAssetPool
         main_factors = (extra_factors_all[:len(train_df)].reshape(-1)
                         if extra_factors_all is not None else None)
@@ -845,15 +924,17 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                      reward_trend_align=float(cfg.get("reward_trend_align", 0.0)),
                      tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
                      participation_rate=float(cfg.get("participation_rate", 0.0)),
-                     funding_rate=float(cfg.get("funding_rate", 0.0)))
-    agent = ACAgent(env.state_dim, len(ACTION_BUCKETS), hidden=hidden,
+                     funding_rate=float(cfg.get("funding_rate", 0.0)),
+                     **policy_env_kwargs(cfg))
+    agent = ACAgent(env.state_dim, env.n_actions, hidden=hidden,
                     lr_actor=float(cfg.get("lr_actor", 2e-3)),
                     lr_critic=float(cfg.get("lr_critic", 5e-3)),
                     gamma=float(cfg.get("gamma", 0.99)), seed=seed,
                     entropy_coef=float(cfg.get("entropy_coef", 0.05)),
                     state_window=state_window,
                     backbone=str(cfg.get("backbone", "mlp")),
-                    gru_hidden=int(cfg.get("gru_hidden", 32)))
+                    gru_hidden=int(cfg.get("gru_hidden", 32)),
+                    action_space=env.action_buckets)
     # 续训支持：两种起点（优先 base_agent，均为"在旧模型上继续学"）——
     # 1) base_agent：内存中的 ACAgent 对象（持续进化引擎用，已通过 zoo.load_agent
     #    加载，无需磁盘往返；必须 deepcopy 权重，否则训练会原地修改 best_agent，
@@ -899,7 +980,14 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                             getattr(base, "state_dim", "?"))
         except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:  # 基础模型加载：文件不存在/JSON解析/键缺失属于已知异常类型
             log.warning("[drl] 基础模型加载失败(%s)，从零训练: %s", base_model, e)
-    agent.set_epsilon_schedule(episodes)
+    # ε-greedy 调度只在显式开启时生效；否则 epsilon 归零（如实上报——
+    # 修复前它被调度成 1.0→0.05 一路衰减并写进历史/进度条/模型文件，
+    # 但动作选择从不读它，等于上报了一个与行为完全无关的数字）。
+    _use_epsilon = bool(cfg.get("epsilon_explore", False))
+    if _use_epsilon:
+        agent.set_epsilon_schedule(episodes)
+    else:
+        agent.epsilon = 0.0
 
     # 经验回放缓冲区（可选）：capacity>0 时启用，混合旧轨迹提升样本效率。
     # 旧轨迹经重要性采样比率自然衰减，PPO 兼容（ratio=exp(logp_new-logp_old)）。
@@ -920,7 +1008,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         replay_capacity = int(replay_buf.capacity)
     else:
         replay_capacity = int(cfg.get("replay_capacity", 0))  # 0=禁用
-        replay_buf = ReplayBuffer(capacity=replay_capacity) if replay_capacity > 0 else None
+        # 2026-10 审计修复（MED-2）：新建缓冲的采样 rng 派生自训练 seed（可复现）
+        replay_buf = (ReplayBuffer(capacity=replay_capacity,
+                                   seed=int(seed_cfg if seed_cfg is not None else 0))
+                      if replay_capacity > 0 else None)
     if replay_buf is not None:
         log.info("[drl] 经验回放已启用: capacity=%d mix_ratio=%.2f 复用轨迹=%d",
                  replay_capacity, replay_mix_ratio, len(replay_buf))
@@ -928,6 +1019,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     history: list[dict] = []
     best_train_ret = -1e9
     best_val_ret = -1e9
+    # 基准相对的最优验证超额（跨轮可比的 fitness 口径；绝对值在不同 val 窗口间不可比）
+    best_val_excess: Optional[float] = None
     best_agent: Optional[ACAgent] = None
     # 验证评估间隔：默认10轮。2026-09-20（诊断 §15）：持续进化 episodes=8 时
     # 默认10会导致 val 只在最后一轮（ep==episodes 兜底）评估一次，"周期性按
@@ -970,7 +1063,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                              state_window=state_window,
                              tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
                              participation_rate=float(cfg.get("participation_rate", 0.0)),
-                             funding_rate=float(cfg.get("funding_rate", 0.0)))
+                             funding_rate=float(cfg.get("funding_rate", 0.0)),
+                             # 决策间隔必须与训练同源：评估端每根决策、训练端每 4 根决策，
+                             # 量到的就不是同一个策略（换手/收益全变）
+                             **policy_env_kwargs(cfg))
 
     # 学习率退火（PPO 标配技巧）：随训练进度从初始值线性降到 lr_final_ratio 倍
     # 注：曾尝试加入 warmup，A/B 多 seed 验证无正面提升（均值 2.85 vs 3.14），已回退。
@@ -1018,8 +1114,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                                    tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
                                    participation_rate=float(cfg.get("participation_rate", 0.0)),
                                    funding_rate=float(cfg.get("funding_rate", 0.0)),
-                                   precomputed_features=_precomputed_features)
-        return agent.collect_episode(local_env, rng=local_rng)
+                                   precomputed_features=_precomputed_features,
+                                   **policy_env_kwargs(cfg))
+        return agent.collect_episode(local_env, rng=local_rng,
+                                     use_epsilon=_use_epsilon)
 
     pool = ThreadPoolExecutor(max_workers=n_collect_workers)
     if n_collect_workers > 4:
@@ -1032,7 +1130,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                 log.info("[drl] 单轮训练达到时间预算 %.0fs（已完成 %d 轮），提前结束",
                          time_budget, ep - 1)
                 break
-            agent.set_episode_epsilon(ep - 1)
+            if _use_epsilon:
+                agent.set_episode_epsilon(ep - 1)
             # 学习率退火：训练后期降低更新幅度，收敛更稳
             frac = ep / episodes
             lr_scale = lr_final_ratio + (1 - lr_final_ratio) * (1 - frac)
@@ -1093,8 +1192,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     # 取收益中位数作为本轮 val_ret——避免单一 regime 选出"只在某段行情
                     # 表现好"的模型（regime 诊断：val 下行震荡 → OOS 上行不交易）。
                     if val_segments > 1 and len(val_df) >= val_segments * 80:
+                        _seg_equities: list[list] = []
                         _vseg = len(val_df) // val_segments
                         _vrets: list[float] = []
+                        _vbhs: list[float] = []
                         for _j in range(val_segments):
                             _s = val_df.iloc[_j * _vseg:(len(val_df) if _j == val_segments - 1 else (_j + 1) * _vseg)]
                             _se_extra = None
@@ -1109,22 +1210,54 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                                                state_window=state_window,
                                                tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
                                                participation_rate=float(cfg.get("participation_rate", 0.0)),
-                                               funding_rate=float(cfg.get("funding_rate", 0.0)))
+                                               funding_rate=float(cfg.get("funding_rate", 0.0)),
+                                               **policy_env_kwargs(cfg))
                             _vt = run_episode(_venv, lambda s: agent.greedy_action(s))
                             _vrets.append(float(_vt["total_ret"]))
-                            v_equities += [i.get("equity") for i in _vt.get("infos", [])
-                                           if i.get("equity") is not None]
+                            _vbhs.append(_bh_return(_s))
+                            # 2026-10 审计修复（LOW）：逐段收集 equity（metrics 按段聚合，
+                            # 曾跨段拼接被"每段重置"误判为暴跌）
+                            _seg_equities.append([i.get("equity") for i in _vt.get("infos", [])
+                                                  if i.get("equity") is not None])
+                        v_equities = [e for seg in _seg_equities for e in seg]
                         val_ret = float(np.median(_vrets))
+                        val_bh_ret = float(np.median(_vbhs))
+                        # 2026-10 审计修复（MED-3）：超额用**逐段超额的中位数**
+                        #（median(x−y) ≠ median(x)−median(y)，旧口径可与其
+                        #  "≥2/3 子段为正"分段门符号相反）。OOS 侧同构。
+                        _val_exc_seg = [float(a - b) for a, b in zip(_vrets, _vbhs)]
+                        val_excess = (float(np.median(_val_exc_seg)) if _val_exc_seg
+                                      else val_ret - val_bh_ret)
+                        val_excess_basis = "segment_median" if _val_exc_seg else "median_diff"
                     else:
                         vtraj = run_episode(val_env, lambda s: agent.greedy_action(s))
                         val_ret = float(vtraj["total_ret"])
+                        val_bh_ret = _bh_return(val_df)
                         v_equities = [info.get("equity") for info in vtraj.get("infos", [])
                                       if info.get("equity") is not None]
+                    # 基准相对口径（2026-10）：val_ret 减同段买入持有 = 超额。
+                    # 注意：同一轮内所有候选模型的基准是同一个常数，所以"按 val_ret 排序"
+                    # 与"按超额排序"完全等价（选模逻辑无需改）；超额的意义在于**跨轮比较**
+                    # （锚点/回退）与 fitness 口径——不同轮的 val 窗口基准不同，绝对值不可比。
+                    val_excess = float(val_ret - val_bh_ret)
+                    val_excess_basis = "single_segment"
+                    row["val_excess_basis"] = val_excess_basis
                     row["val_ret"] = round(val_ret, 6)
+                    row["val_bh_ret"] = round(val_bh_ret, 6)
+                    row["val_excess"] = round(val_excess, 6)
                     row["val_segments"] = val_segments
                     # ---- 验证评估指标增强 ----
-                    val_sharpe = _equity_sharpe(v_equities) if len(v_equities) > 2 else 0.0
-                    val_max_dd = _equity_drawdown(v_equities) if len(v_equities) > 2 else 0.0
+                    # 2026-10 审计修复（LOW）：多段评估时 sharpe/dd **按段独立计算再取中位数**
+                    # ——跨段拼接 equity 序列会把"每段从 10000 重新起步"当成真实暴跌
+                    # （OOS 多段路径早已按段聚合，val 路径此前不对称）。
+                    if val_segments > 1 and _seg_equities:
+                        _per_sharpe = [_equity_sharpe(eq) for eq in _seg_equities if len(eq) > 2]
+                        _per_dd = [_equity_drawdown(eq) for eq in _seg_equities if len(eq) > 2]
+                        val_sharpe = float(np.median(_per_sharpe)) if _per_sharpe else 0.0
+                        val_max_dd = float(np.median(_per_dd)) if _per_dd else 0.0
+                    else:
+                        val_sharpe = _equity_sharpe(v_equities) if len(v_equities) > 2 else 0.0
+                        val_max_dd = _equity_drawdown(v_equities) if len(v_equities) > 2 else 0.0
                     row["val_sharpe"] = round(val_sharpe, 4)
                     row["val_max_dd"] = round(val_max_dd, 4)
                     # ---- 过拟合衰减：训练收益 > 验证收益时衰减下一步优势权重 ----
@@ -1141,6 +1274,7 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                             _adv_scale = 1.0
                     if val_ret > best_val_ret:
                         best_val_ret = val_ret
+                        best_val_excess = val_excess
                         # P2：JSON 往返（to_dict→from_dict 全量序列化）改为 deepcopy
                         best_agent = copy.deepcopy(agent)
                         no_improve_streak = 0
@@ -1200,7 +1334,9 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     finally:
         pool.shutdown(wait=True)
     final_agent = best_agent or agent
-    final_agent.epsilon = final_agent.epsilon_min
+    # 模型文件里记录的 epsilon 必须与实际行为一致：未启用 ε-greedy 时写 0.0
+    #（修复前一律写 epsilon_min=0.05，部署端/审计据此以为有 5% 随机探索）
+    final_agent.epsilon = final_agent.epsilon_min if _use_epsilon else 0.0
 
     # ============ OOS 独立评估（防过拟合核心） ============
     # 训练结束后用【完全未见过】的 oos_df 评估最优模型，与训练段对比：
@@ -1216,6 +1352,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
             oos_rets: list = []
             oos_pos_ratios: list = []
             oos_equities_all: list = []
+            oos_bhs: list = []          # 同段买入持有（基准）
+            oos_turnovers: list = []    # 实收换手基数（活跃度守卫）
             oos_segment_equities: list[list[float]] = []
             oos_final_equities: list = []
             if oos_segments > 1 and seg_len >= oos_min_bars:
@@ -1233,9 +1371,12 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                                          extra_factors=seg_extra,
                                          state_window=state_window,
                                          participation_rate=float(cfg.get("participation_rate", 0.0)),
-                                         funding_rate=float(cfg.get("funding_rate", 0.0)))
+                                         funding_rate=float(cfg.get("funding_rate", 0.0)),
+                                         **policy_env_kwargs(cfg))
                     seg_traj = run_episode(seg_env, lambda s: final_agent.greedy_action(s))
                     oos_rets.append(float(seg_traj["total_ret"]))
+                    oos_bhs.append(_bh_return(seg))
+                    oos_turnovers.append(float(seg_traj.get("turnover", 0.0)))
                     oos_pos_ratios.append(float(seg_traj["final_position_ratio"]))
                     oos_final_equities.append(float(seg_traj["final_equity"]))
                     seg_equities = [info.get("equity") for info in seg_traj.get("infos", [])
@@ -1253,7 +1394,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                                      extra_factors=extra_factors_oos,
                                      state_window=state_window,
                                      participation_rate=float(cfg.get("participation_rate", 0.0)),
-                                     funding_rate=float(cfg.get("funding_rate", 0.0)))
+                                     funding_rate=float(cfg.get("funding_rate", 0.0)),
+                                     **policy_env_kwargs(cfg))
                 oos_traj = run_episode(oos_env, lambda s: final_agent.greedy_action(s))
                 oos_ret = float(oos_traj["total_ret"])
                 oos_position_ratio = float(oos_traj["final_position_ratio"])
@@ -1261,6 +1403,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                 oos_equities_all = [info.get("equity") for info in oos_traj.get("infos", [])
                                     if info.get("equity") is not None]
                 oos_rets = [oos_ret]
+                oos_bhs = [_bh_return(oos_df)]
+                oos_turnovers = [float(oos_traj.get("turnover", 0.0))]
                 oos_pos_ratios = [oos_position_ratio]
             if oos_segment_equities:
                 oos_equity_metrics = _aggregate_oos_segment_metrics(oos_segment_equities)
@@ -1271,10 +1415,39 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     "max_drawdown": _equity_drawdown(oos_equities_all)
                     if len(oos_equities_all) > 2 else 0.0,
                 }
+            # 基准相对口径（2026-10）：超额 = 模型 OOS 收益 − 同段买入持有收益。
+            # 逐段算超额取中位数（与 oos_ret 的多段中位数同构）。必须在过拟合衰减
+            # 之前算好——衰减判据也已改为超额口径（见下）。
+            oos_bh_ret = float(np.median(oos_bhs)) if oos_bhs else 0.0
+            _raw_exc_seg = [float(a - b) for a, b in zip(oos_rets, oos_bhs)]
+            oos_excess_segments = [round(x, 6) for x in _raw_exc_seg]
+            # 2026-10 审计修复（MED-3）：超额 = **逐段超额的中位数**——旧口径
+            # `median(段收益) − median(段基准)` 与逐段中位数不等价，可与分段门
+            # "≥2/3 子段为正"符号相反（同一数据两个门一个放行一个拦截）。
+            oos_excess = (float(np.median(_raw_exc_seg)) if _raw_exc_seg
+                          else oos_ret - oos_bh_ret)
+            oos_excess_basis = "segment_median" if _raw_exc_seg else "median_diff"
+            oos_turnover = float(np.sum(oos_turnovers)) if oos_turnovers else 0.0
+            oos_active_segments = int(sum(1 for t in oos_turnovers if t > 1e-9))
             # 训练段代表收益（用验证段 best 或训练段末收益）
             train_ref = best_train_ret if best_train_ret > -1e8 else float(total_ret)
-            # 过拟合判断：OOS 收益相对训练段收益的衰减（D3，语义见 _oos_decay）
-            decay = _oos_decay(train_ref, oos_ret)
+            # 过拟合判断：OOS 相对"参照"的衰减（D3，语义见 _oos_decay）。
+            # 2026-10 基准相对口径：动作空间只能做多/空仓，OOS 落在熊市时**任何**
+            # 多头模型的绝对收益都是负的 ⇒ `_oos_decay(正训练段, 负OOS) = 1.0`
+            # ⇒ 硬门恒判"疑似过拟合"并把 deployment_blocked 置 True，
+            # 于是新的基准相对部署门根本没机会被问到（实测：超额 +2.4% 仍被硬门拦）。
+            # 改为在**超额**口径上判衰减：参照=验证段超额（模型没见过的段，
+            # 且同段基准可算），OOS 侧=同段超额；缺基准的老路径回退绝对口径。
+            _decay_ref = None
+            _decay_basis = "absolute"
+            if best_val_excess is not None and oos_bhs:
+                _decay_ref = float(best_val_excess)
+                _decay_basis = "excess"
+            elif oos_bhs:
+                _decay_ref = float(train_ref - _bh_return(train_df))
+                _decay_basis = "excess"
+            decay = _oos_decay(_decay_ref if _decay_ref is not None else train_ref,
+                               oos_excess if _decay_basis == "excess" else oos_ret)
             # P1-7：市场状态（regime）对比——训练段 vs OOS 段波动率/趋势方向差异。
             # 训练段趋势市 + OOS 震荡市会让任何模型显得"过拟合"，反之假通过；
             # 此指标帮助判断 OOS 收益差异是否由行情状态剧变造成（而非模型能力）。
@@ -1295,9 +1468,25 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                 "oos_rets": [round(r, 6) for r in oos_rets],  # P1-5：多段收益列表（单段时同旧口径）
                 "oos_segments": len(oos_rets),
                 "oos_ret_std": round(float(np.std(oos_rets)), 6) if len(oos_rets) > 1 else 0.0,
+                # 基准相对验收（见 _strategy_deploy_gate）：熊市里"保护住资本"应算合格，
+                # 牛市里"只会满仓躺赢"（超额 0）应被拒——旧口径只要求 oos_ret>0，
+                # 在下跌窗口里等价于"结构上不允许任何多头策略过门"（实测 452/501 轮被拒）。
+                "oos_bh_ret": round(oos_bh_ret, 6),           # 同段买入持有基准
+                "oos_excess": round(oos_excess, 6),           # 相对基准的超额（逐段中位数）
+                "oos_excess_basis": oos_excess_basis,        # segment_median/median_diff/single_segment
+                "oos_excess_segments": oos_excess_segments,   # 逐段超额（稳健性可见）
+                "oos_excess_positive_segments": int(sum(1 for x in oos_excess_segments if x > 0)),
+                # 活跃度（实收成本基数，见 TradingEnv._turnover_units）：用于识别
+                # "靠全程不交易在熊市里白拿超额"的模型——这类不该被当成会择时。
+                "oos_turnover": round(oos_turnover, 4),
+                "oos_active_segments": oos_active_segments,
                 "train_ret": round(train_ref, 6),
                 "decay": round(decay, 4),
-                "overfit_likely": bool(decay > 0.5),  # OOS 收益衰减过半 → 疑似过拟合
+                # 衰减判据的口径与参照（审计可见）：excess = 相对基准的超额衰减，
+                # absolute = 旧的绝对收益衰减（缺基准字段时的回退路径）
+                "decay_basis": _decay_basis,
+                "decay_ref": (round(_decay_ref, 6) if _decay_ref is not None else None),
+                "overfit_likely": bool(decay > 0.5),  # 超额衰减过半 → 疑似过拟合
                 "oos_equity_final": round(oos_equity_final, 2),
                 "oos_position_ratio": round(oos_position_ratio, 4),
                 "oos_sharpe": round(oos_equity_metrics["sharpe"], 4),
@@ -1315,9 +1504,17 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
             oos_hard_gate = bool(cfg.get("oos_hard_gate", True))
             if oos_hard_gate and oos_report["overfit_likely"]:
                 oos_report["hard_rejected"] = True
-                oos_report["reason"] = (
-                    f"OOS 收益 {oos_ret:.4f} 较训练段 {train_ref:.4f} 衰减 {decay:.1%}，"
-                    f"疑似过拟合，已拦截自动部署（可关闭 oos_hard_gate 强制产出）")
+                # 原因文本必须与被判的量一致：超额口径下写"OOS 收益 vs 训练段"会
+                # 误导排查（数字与判据不是同一个东西）。
+                if _decay_basis == "excess":
+                    oos_report["reason"] = (
+                        f"样本外超额 {oos_excess:.4f} 较验证段超额 {_decay_ref:.4f} "
+                        f"衰减 {decay:.1%}，疑似过拟合，已拦截自动部署"
+                        f"（可关闭 oos_hard_gate 强制产出）")
+                else:
+                    oos_report["reason"] = (
+                        f"OOS 收益 {oos_ret:.4f} 较训练段 {train_ref:.4f} 衰减 {decay:.1%}，"
+                        f"疑似过拟合，已拦截自动部署（可关闭 oos_hard_gate 强制产出）")
                 deployment_blocked = True
         except Exception as e:  # noqa: BLE001
             log.warning("[drl] OOS 评估失败: %s", e)
@@ -1383,13 +1580,19 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         "history": history,
         "best_ret": round(max(best_train_ret, best_val_ret), 6),
         "best_val_ret": round(best_val_ret, 6),
+        # 基准相对的最优验证超额（跨轮可比的 fitness 口径；None=从未验证成功）
+        "best_val_excess": (round(best_val_excess, 6)
+                            if best_val_excess is not None else None),
         "val_segments": val_segments,
         "final_ret": round(total_ret, 6),
         "episodes": episodes,
         "state_dim": env.state_dim,
-        "n_actions": len(ACTION_BUCKETS),
-        "action_buckets": ACTION_BUCKETS.tolist(),
-        "action_names": ACTION_NAMES,
+        "n_actions": env.n_actions,
+        "action_buckets": [float(x) for x in env.action_buckets],
+        "action_names": list(env.action_names),
+        # 是否含做空档（部署端能力判定：撮合内核当前为现货语义，无法建立负仓位）
+        "requires_short": buckets_require_short(env.action_buckets),
+        "short_enabled": bool(getattr(env, "short_enabled", False)),
         "algo": "ppo",
         "ppo_cfg": {"n_episodes": n_episodes, "ppo_epochs": ppo_epochs,
                     "mini_batch_size": mini_batch_size, "clip_eps": 0.2,
@@ -1446,8 +1649,15 @@ def _build_drl_pine(agent, model_name: str, factor_expression: str = "",
 
     返回 (代码, 不可导出原因)：模型装不进 Pine 时不能只留空串——UI 会据此
     显示一段与训练模型无关的模板代码，原因必须显式带到用户面前。
+
+    2026-10 做空支持：含做空档的模型**显式拒绝导出**——导出器（pine_export.py）
+    只会写多头/空仓分支，若把做空档当多头处理，图上的买卖点与训练模型是两回事。
+    宁可给明确原因，也不产出语义不符的脚本。
     """
     from .pine_export import try_build_drl_pine
+    if buckets_require_short(getattr(agent, "action_buckets", None)):
+        return "", ("该模型动作空间含做空档（−1~+1），Pine 导出器只支持多头/空仓分支；"
+                    "在导出器支持做空前不产出脚本（软件内运行同样受执行内核限制）")
     code, note = try_build_drl_pine(agent, model_name=model_name or "rl_agent",
                                     factor_expression=factor_expression,
                                     factor_mu=factor_mu, factor_sd=factor_sd,
@@ -1522,7 +1732,15 @@ def evaluate_agent(agent: ACAgent, df, cfg=None) -> dict:
                      min_trade_zone=float(cfg.get("min_trade_zone", 0.05)),
                      extra_factors=extra, state_window=state_window,
                      participation_rate=float(cfg.get("participation_rate", 0.0)),
-                     funding_rate=float(cfg.get("funding_rate", 0.0)))
+                     funding_rate=float(cfg.get("funding_rate", 0.0)),
+                     **policy_env_kwargs(cfg))
+    # 2026-10 审计修复（MED-1）：动作空间与训练端必须一致——9 档（做空）模型在
+    # 5 档 env 上跑，greedy_action 的 argmax 会在 env.step 断言处裸崩（API 500）。
+    # 显式报错，而不是把"训练会做空、评估按 5 档解释"当成静默行为。
+    if getattr(agent, "n_actions", 0) != env.n_actions:
+        raise ValueError(
+            f"模型动作空间 {getattr(agent, 'n_actions', 0)} 档与评估环境 {env.n_actions} 档不一致："
+            f"含做空档的模型需以同档位环境评估（执行内核支持做空前不可评估/部署）")
     traj = run_episode(env, lambda s: agent.greedy_action(s))
     return {
         "total_ret": round(float(traj["total_ret"]), 6),

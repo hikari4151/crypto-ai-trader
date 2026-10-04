@@ -93,12 +93,14 @@ def _make_strategy_engine_with_fake_obs(tmp_path, monkeypatch, verdict):
     # 软信号测试只测 GAP-01 闭环：关掉冠军/挑战者交替，每轮都是冠军轮
     monkeypatch.setattr(settings, "evolve_strategy_drl_population", False,
                         raising=False)
+    # 同时把多 seed 钉到 1：本组只测 GAP-01 轮次/连拒闭环，桩训练被调 3 次会让计数失真
+    monkeypatch.setattr(settings, "evolve_strategy_drl_seeds", 1, raising=False)
     eng = EvolveEngine(_MetaDB(), EventBus(), tmp_path / "models")
     eng._rolling_window = 200
     df = generate_demo(timeframe="5m", n=500, seed=42)
     fetch_calls = 0
 
-    async def _fake_fetch(symbol: str = ""):
+    async def _fake_fetch(symbol: str = "", bars: int = 0):
         nonlocal fetch_calls
         fetch_calls += 1
         out = df.copy()

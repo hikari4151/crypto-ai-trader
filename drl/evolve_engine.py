@@ -70,7 +70,10 @@ def _strategy_drl_train_cfg(episodes: int) -> dict:
         "ppo_epochs": max(1, int(getattr(settings, "evolve_strategy_drl_ppo_epochs", 8) or 0) or 4),
         "mini_batch_size": 128,
         "hidden": [int(h) for h in getattr(settings, "evolve_strategy_drl_hidden", [16, 16])],
-        "seed": None,
+        # 固定种子（2026-10，可复现）：旧值 None=每轮随机，单 seed 下训练结果不可复现、
+        # 跨重启不可比；配合 evolve_strategy_drl_seeds>1 做多 seed 中位数选模时，
+        # 种子按 base+i 派生（见 _run_multi_seed）。
+        "seed": int(getattr(settings, "evolve_strategy_drl_seed", 42) or 42),
         "train_ratio": 0.6,
         "val_ratio": 0.2,
         "fee_rate": 0.001,
@@ -85,6 +88,21 @@ def _strategy_drl_train_cfg(episodes: int) -> dict:
         "lr_critic": 6e-3,
         "gamma": 0.95,
         "entropy_coef": 0.05,
+        # 2026-10 根本性逻辑错误修复：奖励口径 / 决策间隔（详见 config/settings.py 注释
+        # 与 docs/DRL训练根本性逻辑错误-诊断报告.md）。训练、验证、OOS、长窗观测
+        # 全部由 env.policy_env_kwargs 同源取值，防止"训练每4根决策、评估每根决策"的口径漂移。
+        "reward_mode": str(getattr(settings, "evolve_strategy_drl_reward_mode", "excess")),
+        "benchmark_position": float(getattr(settings, "evolve_strategy_drl_benchmark_position", 1.0)),
+        "risk_coef": float(getattr(settings, "evolve_strategy_drl_risk_coef", 0.5)),
+        "decision_interval": max(1, int(getattr(
+            settings, "evolve_strategy_drl_decision_interval", 1) or 1)),
+        # 经验量：单条 episode 的时间窗长度（0=整段训练段）。>0 时走标的池采样，
+        # 每条轨迹随机取一个年代切片（配合 history_bars 拉满多年历史）。
+        "episode_window": max(0, int(getattr(settings, "evolve_strategy_drl_episode_window", 0) or 0)),
+        # 做空（2026-10）：动作空间 −1~+1。默认关闭——执行内核（撮合/纸面/实盘）
+        # 当前为现货语义、无法建立负仓位，开启只用于**离线实验/评估**；
+        # 含做空档的模型会被部署门显式阻断（见 _strategy_deploy_gate）。
+        "short_enabled": bool(getattr(settings, "evolve_strategy_drl_short_enabled", False)),
         "val_eval_interval": 10,
         # 2026-09-20（regime 诊断）：val 段切成 3 段取收益中位数选模——避免单一
         # regime（如下行震荡）选出"只会在该段表现好"的保守模型（OOS 上行不交易）。
@@ -121,8 +139,219 @@ from drl.evolve_rules import (  # noqa: E402
 )
 
 
+def _strategy_drl_identity_config(train_cfg: dict, multi_names: list) -> dict:
+    """策略 DRL 训练身份指纹的配置项（单一定义处：引擎与测试同源）。
+
+    身份指纹必须覆盖所有"影响状态/奖励/切分/部署门"的训练口径，否则不同口径的
+    产出会被拿去互相回退比较。2026-10 新增奖励口径/决策间隔/风险系数/时间窗：
+    旧锚点是在"躺平即最优"的目标下训出来的（fitness 大量恰为 0.0），
+    与新目标下的产出不可比，必须触发锚点重建。
+    """
+    return {
+        "episodes": int(getattr(settings, "evolve_strategy_drl_episodes", 8)),
+        "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 20.0)),
+        "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
+        # 2026-10 审计修复（HIGH-3）：**不能**把"本轮实际取到数据的额外标的名单"
+        # 混入身份指纹——任一额外标的瞬时 fetch 失败（429/网络抖动）都会让同一配置
+        # 的指纹逐轮漂移 ⇒ 回退保护被旁路/挑战者永不晋升（factor_miner 端 2026-09
+        # 已修过同类 bug："把训练输出纳入身份 → 回退保护永久旁路"）。
+        # 多标的**开关**（设置值，稳定）保留——开/关是真实的训练语义差异；
+        # 不能再取运行时名单 bool(multi_names)（瞬时 fetch 失败会让它漂移）。
+        "multi_symbol": bool(getattr(settings, "evolve_strategy_drl_multi_symbol", True)),
+        # P1 时序网络升级：actor 骨干是训练口径——GRU 与 MLP 架构不同，
+        # 混入身份指纹，防止"GRU 训练产出"与"MLP 锚点"互相回退比较。
+        "backbone": str(train_cfg.get("backbone", "mlp")),
+        # 2026-10 根本性逻辑错误修复：奖励口径 / 决策间隔 / 风险系数 / 时间窗
+        "reward_mode": str(train_cfg.get("reward_mode", "absolute")),
+        "decision_interval": int(train_cfg.get("decision_interval", 1)),
+        "risk_coef": float(train_cfg.get("risk_coef", 0.5)),
+        "episode_window": int(train_cfg.get("episode_window", 0) or 0),
+        # 2026-10 验收/ fitness 口径：绝对收益 vs 基准相对超额。锚点 fitness 的
+        # **语义**变了（同一数字含义不同），必须混入身份指纹，否则会拿"绝对值时代"
+        # 的锚点去回退"超额时代"的候选。
+        "fitness_excess": bool(getattr(
+            settings, "evolve_strategy_drl_fitness_excess", True)),
+        "deploy_requires_benchmark": bool(getattr(
+            settings, "evolve_strategy_drl_deploy_requires_benchmark", True)),
+        # 分段稳健性入闸同样属于**部署门口径**：验收语义变了 → 旧锚点不能用于回退比较
+        "deploy_min_positive_fraction": float(getattr(
+            settings, "evolve_strategy_drl_deploy_min_positive_fraction", 0.0) or 0.0),
+        # 动作空间（做空开关）改变了策略能做什么，与长仓产出不可互比
+        "short_enabled": bool(train_cfg.get("short_enabled", False)),
+    }
+
+
+_TRAINING_CFG_KEYS = (
+    # 2026-10 审计修复（MED）：增量门失效白名单——这些配置直接影响 strategy_drl
+    # 训练口径，热更新任一键都必须让 _last_tail_ts 失效（立即重训），否则面板显示
+    # "已应用"而后台仍按旧口径 gating 直到有新 K 线。
+    "evolve_strategy_drl_seed", "evolve_strategy_drl_seeds",
+    "evolve_strategy_drl_episodes", "evolve_strategy_drl_n_episodes",
+    "evolve_strategy_drl_ppo_epochs", "evolve_strategy_drl_collect_workers",
+    "evolve_strategy_drl_hidden", "evolve_strategy_drl_backbone",
+    "evolve_strategy_drl_gru_hidden", "evolve_strategy_drl_curriculum",
+    "evolve_strategy_drl_curriculum_start",
+    "evolve_strategy_drl_decision_interval", "evolve_strategy_drl_reward_mode",
+    "evolve_strategy_drl_benchmark_position", "evolve_strategy_drl_risk_coef",
+    "evolve_strategy_drl_episode_window", "evolve_strategy_drl_history_bars",
+    "evolve_strategy_drl_min_trade_zone", "evolve_strategy_drl_short_enabled",
+    "evolve_strategy_drl_multi_symbol", "evolve_strategy_drl_multi_mix_ratio",
+    "evolve_strategy_drl_replay_capacity", "evolve_strategy_drl_replay_mix_ratio",
+    "evolve_strategy_drl_fitness_excess", "evolve_train_time_budget",
+)
+
+
+def _cfg_epoch_hash(snapshot: dict) -> str:
+    """训练口径配置快照的稳定指纹（供审计测试锁"白名单键变更 ⇒ 指纹变化"）。"""
+    import hashlib
+    return hashlib.sha256(
+        json.dumps({k: v for k, v in snapshot.items() if k in _TRAINING_CFG_KEYS},
+                   sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _seed_score(res: Optional[dict]) -> float:
+    """多 seed 选模的评分：验证段超额（模型没见过的段，跨轮可比）。
+
+    OOS **不参与选模**——OOS 是选完模之后的独立安检（部署门），
+    用它选模等于把样本外泄漏进选择。缺超额字段（老结果）回退验证段绝对收益。
+    """
+    if res is None:
+        return -1e18
+    vx = res.get("best_val_excess")
+    if vx is not None:
+        try:
+            return float(vx)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(res.get("best_val_ret", -1e18) or -1e18)
+    except (TypeError, ValueError):
+        return -1e18
+
+
+def _seed_meta(res: dict, seed: int) -> dict:
+    """单个训练结果的可见摘要（审计/前端展示用，不做判据）。"""
+    oos = res.get("oos_report") or {}
+    return {
+        "seed": int(seed),
+        "val_excess": res.get("best_val_excess"),
+        "val_ret": res.get("best_val_ret"),
+        "oos_ret": oos.get("oos_ret"),
+        "oos_excess": oos.get("oos_excess"),
+        "elapsed_sec": res.get("elapsed_sec"),
+    }
+
+
+def _run_multi_seed(train_drl_fn, train_cfg: dict, n_seeds: int,
+                    base_seed: int) -> tuple[dict, dict]:
+    """多 seed 训练 + 中位数选模（2026-10 解决"单轮判据像抽奖"）。
+
+    实测（生产配置 1h/k=8/128 轮，3 个 seed 取自 `_strategy_drl_train_cfg(seed=None)`）：
+    验证段超额 13.1% / 6.4% / 16.0%，OOS 超额 +2.4% / −1.5% / −5.3% ——
+    单次训练的成败接近抛硬币。多 seed 的意义不在"多训几次"，
+    而在**选模判据从"单个样本"变成"中位数样本"**：最佳/最差都是运气，
+    中位数更能代表该配置的真实能力。
+
+    - 选模标准 = 验证段超额的中位数（OOS 不参与，避免泄漏进选择）；
+    - 偶数个 seed 取排序后下半的中位数（保守）；
+    - 所有 seed 从同一续训起点（base_agent）出发，即"一个父代 → N 个子女 → 选中间那个"；
+    - train_drl_fn(cfg) → result；返回 (选中的 result, meta)。
+
+    meta: {"seed_runs": [...], "seed_chosen": seed, "n_seeds": N,
+           "replay_buffer": 选中 seed 的回放缓冲副本（供引擎接回主缓冲）}
+
+    2026-10 审计修复（HIGH）：seed 间回放缓冲必须**独立**。旧实现共享同一个
+    replay_buffer 实例：seed i 的轨迹 push 进缓冲后，seed i+1 的 PPO 更新会采样到它
+    ⇒"中位数=同一配置的独立样本"的前提被破坏、选模结果依赖 seed 执行顺序。
+    现在每 seed 从主缓冲的**深拷贝副本**起步（seed 内自由推进互不污染），
+    选中 seed 的最终副本经 meta 交回（跨轮记忆 = 上一轮选中 seed 的缓冲）。
+    """
+    import copy as _copy
+    n = max(1, int(n_seeds or 1))
+    base = max(0, int(base_seed if base_seed is not None else 42))
+    main_buf = train_cfg.get("replay_buffer")
+    runs: list[tuple[int, dict, object]] = []
+    for i in range(n):
+        cfg = dict(train_cfg)
+        cfg["seed"] = base + i
+        # 每 seed 独立回放副本（仅多 seed 需要；单 seed 直接共享主缓冲，行为不变）
+        if main_buf is not None and n > 1:
+            cfg["replay_buffer"] = _copy.deepcopy(main_buf)
+        try:
+            r = train_drl_fn(cfg)
+        except Exception:  # noqa: BLE001 —— 单个 seed 失败不拖垮整轮，但必须显式可见
+            log.exception("[evolve] 多 seed 训练 seed=%d 失败（跳过，改用其余 seed）", base + i)
+            r = None
+        if r is not None and isinstance(r, dict) and r.get("history"):
+            runs.append((i, r, cfg.get("replay_buffer")))
+    if not runs:
+        raise RuntimeError("多 seed 训练全部失败，无结果可选")
+    scored = sorted(runs, key=lambda p: _seed_score(p[1]))
+    # 2026-10 审计修复（MED）：偶数个 seed 取**下半**中位数（与文档一致、保守）。
+    # 旧实现 `len//2` 在 n=2 时取较高分那个 → 退化成最大值挑选（正是注释要消灭的
+    # "抽奖"行为）；`(len-1)//2`：n=2→0（保守）、n=3→1（中位）、n=4→1（下半）。
+    chosen_idx, chosen_res, chosen_buf = scored[(len(scored) - 1) // 2]
+    meta = {
+        "n_seeds": len(runs),
+        "seed_runs": [_seed_meta(r, base + i) for i, r, _ in runs],
+        "seed_chosen": base + chosen_idx,
+    }
+    if chosen_buf is not None:
+        meta["replay_buffer"] = chosen_buf
+    chosen_res["seed_runs"] = meta["seed_runs"]
+    chosen_res["seed_chosen"] = meta["seed_chosen"]
+    log.info("[evolve] 多 seed 中位数选模：%d 个 seed（超额 %s），选中 seed=%d（超额=%s）",
+             len(runs),
+             [round(_seed_score(r), 4) for _, r, _ in runs],
+             base + chosen_idx, round(_seed_score(chosen_res), 4))
+    return chosen_res, meta
+
+
+def _oos_inactive_reason(oos: dict, min_turnover: float) -> Optional[str]:
+    """样本外"一手没做"的判据（活跃度守卫），返回原因或 None。
+
+    为什么必须独立于收益判据（2026-10 验收口径修复）：改成基准相对验收后，
+    "全程不交易"在下跌窗口里会白拿正超额（oos_ret=0 而基准 −27% → 超额 +27%），
+    那是**没参与**而不是**会择时**，不该被当成能力部署。
+    判据优先级（新→旧，兼容老报告）：
+      1. oos_turnover（实收换手基数，最准：直接来自环境成本记账）
+      2. oos_trades（真实交易笔数）
+      3. oos_position_ratio（段末持仓比例，最弱：交易后已平仓会被误判）
+    """
+    raw_turn = oos.get("oos_turnover")
+    if raw_turn is not None:
+        try:
+            turn = float(raw_turn)
+        except (TypeError, ValueError):
+            turn = None
+        if turn is not None:
+            if turn < float(min_turnover):
+                return (f"OOS 段换手仅 {turn:.4f}（<{min_turnover}），"
+                        f"样本外几乎没有交易，不构成择时能力")
+            return None
+    raw_trades = oos.get("oos_trades")
+    if raw_trades is not None:
+        try:
+            n_trades = int(raw_trades)
+        except (TypeError, ValueError):
+            n_trades = None
+        if n_trades is not None:
+            return (f"OOS 段模型从未发出交易指令(oos_trades={n_trades})，"
+                    f"样本外未交易" if n_trades <= 0 else None)
+    raw_pos = oos.get("oos_position_ratio")
+    if raw_pos is not None:
+        try:
+            pos_ratio = float(raw_pos)
+        except (TypeError, ValueError):
+            pos_ratio = None
+        if pos_ratio is not None and pos_ratio < 0.05:
+            return f"OOS 段几乎无信号(position_ratio={pos_ratio:.3f})，样本外未交易"
+    return None
+
+
 def _strategy_deploy_gate(result: dict) -> tuple[bool, str]:
-    """新模型能否接管实盘（策略 DRL / 元控制器共用）：先过 OOS 硬门，再看样本外是否赚钱。
+    """新模型能否接管实盘（策略 DRL / 元控制器共用）：先过 OOS 硬门，再按**基准相对**验收。
 
     train_drl 的硬门只在「训练段盈利且 OOS 衰减过半」时判过拟合，训练段本身亏损时
     decay=0（不可比、不判定）；而进化引擎旧逻辑连这个硬门都没读，只要数据源不是
@@ -131,12 +360,30 @@ def _strategy_deploy_gate(result: dict) -> tuple[bool, str]:
 
     P1-6：判据统一为 OOS 收益（与回退保护同口径）。
     P1-7：regime 剧变时把原因写清楚，供用户判断是否行情状态切换造成的假阳性。
+
+    2026-10 验收口径修复（docs/DRL成本标定-决策频率与滑点复核.md §4）：
+    旧判据 `oos_ret > 0` 与**训练目标（基准相对超额）**、与**动作空间（只能做多/空仓）**
+    互相矛盾——OOS 窗口是熊市时，多头策略的最优解是全程空仓 = 0%，而 0 被 `>0` 拒掉，
+    **结构上不可能有任何模型过门**（产线实测 452/501 轮被拒）。
+    新判据：`oos_ret - 同段买入持有 > 0`（超额为正）——熊市里保护住资本算合格，
+    牛市里"只会满仓躺赢"（超额 0）被拒，只有真择时能过。
+    同时加**活跃度守卫**：靠"从不交易"在熊市里白拿超额的不算能力。
+    报告缺基准字段（老模型/精简报告）或开关关闭时，自动退回旧的绝对收益判据。
     """
     oos = result.get("oos_report") or {}
     if result.get("deployment_blocked") or oos.get("hard_rejected"):
         return False, str(oos.get("reason") or "OOS 硬门拦截（疑似过拟合）")
     if not oos.get("enabled"):
         return False, "OOS 段样本不足（<最小样本数），无样本外证据不得自动接管实盘"
+    # 执行层能力门（2026-10 做空）：含做空档的模型在**执行内核支持负仓位之前**
+    # 一律不可部署。撮合内核 backtest/_matching.py 是现货语义
+    #（sell 要求 position>0 且 qty≤position），纸面/实盘同样无做空路径——
+    # 若放行，部署端会把负档位当"卖出/空仓"执行，训练与实盘彻底不是一回事
+    #（这正是本项目一路在消灭的口径漂移）。宁可显式拒绝并说清原因。
+    if result.get("requires_short") or bool(result.get("short_enabled")):
+        return False, ("该模型动作空间含做空档（−1~+1），而执行内核（撮合/纸面/实盘）"
+                       "当前为现货语义、无法建立负仓位：训练会做空但实盘执行不了，"
+                       "不得部署（需先完成撮合内核做空支持）")
     try:
         oos_ret = float(oos.get("oos_ret", 0.0))
     except (TypeError, ValueError):
@@ -145,33 +392,53 @@ def _strategy_deploy_gate(result: dict) -> tuple[bool, str]:
         # run24 修复：NaN/Inf oos_ret 曾绕过硬门（float("nan") <= 0 为 False → 部署）。
         # 行情数据缺口导致 NaN 指标时不得上线："无有效 OOS 收益"按非正拦截。
         return False, f"OOS 段收益无效（{oos_ret}，非有限数值），数据缺口，暂不部署"
+    _regime_note = ("；且训练/样本外行情状态剧变(regime_shift)"
+                    if oos.get("regime_shift") else "")
+
+    # ---- 活跃度守卫（先于收益判据：不参与的"超额"不是能力） ----
+    _min_turn = float(getattr(settings, "evolve_strategy_drl_deploy_min_oos_turnover", 0.5) or 0.0)
+    _inactive = _oos_inactive_reason(oos, _min_turn)
+    if _inactive:
+        return False, f"{_inactive}{_regime_note}"
+
+    # ---- 基准相对验收（默认开；报告缺基准或开关关闭时退回旧绝对判据） ----
+    _need_bh = bool(getattr(settings, "evolve_strategy_drl_deploy_requires_benchmark", True))
+    _bh_raw = oos.get("oos_bh_ret")
+    if _need_bh and _bh_raw is not None:
+        try:
+            oos_bh = float(_bh_raw)
+        except (TypeError, ValueError):
+            oos_bh = None
+        if oos_bh is not None and math.isfinite(oos_bh):
+            excess = oos_ret - oos_bh
+            if excess <= 0:
+                return False, (f"样本外未跑赢买入持有：模型 {oos_ret:.4f} vs 基准 {oos_bh:.4f}"
+                               f"（超额 {excess:.4f} ≤ 0）{_regime_note}")
+            # ---- 分段稳健性（2026-10）：正超额子段 ≥ ceil(n×比例)，防"一段灾难掩盖" ----
+            # 中位超额为正但多数子段为负（如 [-0.45, +0.02, +0.03]，中位 +0.02 旧门可过）
+            # = 择时能力并不存在，只是运气在两个小段上微赚。要求正超额子段达比例。
+            # 缺逐段字段（老模型/精简报告）或 fraction<=0（关闭）时跳过，向前兼容。
+            _frac = float(getattr(settings, "evolve_strategy_drl_deploy_min_positive_fraction",
+                                  0.0) or 0.0)
+            if _frac > 0.0:
+                _segs = oos.get("oos_excess_segments") or []
+                _n = int(oos.get("oos_segments", 0) or 0) or len(_segs)
+                if _n >= 1 and (_segs or oos.get("oos_excess_positive_segments") is not None):
+                    _pos_raw = oos.get("oos_excess_positive_segments")
+                    _pos = (int(_pos_raw) if _pos_raw is not None
+                            else int(sum(1 for x in _segs if x > 0)))
+                    # −1e-9 防浮点边界：配置 0.666667×3=2.000001 会被 ceil 成 3，
+                    # 把"≥2/3"悄悄变成"必须3/3"（实测 E 配置被误拒）；settings 默认
+                    # 2.0/3.0 的积在 fp 里是 1.999…，本就不需要，但用户手填小数时会踩中。
+                    _need = max(1, int(math.ceil(_n * _frac - 1e-9)))
+                    if _pos < _need:
+                        return False, (f"分段稳健性不足：{_n} 段中仅 {_pos} 段超额为正"
+                                       f"（需 ≥{_need} 段）{_regime_note}")
+            return True, ""
+
     if oos_ret <= 0:
-        _regime_note = ("；且训练/样本外行情状态剧变(regime_shift)"
-                        if oos.get("regime_shift") else "")
-        # P2-14：区分"样本外无信号"与"真亏损"。
-        # P4-E2：优先用真实交易次数（oos_trades，元控制器/新报告提供）判断是否
-        # 在样本外行动过——段末持仓比例会误伤"交易后已平仓"的合理策略（段末空仓
-        # → 比例 0 被误判为从未交易）。报告缺 oos_trades 时回退到段末持仓比例
-        #（老报告/精简报告），再缺失视为未知，按真亏损口径给"非正"。
-        raw_trades = oos.get("oos_trades")
-        if raw_trades is not None:
-            try:
-                n_trades = int(raw_trades)
-            except (TypeError, ValueError):
-                n_trades = None
-            if n_trades is not None and n_trades <= 0:
-                return False, (f"OOS 段模型从未发出交易指令(oos_trades={n_trades})，"
-                               f"样本外未交易，暂不部署{_regime_note}")
-        else:
-            raw_pos = oos.get("oos_position_ratio")
-            if raw_pos is not None:
-                try:
-                    pos_ratio = float(raw_pos)
-                except (TypeError, ValueError):
-                    pos_ratio = None
-                if pos_ratio is not None and pos_ratio < 0.05:
-                    return False, (f"OOS 段几乎无信号(position_ratio={pos_ratio:.3f})，"
-                                   f"样本外未交易，暂不部署{_regime_note}")
+        # 旧绝对判据（无基准字段/开关关闭）：P2-14 区分"样本外无信号"与"真亏损"，
+        # 活跃度已在上方守卫里判过，这里只说明收益非正。
         return False, f"OOS 段收益 {oos_ret:.4f} 非正，样本外不具备盈利能力{_regime_note}"
     return True, ""
 
@@ -238,6 +505,67 @@ def _identity_mismatch(anchor_meta: dict, identity: dict) -> Optional[str]:
     return None
 
 
+def _clear_gap01_streak_on_version(eng, new_version, *, prev_version) -> None:
+    """部署版本**更换**时清空 GAP-01 的 FAIL 计数（2026-10 审计修复 MED）。
+
+    旧实现只在版本变化时重置 PASS 计数（_gap01_pass_*），FAIL 计数（_gap01_streak）
+    不清——旧模型积累的 FAIL 会传导到新模型，触发冠军 from-scratch。
+
+    语义边界：版本**首次确定**（prev_version 为 None，即第一个部署模型的评估开始）
+    不属于"换模型"，不清 FAIL——否则第一轮的 FAIL 被吞，连续 FAIL 的判定失真。
+    """
+    try:
+        if prev_version is None or prev_version == new_version:
+            return
+        if eng._gap01_streak.get("strategy_drl", 0) != 0:
+            log.info("[evolve] 部署版本更换(%s→%s)：清空 GAP-01 FAIL 计数（旧模型 FAIL 不传导）",
+                     prev_version, new_version)
+        eng._gap01_streak["strategy_drl"] = 0
+        eng._strategy_drl_status["gap01_streak"] = 0
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _bump_reject_streak(eng, model: str, *, lineage: str = "") -> None:
+    """连续拒绝计数递增（2026-10 审计修复 MED）：challenger 谱系不递增。
+
+    _log_round 的旧逻辑对任何非 ok/demo_blocked 状态 +1——challenger_kept/degraded
+    （"晋级失败被冠军压住"的健康交替）也累积，约每 5 个挑战者轮就会把选模合格的
+    冠军强制 from-scratch 重训（丢经验）。挑战者谱系不计入；main 谱系照旧。
+    """
+    if lineage == "challenger":
+        return
+    eng._reject_streak[model] = int(eng._reject_streak.get(model, 0)) + 1
+
+
+def _make_cross_oos_env(df, *, state_window: int, decision_interval: int,
+                        min_trade_zone: float, short_enabled: bool = False,
+                        reward_mode: str = "absolute", benchmark_position: float = 1.0,
+                        risk_coef: float = 0.5) -> object:
+    """跨标 OOS 评估环境（2026-10 审计修复 HIGH-1c）。
+
+    此前硬编码 k=1/absolute/zone=0.05 评估 k=8/excess 训练的模型——验收门量的是
+    错误语义（更高频交易、更小死区），主 OOS 门与跨标 OOS 门对同一模型会自相矛盾。
+    现在必须与训练/主 OOS 段同口径（policy_env_kwargs 语义）。
+    """
+    from drl.env import TradingEnv
+    return TradingEnv(
+        df,
+        start_cash=float(getattr(settings, "default_start_cash", 10000.0)),
+        fee_rate=0.001,
+        vol_penalty=float(getattr(settings, "evolve_vol_penalty", 20.0)),
+        slippage=0.0005,
+        min_trade_zone=float(min_trade_zone),
+        extra_factors=None,
+        state_window=max(1, int(state_window)),
+        reward_mode=str(reward_mode),
+        benchmark_position=float(benchmark_position),
+        risk_coef=float(risk_coef),
+        decision_interval=max(1, int(decision_interval or 1)),
+        short_enabled=bool(short_enabled),
+    )
+
+
 class EvolveEngine(EvolveObservationsMixin):
     """持续进化引擎：管理因子挖掘和策略训练的持续循环。"""
 
@@ -251,6 +579,11 @@ class EvolveEngine(EvolveObservationsMixin):
         self._running = False
         self._paused = False
         self._tasks: list[asyncio.Task] = []
+        # 2026-10 审计修复（留档项）：优雅停止事件。stop()/set_enabled(False) 置位后，
+        # 训练循环在**当前轮完整结束（含写盘/注册/落库）**后自然退出，而非硬 cancel——
+        # 硬 cancel 只中断协程 await，executor 线程跑完训练但后处理段（save_agent/
+        # register/_log_round）可能丢失（"训练+写盘必然完整执行"的旧注释不成立）。
+        self._stop_event = asyncio.Event()
         # 保活（watchdog）：_run_loop 只能兜住"逐轮训练"里的异常。一旦异常从
         # 循环体之外逸出，那条 asyncio 任务会直接结束，而 _running/_enabled 仍是
         # True——引擎对外依然显示"运行中"，实际已永久停训，只能重启进程或手动
@@ -407,17 +740,33 @@ class EvolveEngine(EvolveObservationsMixin):
             log.info("[evolve] 持续进化引擎已禁用（evolve_enabled=false）")
 
     async def stop(self) -> None:
-        """停止训练循环。"""
+        """优雅停止训练循环（2026-10 审计修复留档项）。
+
+        语义（三层）：
+        1. 置 _running=False + _stop_event：真实循环在下一轮迭代自然退出；
+        2. 等**训练本体**（executor 线程，无法 kill）跑完 + 给协程后处理（写盘/
+           注册/落库）约 5s 缓冲——这两段保证"当前轮完整落盘"；
+        3. 超时/缓冲后**硬 cancel 兜底**（测试的 stub 循环、失控任务不配合停止时
+           不会让 stop() 永久挂起）。旧实现只硬 cancel：训练本体在 executor 线程
+           照跑，但协程后处理段（save_agent/register/_log_round）被丢——这正是
+           "训练+写盘必然完整执行"旧注释不成立之处。
+        """
         self._running = False
-        for t in self._tasks:
-            t.cancel()
+        self._stop_event.set()
+        # 只在实际有训练在跑（_training_done 处于 cleared）时等训练本体 + 写盘缓冲；
+        # 无训练时立即收尾（曾固定 sleep(3) —— startup/无训练的 stop 被拖慢 3 秒，
+        # perf_baseline：53ms → 3053ms 全是这个固定缓冲）。
+        if not self._training_done.is_set():
+            await self._wait_training_done(timeout=float(getattr(
+                settings, "evolve_stop_training_grace", 120.0) or 120.0))
+            # 写盘缓冲：训练结果已返回，给 save_agent/register/_log_round 短暂收尾时间
+            await asyncio.sleep(3.0)
         if self._tasks:
+            for t in self._tasks:
+                t.cancel()
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
         self._supervise_status["alive"] = False
-        # 等在跑的 to_thread 训练跑完（取消只停协程；executor 线程会跑到底）。
-        # 用 to_thread 等 threading.Event，避免阻塞事件循环；超时仅告警不阻断。
-        await self._wait_training_done()
         log.info("[evolve] 持续进化引擎已停止")
 
     async def _wait_training_done(self, timeout: float = 180.0) -> None:
@@ -789,19 +1138,31 @@ class EvolveEngine(EvolveObservationsMixin):
             # 该管线永久停训，直到进程重启）。现在改为"缺哪条补哪条"，
             # 判定不再依赖 `not self._tasks`——保活监督自身也占一个任务槽，
             # 拿列表空否当开关会让热切换漏建整组循环。
+            # 2026-10 审计修复（留档项）：重建停止事件，让新循环可运行。
+            self._stop_event = asyncio.Event()
             created = self._spawn_loops()
             self._spawn_supervisor()
             self._supervise_status["alive"] = True
             if created:
                 log.info("[evolve] 持续进化已启用（补齐 %d 条训练循环，保活监督已就位）", created)
         elif not enabled:
-            # 禁用：取消所有训练循环（正在训练的任务会被取消，但 executor 线程
-            # 会跑完——等待其结束再返回，避免"已禁用仍在后台烧 CPU"）
-            for t in self._tasks:
-                t.cancel()
+            # 禁用（2026-10 审计修复留档项）：**优雅停止**——置停止事件让循环在
+            # 当前轮完整结束（含写盘/注册/落库）后自然退出；等训练本体 + 写盘缓冲
+            # 后硬 cancel 兜底（stub/失控任务不配合时不挂起）。曾只硬 cancel：只
+            # 中断协程，executor 线程跑完训练但后处理段写入可能丢失。
+            self._enabled = False
+            self._stop_event.set()
+            # 仅实际有训练在跑时才等训练本体 + 写盘缓冲（无训练立即收尾，见 stop()）
+            if not self._training_done.is_set():
+                await self._wait_training_done(timeout=float(getattr(
+                    settings, "evolve_stop_training_grace", 120.0) or 120.0))
+                await asyncio.sleep(3.0)
+            if self._tasks:
+                for t in self._tasks:
+                    t.cancel()
+                await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
             self._supervise_status["alive"] = False
-            await self._wait_training_done()
             log.info("[evolve] 持续进化已禁用")
 
     async def pause(self) -> None:
@@ -818,6 +1179,9 @@ class EvolveEngine(EvolveObservationsMixin):
         """手动触发一次因子挖掘训练（同步执行，不阻塞太久需容忍）。"""
         if not self._running:
             return {"ok": False, "reason": "持续进化引擎未运行"}
+        # 2026-10 审计修复（留档项）：停止/禁用状态下手动触发拒绝（同 trigger_strategy_drl）
+        if self._stop_event.is_set():
+            return {"ok": False, "reason": "持续进化已停止/禁用，无法手动触发"}
         # P2：忙态守卫——另一条训练正在进行时直接拒绝（此前连点会在
         # _train_lock 上排队，连续执行数轮完整训练）
         if self._train_lock.locked():
@@ -848,6 +1212,10 @@ class EvolveEngine(EvolveObservationsMixin):
         """手动触发一次策略 DRL 训练（同步执行）。"""
         if not self._running:
             return {"ok": False, "reason": "持续进化引擎未运行"}
+        # 2026-10 审计修复（留档项）：停止/禁用状态下手动触发拒绝——
+        # 曾 stop() 不取消手动触发任务，禁用返回后手动轮仍可能继续部署写盘。
+        if self._stop_event.is_set():
+            return {"ok": False, "reason": "持续进化已停止/禁用，无法手动触发"}
         # P2：忙态守卫——另一条训练正在进行时直接拒绝（防连点排队执行多轮）
         if self._train_lock.locked():
             return {"ok": False, "busy": True, "reason": "另一条训练正在进行中，请稍后再试"}
@@ -856,6 +1224,10 @@ class EvolveEngine(EvolveObservationsMixin):
             try:
                 self._strategy_drl_status["last_error"] = ""
                 _res = await self._train_strategy_drl_once(force=True)
+                # 2026-10 审计修复（LOW）：手动触发也推进"全管线完成才切换标的"记账
+                # （曾只有 _run_loop 调用 _mark_pipeline_done——频繁手动触发时当前标的
+                #  的 cycle 记账滞后，标的轮换被卡住）。
+                self._mark_pipeline_done("strategy_drl")
                 self._strategy_drl_status["last_run"] = time.time()
                 if _res == "demo":
                     self._strategy_drl_status["last_success"] = False
@@ -1388,6 +1760,13 @@ class EvolveEngine(EvolveObservationsMixin):
             self._last_tail_ts.clear()  # 旧键对新池无意义，防跨池误判
         if "evolve_timeframe" in applied:
             self._last_tail_ts.clear()  # 增量门键含周期，切周期后旧键作废
+        # 2026-10 审计修复（MED）：影响**训练口径**的配置变更同样必须让增量门失效，
+        # 否则改 seed/backbone/决策间隔/历史深度后，后台轮仍按旧口径 gating（数据尾戳
+        # 未变就静默跳过，新配置要等新 K 线才生效，面板却显示"已应用"）。
+        if any(k in applied for k in _TRAINING_CFG_KEYS):
+            self._last_tail_ts.clear()
+            log.info("[evolve] 训练口径配置变更(%s)：增量门失效，下一轮强制重训",
+                     sorted(k for k in applied if k in _TRAINING_CFG_KEYS))
 
         # 3) 持久化回 config.yaml（扁平结构，键名与 Settings 字段同名）：
         # 逐键更新顶层文档，备份后原子写入（失败不致命，仅内存生效）。
@@ -1432,9 +1811,13 @@ class EvolveEngine(EvolveObservationsMixin):
         """在专用单线程 executor 里执行训练本体，并置位训练完成事件。
 
         - 单 worker 保证即便手动触发与周期循环并发，训练也绝不并行（双保险，
-          与 _train_lock 同一目的）；取消协程不会中断 executor 线程（线程无法
-          被 kill），训练+写盘必然完整执行，事件标志在 finally 里置位，
-          stop()/set_enabled(False) 据此等待真正的训练结束。
+          与 _train_lock 同一目的）；executor 线程无法被 kill，训练本体会跑到底，
+          事件标志在 finally 里置位。
+        - 2026-10 审计修复（留档项）：**停止/禁用改为优雅停止**——stop()/
+          set_enabled(False) 不再 cancel 协程，而是置 _stop_event 让循环在当前轮
+          完整结束后自然退出。因此协程后处理段（写盘/注册/落库）与训练本体一并
+          保证完整执行（旧注释"取消协程不会中断 executor 线程…写盘必然完整执行"
+          不成立——取消只中断协程 await，后处理段在协程里会被丢）。
         """
         self._training_done.clear()
 
@@ -1468,7 +1851,7 @@ class EvolveEngine(EvolveObservationsMixin):
             raise
         status["next_run"] = time.time() + start_delay
         status["loop_beat"] = time.time()
-        while self._running:
+        while self._running and not self._stop_event.is_set():
             # 每轮先给 retry_interval 兜底初值：此前它只在 try 内赋值，若异常在
             # 赋值之前逸出，循环尾部的 `time.time() + retry_interval` 会抛
             # UnboundLocalError——而异常处理器已在 try 内，兜不住尾部，
@@ -1587,7 +1970,28 @@ class EvolveEngine(EvolveObservationsMixin):
                 status["active"] = False
             status["next_run"] = time.time() + retry_interval
             status["loop_beat"] = time.time()
-            await asyncio.sleep(retry_interval)
+            # 2026-10 审计修复（留档项）：间隔 sleep 可被停止事件提前唤醒——
+            # 否则 stop() 后循环要等完整个 retry_interval（60s~30min）才退出，
+            # "停止/禁用"看起来毫无反应。
+            await self._sleep_or_stop(retry_interval)
+
+    async def _sleep_or_stop(self, seconds: float) -> None:
+        """sleep 与停止事件谁先到听谁（优雅停止的唤醒点；无停止时等价 asyncio.sleep）。"""
+        try:
+            sleep_t = asyncio.ensure_future(asyncio.sleep(max(0.0, float(seconds))))
+            stop_t = asyncio.ensure_future(self._stop_event.wait())
+            done, pending = await asyncio.wait({sleep_t, stop_t},
+                                               return_when=asyncio.FIRST_COMPLETED)
+            # 取消**所有**未完成任务（曾只 cancel done 里的任务——done 里是刚完成的
+            # stop_t，而 sleep_t 留在 pending，gather 会等满整个 interval 才返回，
+            # "停止即唤醒"失效）。
+            for t in done:
+                t.cancel()
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*done, *pending, return_exceptions=True)
+        except asyncio.CancelledError:
+            raise
 
     async def _factor_miner_loop(self) -> None:
         """因子挖掘持续训练循环（最高优先级：链路源头，下游依赖其产出）。"""
@@ -2118,7 +2522,13 @@ class EvolveEngine(EvolveObservationsMixin):
         data_source_used = "exchange"
         symbol = self._next_symbol()
         self._strategy_drl_status["symbol"] = symbol
-        df = await self._fetch_latest_data(symbol=symbol)
+        # 经验量修复（2026-10）：策略 DRL 按 evolve_strategy_drl_history_bars 拉取多年
+        # 历史（0=沿用 evolve_rolling_window 的旧行为）。旧行为只取最近 5000 根
+        # （5m≈17 天）并在同一段上每 60s 重训——"人类几年的学习量"在数据维度就被挡死。
+        _sdrl_history = max(0, int(getattr(settings, "evolve_strategy_drl_history_bars", 0) or 0))
+        _keep_bars = _sdrl_history if _sdrl_history > 0 else int(self._rolling_window)
+        df = await self._fetch_latest_data(
+            symbol=symbol, bars=_sdrl_history if _sdrl_history > 0 else 0)
         if df is None or len(df) < self._rolling_window * 0.1:
             if df is None:
                 # P4-C1：递增连续 demo 计数（供 _run_loop 降频）
@@ -2132,7 +2542,7 @@ class EvolveEngine(EvolveObservationsMixin):
                 data_source_used = "demo"
                 self._strategy_drl_status["last_error"] = f"交易所数据不可达，已用合成数据兜底（{symbol}）"
                 log.warning("[evolve] 策略DRL（%s）：交易所数据不可达，使用合成数据兜底", symbol)
-                df = self._generate_symbol_demo(symbol, n=self._rolling_window, timeframe=self._effective_timeframe())
+                df = self._generate_symbol_demo(symbol, n=_keep_bars, timeframe=self._effective_timeframe())
             else:
                 self._strategy_drl_status["last_error"] = f"数据不足（{len(df)} < {int(self._rolling_window * 0.1)}），5分钟后重试"
                 log.info("[evolve] 策略DRL（%s）：数据不足（%d < %d），5分钟后重试", symbol, len(df), int(self._rolling_window * 0.1))
@@ -2141,9 +2551,9 @@ class EvolveEngine(EvolveObservationsMixin):
             # 真实交易所数据：清零连续 demo 计数（恢复正常训练节奏）
             self._strategy_drl_status["_demo_streak"] = 0
 
-        # 2. 截取滚动窗口
-        if len(df) > self._rolling_window:
-            df = df.iloc[-self._rolling_window:]
+        # 2. 截取训练窗口（经验量修复：默认取 history_bars 而非 rolling_window）
+        if len(df) > _keep_bars:
+            df = df.iloc[-_keep_bars:]
 
         # P2-11 增量门：数据无新增 K 线则跳过本轮（仅连续训练生效，手动触发总执行）。
         # demo 轮直接放行且不写 prev（合成数据尾戳 ≈now 会污染真实数据增量判定）。
@@ -2151,65 +2561,76 @@ class EvolveEngine(EvolveObservationsMixin):
                                                     is_demo=(data_source_used == "demo")):
             return False
 
-        # walk-forward 多折观测（2026-09-19，用户选"1"）：本轮确认真实训练后，
-        # 用部署中的最佳模型做同品种多折评估（不改接受逻辑），结果写
-        # models/walkforward_obs.json + 日志。异常不影响训练主流程。
-        try:
-            await self._observe_strategy_drl_walkforward(df=df)
-        except Exception as e:  # noqa: BLE001
-            log.warning("[evolve] walk-forward观测失败（不影响训练）: %s", e)
-
-        # GAP-01 实盘验收观测（2026-09-19，建议第6条(b)）：同品种多折 × 两档成本，
-        # 输出 PASS/FAIL/INCONCLUSIVE（models/gap01_obs.json）。软信号（2026-09-20）：
-        # FAIL 与 INCONCLUSIVE 均累计 gap01_streak、PASS 清零；连续 N 轮不过
-        # 触发冠军轮 from-scratch 重学（evolve_gap01_fail_reset_after）。异常自吞。
-        # 注：INCONCLUSIVE=样本外证据不足/不交易，同样不能上线——若不计入 streak，
-        # from-scratch 重训后的模型不交易会永远判 INCONCLUSIVE，软信号被卡死
-        # （运行态实录 2026-09-20：gap01_streak 停在 2 到不了阈值）。
-        try:
-            _gap01 = await self._observe_gap01(df=df)
-            if _gap01 is not None:
-                _v = str(_gap01.get("verdict") or "")
-                if _v == "PASS":
-                    self._gap01_streak["strategy_drl"] = 0
-                elif _v in ("FAIL", "INCONCLUSIVE"):
-                    self._gap01_streak["strategy_drl"] = (
-                        int(self._gap01_streak.get("strategy_drl", 0)) + 1)
-                self._strategy_drl_status["gap01_verdict"] = _v
-                self._strategy_drl_status["gap01_streak"] = self._gap01_streak.get("strategy_drl", 0)
-                # 多窗口连续 PASS 判定（2026-09-21，§16.5 遗留1）：同一部署模型
-                # 连续 N 次观测 PASS 才算稳定（gap01_stable=True，实盘候选依据）。
-                # 仅 PASS 累计；FAIL/INCONCLUSIVE 或部署版本变化即清零（不交易/
-                # 证据不足不算稳定 PASS，杜绝"窗口滑动运气"——v36/v41/v42 教训）。
-                try:
-                    _deploy_ver = (self.zoo.best_info("strategy_drl") or {}).get("version")
-                except Exception:  # noqa: BLE001
-                    _deploy_ver = None
-                if _deploy_ver != self._gap01_pass_version:
-                    self._gap01_pass_version = _deploy_ver
-                    self._gap01_pass_streak = 0
-                if _v == "PASS":
-                    self._gap01_pass_streak += 1
-                else:
-                    self._gap01_pass_streak = 0
-                _stable_req = int(getattr(settings, "evolve_gap01_stable_pass_required", 3) or 0)
-                self._strategy_drl_status["gap01_pass_streak"] = self._gap01_pass_streak
-                self._strategy_drl_status["gap01_stable"] = bool(
-                    _stable_req > 0 and self._gap01_pass_streak >= _stable_req)
-        except Exception as e:  # noqa: BLE001
-            log.warning("[evolve] GAP-01观测失败（不影响训练）: %s", e)
-
-        # 长窗回放观测（2026-09-21，§16.5 升级）：30/90 天真实数据引擎撮合回放，
-        # 输出 longwindow_verdict（两窗均正才 PASS）；防"近期窗口效应"冒充实盘候选
-        #（v44 教训：短窗 stable PASS 但 30 天 -26.6% / 90 天 -67.8%）。异常自吞。
-        # 2026-09-22（训练速度研究）：训练本身仅 ~9.5s/轮，瓶颈在 30/90 天回放
-        #（每轮 +数分钟）——默认每 5 轮跑一次（longwindow_every_n），进化节奏回升。
-        _lw_every = max(1, int(getattr(settings, "evolve_strategy_drl_longwindow_every_n", 5) or 1))
-        if _lw_every == 1 or int(self._strategy_drl_status.get("_pop_round", 0)) % _lw_every == 0:
+        # 2026-10 审计修复（MED-2）：demo（交易所故障合成数据）轮不做任何观测——
+        # 合成数据评估部署模型会污染 gap01_streak/_gap01_pass_*/longwindow_verdict，
+        # 故障期累积的假 FAIL 会在恢复后触发冠军 from-scratch；观测只在真实数据上有意义。
+        _demo_round = (data_source_used == "demo")
+        if not _demo_round:
+            # walk-forward 多折观测（2026-09-19，用户选"1"）：本轮确认真实训练后，
+            # 用部署中的最佳模型做同品种多折评估（不改接受逻辑），结果写
+            # models/walkforward_obs.json + 日志。异常不影响训练主流程。
             try:
-                await self._observe_strategy_drl_longwindow()
+                await self._observe_strategy_drl_walkforward(df=df)
             except Exception as e:  # noqa: BLE001
-                log.warning("[evolve] 长窗回放观测失败（不影响训练）: %s", e)
+                log.warning("[evolve] walk-forward观测失败（不影响训练）: %s", e)
+
+            # GAP-01 实盘验收观测（2026-09-19，建议第6条(b)）：同品种多折 × 两档成本，
+            # 输出 PASS/FAIL/INCONCLUSIVE（models/gap01_obs.json）。软信号（2026-09-20）：
+            # FAIL 与 INCONCLUSIVE 均累计 gap01_streak、PASS 清零；连续 N 轮不过
+            # 触发冠军轮 from-scratch 重学（evolve_gap01_fail_reset_after）。异常自吞。
+            # 注：INCONCLUSIVE=样本外证据不足/不交易，同样不能上线——若不计入 streak，
+            # from-scratch 重训后的模型不交易会永远判 INCONCLUSIVE，软信号被卡死
+            # （运行态实录 2026-09-20：gap01_streak 停在 2 到不了阈值）。
+            try:
+                _gap01 = await self._observe_gap01(df=df)
+                if _gap01 is not None:
+                    _v = str(_gap01.get("verdict") or "")
+                    if _v == "PASS":
+                        self._gap01_streak["strategy_drl"] = 0
+                    elif _v in ("FAIL", "INCONCLUSIVE"):
+                        self._gap01_streak["strategy_drl"] = (
+                            int(self._gap01_streak.get("strategy_drl", 0)) + 1)
+                    self._strategy_drl_status["gap01_verdict"] = _v
+                    self._strategy_drl_status["gap01_streak"] = self._gap01_streak.get("strategy_drl", 0)
+                    # 多窗口连续 PASS 判定（2026-09-21，§16.5 遗留1）：同一部署模型
+                    # 连续 N 次观测 PASS 才算稳定（gap01_stable=True，实盘候选依据）。
+                    # 仅 PASS 累计；FAIL/INCONCLUSIVE 或部署版本变化即清零（不交易/
+                    # 证据不足不算稳定 PASS，杜绝"窗口滑动运气"——v36/v41/v42 教训）。
+                    try:
+                        _deploy_ver = (self.zoo.best_info("strategy_drl") or {}).get("version")
+                    except Exception:  # noqa: BLE001
+                        _deploy_ver = None
+                    if _deploy_ver != self._gap01_pass_version:
+                        _prev_ver = self._gap01_pass_version
+                        self._gap01_pass_version = _deploy_ver
+                        self._gap01_pass_streak = 0
+                        # 2026-10 审计修复（MED）：部署版本**更换**时 FAIL 计数同样清零
+                        #（旧模型的 FAIL 不传导到新模型，否则新模型一上线就背着旧账
+                        #  触冠军 from-scratch；首次确定不算换模型）。
+                        _clear_gap01_streak_on_version(self, _deploy_ver,
+                                                       prev_version=_prev_ver)
+                    if _v == "PASS":
+                        self._gap01_pass_streak += 1
+                    else:
+                        self._gap01_pass_streak = 0
+                    _stable_req = int(getattr(settings, "evolve_gap01_stable_pass_required", 3) or 0)
+                    self._strategy_drl_status["gap01_pass_streak"] = self._gap01_pass_streak
+                    self._strategy_drl_status["gap01_stable"] = bool(
+                        _stable_req > 0 and self._gap01_pass_streak >= _stable_req)
+            except Exception as e:  # noqa: BLE001
+                log.warning("[evolve] GAP-01观测失败（不影响训练）: %s", e)
+
+            # 长窗回放观测（2026-09-21，§16.5 升级）：30/90 天真实数据引擎撮合回放，
+            # 输出 longwindow_verdict（两窗均正才 PASS）；防"近期窗口效应"冒充实盘候选
+            #（v44 教训：短窗 stable PASS 但 30 天 -26.6% / 90 天 -67.8%）。异常自吞。
+            # 2026-09-22（训练速度研究）：训练本身仅 ~9.5s/轮，瓶颈在 30/90 天回放
+            #（每轮 +数分钟）——默认每 5 轮跑一次（longwindow_every_n），进化节奏回升。
+            _lw_every = max(1, int(getattr(settings, "evolve_strategy_drl_longwindow_every_n", 5) or 1))
+            if _lw_every == 1 or int(self._strategy_drl_status.get("_pop_round", 0)) % _lw_every == 0:
+                try:
+                    await self._observe_strategy_drl_longwindow()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("[evolve] 长窗回放观测失败（不影响训练）: %s", e)
 
         # P0-族群：冠军/挑战者 K=2 交替。_pop_round 每完成一轮真实训练递增一次
         # （增量门跳过/故障跳过不计），偶数为冠军轮（走原路径，部署+注册），
@@ -2220,7 +2641,11 @@ class EvolveEngine(EvolveObservationsMixin):
         # 挑战者轮只由后台连续训练节奏驱动。
         _round_no = int(self._strategy_drl_status.get("_pop_round", 0))
         is_challenger = bool(_pop_on and not force and (_round_no % 2 == 1))
-        self._strategy_drl_status["_pop_round"] = _round_no + 1
+        # 2026-10 审计修复（MED-2/3）：只有**真实训练轮**推进谱系交替：
+        # demo 轮（合成数据）与异常轮（训练无产出）不占冠军/挑战者槽位——
+        # 否则故障期每次 demo 都翻转奇偶、恢复后首个真实轮变成挑战者轮（不能部署）。
+        if not _demo_round:
+            self._strategy_drl_status["_pop_round"] = _round_no + 1
         self._strategy_drl_status["lineage"] = "challenger" if is_challenger else "main"
         lineage_name = "strategy_drl_alt" if is_challenger else "strategy_drl"
 
@@ -2299,7 +2724,10 @@ class EvolveEngine(EvolveObservationsMixin):
             if (self._strategy_drl_replay is None
                     or int(self._strategy_drl_replay.capacity) != _replay_cap
                     or (not _multi_on and self._strategy_drl_replay_symbol != symbol)):
-                self._strategy_drl_replay = ReplayBuffer(capacity=_replay_cap)
+                self._strategy_drl_replay = ReplayBuffer(
+                    capacity=_replay_cap,
+                    # 2026-10 审计修复（MED-2）：采样 rng 派生自训练 seed（可复现）
+                    seed=int(getattr(settings, "evolve_strategy_drl_seed", 42) or 42))
                 log.info("[evolve] 策略DRL 经验回放缓冲区已建立: capacity=%d 标的=%s%s",
                          _replay_cap, symbol, "（多标模式跨标共享）" if _multi_on else "")
             self._strategy_drl_replay_capacity = _replay_cap
@@ -2323,14 +2751,16 @@ class EvolveEngine(EvolveObservationsMixin):
                 if _sym == symbol:
                     continue
                 try:
-                    _sdf = await self._fetch_latest_data(symbol=_sym)
+                    _sdf = await self._fetch_latest_data(
+                        symbol=_sym, bars=_sdrl_history if _sdrl_history > 0 else 0)
                 except Exception as e:  # noqa: BLE001
                     log.warning("[evolve] 多标的数据获取失败(%s)，跳过: %s", _sym, e)
                     continue
                 if _sdf is None or len(_sdf) < max(300, int(self._rolling_window * 0.1)):
                     continue
-                if len(_sdf) > self._rolling_window:
-                    _sdf = _sdf.iloc[-self._rolling_window:]
+                # 额外标的同样按训练历史深度切片（与主标的经验量对齐）
+                if len(_sdf) > _keep_bars:
+                    _sdf = _sdf.iloc[-_keep_bars:]
                 extra_dfs_pool[_sym] = _sdf
             if extra_dfs_pool:
                 log.info("[evolve] 策略DRL 多标的混合训练: 额外经验标的 %s",
@@ -2359,15 +2789,43 @@ class EvolveEngine(EvolveObservationsMixin):
                     settings, "evolve_strategy_drl_replay_mix_ratio", 0.3) or 0.3)
             train_cfg["extra_mix_ratio"] = float(getattr(
                 settings, "evolve_strategy_drl_multi_mix_ratio", 0.5) or 0.5)
-            return train_drl(df, train_cfg, on_progress=None,
-                             extra_dfs=extra_dfs_pool or None)
+            # 多 seed 中位数选模（2026-10，解决"单轮判据像抽奖"）：
+            # 固定 seed 是基线（可复现），seeds>1 时本轮训 N 个 seed、
+            # 按验证段超额中位数选中一个。总墙钟 ≈ N × 单 seed 时长，
+            # 每个 seed 仍受 time_budget 约束。见 _run_multi_seed。
+            _n_seeds = max(1, int(getattr(settings, "evolve_strategy_drl_seeds", 1) or 1))
+            _seed_base = int(getattr(settings, "evolve_strategy_drl_seed", 42) or 42)
+            _chosen, _seed_meta = _run_multi_seed(
+                lambda _cfg: train_drl(df, _cfg, on_progress=None,
+                                       extra_dfs=extra_dfs_pool or None),
+                train_cfg, _n_seeds, _seed_base)
+            # 2026-10 审计修复（HIGH）：多 seed 各自用独立回放副本，
+            # 选中 seed 的最终缓冲经 meta 交回引擎主缓冲（跨轮记忆 = 上轮选中 seed）。
+            _buf = _seed_meta.get("replay_buffer")
+            if _buf is not None:
+                self._strategy_drl_replay = _buf
+            return _chosen
 
-        result = await self._run_train(_train)
+        try:
+            result = await self._run_train(_train)
+        except BaseException:
+            # 2026-10 审计修复（MED-3）：训练抛异常 = 本轮无产出，谱系槽位回滚
+            #（不占冠军/挑战者槽位，避免"失败轮翻转奇偶"）。
+            if not _demo_round:
+                self._strategy_drl_status["_pop_round"] = _round_no
+            raise
+        # 多 seed 选模摘要 → 状态面板（前端可读：本轮几个 seed、选中哪个、各自超额）
+        if result.get("seed_runs"):
+            self._strategy_drl_status["seed_runs"] = result["seed_runs"]
+            self._strategy_drl_status["seed_chosen"] = result.get("seed_chosen")
         # 取最后一条历史记录的收益
         history = result.get("history", [])
         if not history:
             _err = "策略DRL训练无历史记录（训练未产生结果）"
             log.warning("[evolve] %s", _err)
+            # 2026-10 审计修复（MED-3）：训练无产出不算一轮真实训练 → 谱系槽位回滚
+            if not _demo_round:
+                self._strategy_drl_status["_pop_round"] = _round_no
             raise RuntimeError(_err)
         # fitness 口径与 /api/drl/train 一致：取 train_drl 汇总的 best_ret。
         # 旧写法从 history 末行现取，缺 best_ret 时落到单轮 total_ret，
@@ -2375,12 +2833,21 @@ class EvolveEngine(EvolveObservationsMixin):
         # P4-E1：不能用 `or` 链——best_ret=0.0 是 falsy，会被 history 末行
         # 的数值静默替换，锚点 fitness 记错并传导到回退比较。显式判 None。
         _vr = result.get("best_val_ret")
+        _vex = result.get("best_val_excess")
         _br = result.get("best_ret")
         # 2026-09-20（训练侧证据 §15）：best_ret=max(训练段,验证段) 被训练段污染——
         # 训练段收益与 OOS 负相关（Pearson -0.486、训练正但OOS≤0占100%）。
         # fitness 口径优先用验证段最优收益（模型从未见过该段），缺失时回退 best_ret
         # （旧模型/手动训练兼容）。OOS 部署门不变，仍按样本外收益把关。
-        if _vr is not None:
+        # 2026-10 基准相对口径：优先用**验证段超额**（val_ret − 同段买入持有）。
+        # 原因：val 窗口每轮前移，不同轮的绝对收益基准不同（牛市 +20% 与熊市 −20%
+        # 的"0%"完全不是一回事），拿绝对值跨轮比较锚点/回退会误判；同一轮内
+        # 基准是常数、排序等价，所以选模行为不变，只是跨轮可比性被修正。
+        _use_excess_fitness = bool(getattr(
+            settings, "evolve_strategy_drl_fitness_excess", True))
+        if _use_excess_fitness and _vex is not None:
+            new_fitness = float(_vex)
+        elif _vr is not None:
             new_fitness = float(_vr)
         else:
             new_fitness = float(_br if _br is not None
@@ -2394,20 +2861,19 @@ class EvolveEngine(EvolveObservationsMixin):
         # P0 多标的：训练模式（单标/多标）是不可比的配置维度——混入身份指纹，
         # 防止"单标的训练产出"与"多标的混合训练产出"互相回退比较（语义不同）。
         _multi_names = sorted(result.get("multi_extra_names") or [])
+        _id_cfg = _strategy_drl_identity_config(train_cfg, _multi_names)
+        # 2026-10 审计修复（MED）：级联因子注入与否改变 state_dim 与状态语义——
+        # 注入轮与未注入轮（级联因子失效/复算失败时返回 None）的产出被误当同口径
+        # 回退比较会错配。仅在**注入**时加 factor_injected 键（未注入轮保持原格式，
+        # 与旧锚点/测试手工构造的身份指纹一致）；键名进 config_fingerprint
+        #（_identity_mismatch 比较该项）。
+        if cascade_factor_values is not None:
+            _id_cfg["factor_injected"] = True
         _identity = _training_identity(
             "strategy_drl", symbol, self._effective_timeframe(),
             state_window=int(train_cfg.get("state_window", 1)),
             factor_signature=str(result.get("factor_expression", "") or ""),
-            config={
-                "episodes": int(getattr(settings, "evolve_strategy_drl_episodes", 8)),
-                "vol_penalty": float(getattr(settings, "evolve_vol_penalty", 20.0)),
-                "oos_min_bars": int(getattr(settings, "evolve_oos_min_bars", 250)),
-                "multi_symbol": bool(_multi_names),
-                "multi_extra_names": _multi_names,
-                # P1 时序网络升级：actor 骨干是训练口径——GRU 与 MLP 架构不同，
-                # 混入身份指纹，防止"GRU 训练产出"与"MLP 锚点"互相回退比较。
-                "backbone": str(train_cfg.get("backbone", "mlp")),
-            })
+            config=_id_cfg)
 
         # 5.0 P4-E1：demo 合成数据轮短路——不回退比较、不跑 OOS 部署门。
         # 交易所故障时合成数据的 OOS 几乎必为负，会触发无意义的
@@ -2474,14 +2940,23 @@ class EvolveEngine(EvolveObservationsMixin):
                 self._mark_deployment_status("strategy_drl", anchor_mismatch=identity_mismatch)
                 log.info("[evolve] 策略DRL 锚点身份不可比（%s），跳过回退比较", identity_mismatch)
             oos_report = result.get("oos_report") or {}
-            new_oos = float(oos_report.get("oos_ret") or 0.0) if oos_report.get("enabled") else None
-            prev_oos = anchor.get("oos_ret")
-            if new_oos is not None and prev_oos is not None:
-                # 新旧均有 OOS 收益：以 OOS 为准（与部署门一致）
-                rollback_hit = _should_rollback(new_oos, float(prev_oos), self._rollback_threshold)
-                cmp_desc = f"OOS {new_oos:.4f} < {float(prev_oos):.4f}×{self._rollback_threshold}"
+            # 2026-10 审计修复（HIGH）：回退比较用**超额**口径（oos_excess）——
+            # 不同滚动窗口的绝对 oos_ret 不可比（下跌窗口真候选必更低 → 被误回退；
+            # 上涨窗口差候选逃过回退），与 fitness/部署门已统一的 excess 语义一致。
+            # 缺超额记录（升级前版本/无基准的老锚点）时退化为 fitness（已是超额口径）。
+            new_ex = (float(oos_report.get("oos_excess") or 0.0)
+                      if oos_report.get("enabled") else None)
+            prev_ex = anchor.get("oos_excess")
+            # 2026-10（MED-3）：仅当新旧锚点同为 segment_median 口径才直比超额；
+            # 缺 basis 的旧锚点（median_diff/升级前）与新口径不可比 → 退化为 fitness。
+            _ex_comparable = (prev_ex is not None
+                              and anchor.get("oos_excess_basis") == "segment_median"
+                              and oos_report.get("oos_excess_basis") == "segment_median")
+            if new_ex is not None and _ex_comparable:
+                rollback_hit = _should_rollback(new_ex, float(prev_ex), self._rollback_threshold)
+                cmp_desc = f"OOS超额 {new_ex:.4f} < {float(prev_ex):.4f}×{self._rollback_threshold}"
             else:
-                # 旧模型缺 OOS 记录（升级前版本）：退化为训练段收益比较
+                # 旧模型缺 OOS 超额记录（升级前版本/不同 basis）：退化为训练段收益比较
                 rollback_hit = _should_rollback(new_fitness, prev_fitness, self._rollback_threshold)
                 cmp_desc = f"fitness {new_fitness:.4f} < {prev_fitness:.4f}×{self._rollback_threshold}"
             if identity_mismatch:
@@ -2582,7 +3057,8 @@ class EvolveEngine(EvolveObservationsMixin):
             cross_oos = None
         else:
             cross_oos = await self._cross_symbol_oos(result["agent"], symbol,
-                                                     int(train_cfg["state_window"]))
+                                                     int(train_cfg["state_window"]),
+                                                     train_cfg=train_cfg)
         self._strategy_drl_status["cross_oos"] = cross_oos
         if cross_oos is not None and cross_oos.get("ret", 0.0) <= 0:
             log.warning("[evolve] 策略DRL 跨标 OOS 未通过（%s: %.4f），仅存档不设为最佳",
@@ -2673,8 +3149,14 @@ class EvolveEngine(EvolveObservationsMixin):
             # 挑战者谱系自保护：新模型若相对挑战者自身锚点退化（< 自身×threshold），
             # 只存档不覆盖 alt 槽位——谱系质量优先，退化模型不进族群。
             alt_anchor = self.zoo.best_info("strategy_drl_alt")
+            # 2026-10 审计修复（MED）：挑战者自回退须有身份守卫——配置变更（奖励口径/
+            # 决策间隔/因子注入等）后，新候选与旧 alt 锚点的 fitness 口径可能不同量级，
+            # 硬比较会"新口径更小的 exponent"误判退化并丢谱系。冠军路径已有守卫，
+            # 挑战者此前没有。
+            _alt_mismatch = _identity_mismatch(alt_anchor, _identity)
             alt_prev = alt_anchor.get("fitness")
-            if alt_prev is not None and _should_rollback(new_fitness, float(alt_prev), self._rollback_threshold):
+            if (_alt_mismatch is None and alt_prev is not None
+                    and _should_rollback(new_fitness, float(alt_prev), self._rollback_threshold)):
                 log.info("[evolve] 策略DRL挑战者相对自身退化（%.4f < %.4f×%.2f），只存档不更新谱系",
                          new_fitness, float(alt_prev), self._rollback_threshold)
                 try:
@@ -2761,11 +3243,21 @@ class EvolveEngine(EvolveObservationsMixin):
                         log.info("[evolve] 策略DRL挑战者晋升：旧冠军已转入挑战者槽位（角色互换）")
                 except Exception as e:  # noqa: BLE001
                     log.warning("[evolve] 旧冠军转入挑战者槽位失败: %s", e)
-            await asyncio.to_thread(self.zoo.save_agent, result["agent"], "strategy_drl",
-                                    meta={
+            _accept_meta = {
                                         "fitness": new_fitness, "timestamp": time.time(),
                                         "data_source": data_source_used,
                                         "oos_ret": (result.get("oos_report") or {}).get("oos_ret"),
+                                        # 2026-10 审计修复（HIGH）：回退/晋升必须用**超额**
+                                        # 口径（oos_excess）而非绝对收益——不同滚动窗口的
+                                        # 绝对值不可比（下跌窗口真候选必更低→被误回退；
+                                        # 上涨窗口差候选逃过回退）。fitness 已是 excess 口径，
+                                        # OOS 侧同样存超额供 _should_rollback 比较。
+                                        "oos_excess": (result.get("oos_report") or {}).get("oos_excess"),
+                                        # 2026-10 审计修复（MED-3）：excess 统一为**逐段中位数**
+                                        # 口径。锚点记录 basis——旧锚点（median差/无标记）与新口径
+                                        # 不可比，回退比较会 fallback 到 fitness。
+                                        "oos_excess_basis": (result.get("oos_report") or {}).get(
+                                            "oos_excess_basis", "median_diff"),
                                         # P2 续训护栏审计：记录起点（旧模型）的 OOS/收益，
                                         # 让"续训后是否真进步"可追溯。接受路径已保证
                                         # new_oos ≥ prev_oos×threshold（rollback 守卫），
@@ -2783,7 +3275,39 @@ class EvolveEngine(EvolveObservationsMixin):
                                         "factor_expression": str(result.get("factor_expression", "") or "").strip() or None,
                                         "factor_mu": float(result.get("factor_mu", 0.0) or 0.0),
                                         "factor_sd": float(result.get("factor_sd", 1.0) or 1.0),
-                                        **_identity})
+                                        # 2026-10 审计修复（HIGH-1）：决策节奏/死区随版本
+                                        # 载荷持久化（ModelZoo _DEPLOYMENT_META_KEYS 已含
+                                        # 这两键，restore_deployment 重建 flat 时自动提升）。
+                                        # 此前只有 flat 运行时补丁写它们，回退后丢失 →
+                                        # rl_adaptive 按 k=1/zone=0.02 跑 k=8 训练的模型。
+                                        "decision_interval": max(1, int(train_cfg.get("decision_interval", 1) or 1)),
+                                        "min_trade_zone": float(train_cfg.get("min_trade_zone", 0.05)),
+                                        "short_enabled": bool(train_cfg.get("short_enabled", False)),
+                                        # 2026-10（MED-1）：奖励/基准口径随版本持久化，
+                                        # 手动评估（evaluate_agent/_model_eval_cfg）据此重建
+                                        "reward_mode": str(train_cfg.get("reward_mode", "absolute") or "absolute"),
+                                        "benchmark_position": float(train_cfg.get("benchmark_position", 1.0)),
+                                        "risk_coef": float(train_cfg.get("risk_coef", 0.5)),
+                                        "slippage": float(train_cfg.get("slippage", 0.0005)),
+                                        **_identity}
+            # 2026-10 审计修复（LOW）：接受路径 save_agent 加 try——此前异常直接逸出
+            # 本轮（mark_deployment/_log_round 全跳过），ModelZoo 却已先写 meta
+            # （next_version 递增 + versions 追加）→ 版本历史留无文件幽灵条目。
+            try:
+                await asyncio.to_thread(self.zoo.save_agent, result["agent"],
+                                        "strategy_drl", meta=_accept_meta)
+            except Exception as e:  # noqa: BLE001
+                log.exception("[evolve] 策略DRL接受路径存档失败: %s", e)
+                self._strategy_drl_status["last_error"] = f"模型存档失败: {e}"
+                _err_oos = result.get("oos_report") or {}
+                await self._log_round(
+                    "strategy_drl", symbol, self._effective_timeframe(),
+                    data_source_used, new_fitness, status="save_error",
+                    oos_ret=_err_oos.get("oos_ret", 0.0) or 0.0,
+                    decay=_err_oos.get("decay", 0.0) or 0.0,
+                    position_ratio=_err_oos.get("oos_position_ratio", 0.0) or 0.0,
+                    lineage=("challenger" if is_challenger else "main"))
+                return
             self._mark_deployment_status("strategy_drl", outcome="accepted",
                                          candidate_fitness=new_fitness)
         try:
@@ -2823,7 +3347,10 @@ class EvolveEngine(EvolveObservationsMixin):
                             "data_source": data_source_used,
                             "symbol": symbol,
                             "timeframe": self._effective_timeframe(),
-                            "limit": self._rolling_window,
+                            # 2026-10 审计修复（LOW）：记录实际训练深度（_keep_bars≈
+                            # history_bars 30000）而非滚动窗（5000）——元数据曾与真实
+                            # 训练窗口口径不符，评估/审计据此误解模型见过的数据量。
+                            "limit": _keep_bars,
                             "episodes": getattr(settings, "evolve_strategy_drl_episodes", 8),
                             "best_ret": result.get("best_ret"),
                             "best_val_ret": result.get("best_val_ret"),
@@ -2836,7 +3363,11 @@ class EvolveEngine(EvolveObservationsMixin):
                             # 级联因子复算配方：实盘 rl_adaptive 据此在滚动缓冲
                             # 上复算组合因子（曾只读写死数组，实盘因子列恒 None）
                             _md["factor_composite"] = result["factor_composite"]
-                        _md["min_trade_zone"] = 0.05
+                        _md["min_trade_zone"] = float(train_cfg.get("min_trade_zone", 0.05))
+                        # 决策间隔（2026-10 根本性逻辑错误修复）：部署端 rl_adaptive 必须
+                        # 按同一节奏决策，否则"训练每 k 根决策、实盘每根决策"，
+                        # 换手被放大 k 倍、成本吞掉训练学到的收益。
+                        _md["decision_interval"] = int(train_cfg.get("decision_interval", 1) or 1)
                         _md["pine_code"] = result.get("pine_code", "")
                         _md["pine_note"] = result.get("pine_note", "")
                         # run25 R5 修复：原 open("w")+json.dump 非原子重写，
@@ -2908,7 +3439,10 @@ class EvolveEngine(EvolveObservationsMixin):
         except (AttributeError, IndexError, TypeError, ValueError):
             return True  # 无法取时间戳，不拦截
         tf = self._effective_timeframe()
-        key = f"{name}:{symbol}:{tf}" if symbol else name
+        # 2026-10 审计修复（LOW）：键含交易所——_fetch_latest_data 缓存键已含 exchange，
+        # 切换数据源后若新旧源尾时间戳恰好相同（同时刻收盘），`tail_ts==prev` 会判定
+        # "无新增"而永久跳过，直到新源来新根。加 exchange 后换源即换键（视为首次放行）。
+        key = f"{name}:{symbol}:{tf}:{getattr(settings, 'default_exchange', 'binance')}" if symbol else name
         prev = self._last_tail_ts.get(key)
         if prev is None:
             self._last_tail_ts[key] = tail_ts
@@ -2942,6 +3476,10 @@ class EvolveEngine(EvolveObservationsMixin):
             if n_new < min_bars:
                 return False  # 有变化但根数不足，等待积累
         except Exception:  # noqa: BLE001
+            # 2026-10 审计修复（MED）：统计异常时也把 tail_ts 记入 prev 再放行——
+            # 否则同一批"新"K线会被下一轮用旧 prev 重复计数，门槛反复满足、
+            # 同一窗口重复训练一轮。
+            self._last_tail_ts[key] = tail_ts
             return True
         self._last_tail_ts[key] = tail_ts
         return True
@@ -2969,7 +3507,9 @@ class EvolveEngine(EvolveObservationsMixin):
             # 计入 streak 会让故障期误报锁死、诱导用户重置锚点（P1-3）
             pass
         else:
-            self._reject_streak[model] = int(self._reject_streak.get(model, 0)) + 1
+            # 2026-10 审计修复（MED）：challenger 谱系不计入（健康交替不该把冠军
+            # 顶进 from-scratch）；main 谱系照旧。
+            _bump_reject_streak(self, model, lineage=lineage)
         try:
             from core.database import EvolveRound
             from sqlalchemy import select, func, delete
@@ -3010,13 +3550,18 @@ class EvolveEngine(EvolveObservationsMixin):
             log.warning("[evolve] 训练轮次落库失败(%s): %s", model, e)
 
     async def _cross_symbol_oos(self, agent, train_symbol: str,
-                                state_window: int) -> Optional[dict]:
+                                state_window: int,
+                                train_cfg: Optional[dict] = None) -> Optional[dict]:
         """P1-8：跨标的传导 OOS（低权重附加门）。
 
         模型在另一个训练标的（非当前标的）上跑一次 greedy 样本外评估，
         检验是否学到了"币种无关"的交易规律而非单标的特有过拟合。
         仅当训练未注入级联因子（state_dim 无因子列）时可执行；
         注入因子时无法在跨标数据上重建同维状态，跳过并返回 None。
+
+        2026-10 审计修复（HIGH-1c）：环境必须用训练同源口径（policy_env_kwargs
+        语义：k=决策间隔/excess/min_trade_zone）——此前硬编码 k=1/absolute/zone=0.05
+        评估 k=8/excess 训练的模型，跨标门与主 OOS 门自相矛盾。
         """
         if not getattr(settings, "evolve_cross_symbol_oos", True):
             return None
@@ -3033,20 +3578,23 @@ class EvolveEngine(EvolveObservationsMixin):
             return None
         if len(df) > self._rolling_window:
             df = df.iloc[-self._rolling_window:]
-        from drl.env import TradingEnv, run_episode
+        from drl.env import run_episode
 
         def _run_cross_oos() -> Optional[dict]:
             """在工作线程中构造环境并跑 greedy rollout：
             TradingEnv 构造会做滚动特征预计算、run_episode 是纯同步 CPU 前向，
             留在主协程会阻塞事件循环（WebSocket/下单/其他管线全卡顿）。
             与 train_drl 的 asyncio.to_thread 隔离口径一致。"""
-            env = TradingEnv(
-                df, start_cash=float(getattr(settings, "default_start_cash", 10000.0)),
-                fee_rate=0.001,
-                vol_penalty=float(getattr(settings, "evolve_vol_penalty", 20.0)),
-                slippage=0.0005,
-                min_trade_zone=0.05,
-                extra_factors=None, state_window=max(1, int(state_window)))
+            _tc = train_cfg or {}
+            env = _make_cross_oos_env(
+                df,
+                state_window=int(state_window),
+                decision_interval=int(_tc.get("decision_interval", 1) or 1),
+                min_trade_zone=float(_tc.get("min_trade_zone", 0.05)),
+                short_enabled=bool(_tc.get("short_enabled", False)),
+                reward_mode=str(_tc.get("reward_mode", "absolute") or "absolute"),
+                benchmark_position=float(_tc.get("benchmark_position", 1.0)),
+                risk_coef=float(_tc.get("risk_coef", 0.5)))
             traj = run_episode(env, lambda s: agent.greedy_action(s))
             return {"symbol": sym, "ret": float(traj["total_ret"]),
                     "position_ratio": float(traj["final_position_ratio"])}
@@ -3240,20 +3788,27 @@ class EvolveEngine(EvolveObservationsMixin):
         return generate_demo(n=n, start_price=p["start_price"], vol=p["vol"],
                              timeframe=timeframe, seed=seed)
 
-    async def _fetch_latest_data(self, symbol: str = "") -> Optional[Any]:
+    async def _fetch_latest_data(self, symbol: str = "", bars: int = 0) -> Optional[Any]:
         """获取最新行情数据（用于训练），带 5 分钟内存缓存避免频繁拉取。
         本地K线库优先（binance 公开数据域直连，增量拉取缺失段）；
         失败返回 None（由调用方决定是否使用演示数据兜底）。
 
         Args:
             symbol: 标的（如 "BTC/USDT"），留空使用 settings.default_symbol。
+            bars: 本次需要的K线根数（0=沿用 evolve_rolling_window）。策略 DRL 传
+                evolve_strategy_drl_history_bars 拉满多年历史——旧行为只取最近
+                rolling_window 根（5m 下仅 17 天）并在同一段上反复重训，
+                本地 3.4 年历史（30042 根/标的）从未进入训练。
         """
         from backtest.data_loader import load_klines_cached
 
         symbol = symbol or settings.default_symbol
         # 训练时间周期：面板独立配置（evolve_timeframe）优先，缺省回落 default_timeframe
         timeframe = self._effective_timeframe()
-        cache_key = f"{settings.default_exchange}:{symbol}:{timeframe}"
+        n_want = max(int(bars or 0) or int(self._rolling_window), 1000)
+        # 缓存键必须含深度：否则因子挖掘先按 5000 根拉取并写缓存后，
+        # 策略 DRL 按 30000 根取数据会命中那份浅缓存（静默退化成旧行为）。
+        cache_key = f"{settings.default_exchange}:{symbol}:{timeframe}:{n_want}"
         now = time.time()
         # 缓存命中且在 TTL 内
         if cache_key in self._data_cache:
@@ -3263,10 +3818,10 @@ class EvolveEngine(EvolveObservationsMixin):
                 return cached_df
 
         # P0-1：修复窗口上限 bug——原先 min(max(rolling_window,1000),3000) 把配置的
-        # 5000 根永远压到最多 3000 根。现在拉满 rolling_window，且 load_klines_cached
+        # 5000 根永远压到最多 3000 根。现在拉满所需深度，且 load_klines_cached
         # 支持 max_candles 历史回填（本地不足时自动翻页补足）。
-        limit = max(int(self._rolling_window), 1000)
-        max_candles = max(int(self._rolling_window), 1000)
+        limit = n_want
+        max_candles = n_want
 
         # P4-E1：拉数串行锁——两管线 + 跨标 OOS 并发打交易所会放大 429；
         # 统一串行化后同一时刻只有一条 fetch 在飞（429 重试逻辑见 data_loader）。

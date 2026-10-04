@@ -30,6 +30,10 @@ _DEPLOYMENT_META_KEYS = (
     "train_meta", "factor_expression", "factor_mu", "factor_sd",
     "min_trade_zone", "pine_code", "pine_note", "cascade_factor",
     "cascade_factor_path", "cascade_weights_path", "factor_composite",
+    # 2026-10 审计修复（HIGH-1）：决策节奏/死区必须随版本载荷持久化，
+    # 否则 restore_deployment 重建 flat 时丢失 → 回退后的模型按 k=1/zone=0.02 跑
+    # k=8/zone=0.10 训练的口径（回退是常态保护动作，恰在最该严谨处制造漂移）。
+    "decision_interval", "short_enabled",
 )
 
 
@@ -518,6 +522,12 @@ class ModelZoo:
                 "data_source": str(anchor_meta.get("data_source") or ""),
                 "timestamp": anchor_meta.get("timestamp"),
                 "oos_ret": anchor_meta.get("oos_ret"),
+                # 2026-10 审计修复（HIGH）：回退比较改**超额**口径——不同滚动窗口的
+                # 绝对 oos_ret 不可比。锚点必须透传 oos_excess 供 _should_rollback。
+                "oos_excess": anchor_meta.get("oos_excess"),
+                # 2026-10（MED-3）：excess 统一为逐段中位数口径；basis 供回退比较
+                # 判"新旧锚点是否同口径可比"（无标记/median_diff 视为不可比→fallback）
+                "oos_excess_basis": anchor_meta.get("oos_excess_basis"),
                 "rolled_back_at": anchor_meta.get("rolled_back_at"),
                 "reset": meta.get("anchor_reset"),
                 "comparable": False, "reason": "", "source_unknown": False}

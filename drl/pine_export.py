@@ -23,7 +23,9 @@ import numpy as np
 
 from strategies.pine_utils import TRADE_MARKERS_PINE
 
-# 与 drl/env.py ACTION_BUCKETS 一致的目标仓位档位
+# 与 drl/env.py 的长仓默认档位一致（模型自带 action_buckets 时以模型为准）。
+# 注意：本导出器只写多头/空仓分支——含做空档的模型必须显式拒绝
+#（把做空档按多头解释会产出语义不符的脚本，图上的买卖点与训练模型不是一回事）。
 ACTION_BUCKETS = [0.0, 0.25, 0.5, 0.75, 1.0]
 
 # 特征列数（13 维价量）与账户状态列数（持仓比例 + 浮动盈亏）——与 env._build_state 一致
@@ -194,7 +196,8 @@ def build_drl_pine(agent, model_name: str = "rl_agent",
                    symbol_label: str = "BTC/USDT",
                    factor_expression: str = "",
                    factor_mu: float = 0.0, factor_sd: float = 1.0,
-                   train_metrics: dict | None = None) -> str:
+                   train_metrics: dict | None = None,
+                   decision_interval: int = 1) -> str:
     """把 ACAgent.actor 的权重导出为 Pine Script v5 策略代码。
 
     特征向量 = 13 维价量 × state_window + 2 维账户状态（持仓比例/浮动盈亏）+ 可选因子列，
@@ -202,6 +205,8 @@ def build_drl_pine(agent, model_name: str = "rl_agent",
 
     参数:
         factor_expression: 训练时注入的因子表达式（翻译为 Pine 特征，并同口径标准化）
+        decision_interval: 训练时环境每 k 根K线决策一次（semi-MDP）——Pine 必须同节奏：
+            曾逐根 argmax 决策，k=8 模型的图上买卖点/收益与软件内行为不同源。
         factor_mu/factor_sd: 训练段拟合的因子标准化统计量（部署必须同一口径）
         train_metrics: {train_ret, oos_ret, sharpe, ...} 写入头部注释供用户对照
 
@@ -328,14 +333,24 @@ def build_drl_pine(agent, model_name: str = "rl_agent",
     push('sumEx = ' + ' + '.join(f'ex[{j}]' for j in range(n_out)))
     push('proba = array.from(' + ', '.join(f'ex[{j}] / sumEx' for j in range(n_out)) + ')')
     push('// 最优仓位档位 = argmax(proba)')
-    push('bestIdx = 0')
+    push('// ───── 决策节奏（2026-10 审计修复 LOW）─────')
+    push('// 训练 env 每 k 根K线决策一次（semi-MDP），Pine 必须同节奏：'
+         '逐根决策的图上买卖点/收益与 k=8 训练行为不同源。')
+    k = max(1, int(decision_interval or 1))
+    push(f'isDecision = bar_index % {k} == 0')
+    push('var target = 0.0')
+    push('if isDecision')
+    push('    // argmax(softmax) → 目标仓位档位')
+    push('    bestIdx = 0')
     for j in range(1, n_out):
-        push(f'if proba[{j}] > proba[bestIdx]')
-        push(f'    bestIdx := {j}')
+        push(f'    if proba[{j}] > proba[bestIdx]')
+        push(f'        bestIdx := {j}')
     buckets = ACTION_BUCKETS[:n_out]
     # 合法三元链：各档以 " : " 分隔，末档为兜底分支
     expr = ' : '.join(f'bestIdx == {i} ? {_fmt(v)}' for i, v in enumerate(buckets[:-1]))
-    push(f'target = {expr} : {_fmt(buckets[-1])}' if buckets[:-1] else f'target = {_fmt(buckets[-1])}')
+    push(f'    target := {expr} : {_fmt(buckets[-1])}' if buckets[:-1] else f'    target := {_fmt(buckets[-1])}')
+    push('else')
+    push('    target := target   // 决策间隔内保持上一决策点目标（与训练 env 一致）')
     push('')
     push('// ───── ④ 调仓执行（percent_of_equity 语义 + 死区 + 硬止损） ─────')
     push('posPct = strategy.equity > 0 ? strategy.position_size * close * 100.0 / strategy.equity : 0.0')
@@ -369,7 +384,17 @@ def try_build_drl_pine(agent, model_name: str = "rl_agent", **kwargs) -> tuple[s
 
     持续进化产出的模型不一定装得进 Pine；与其静默回落到别的策略模板（用户会
     在图上看到与训练模型无关的买卖点），不如留空并把原因说清楚。
+
+    含做空档的模型一律显式拒绝（2026-10）：本导出器只写多头/空仓分支，
+    把负档位按多头解释 → 图上的买卖点与训练模型不是一回事。
     """
+    _buckets = getattr(agent, "action_buckets", None)
+    try:
+        if _buckets is not None and any(float(x) < -1e-12 for x in _buckets):
+            return "", ("该模型动作空间含做空档（−1~+1），Pine 导出器只支持多头/空仓分支；"
+                        "在导出器支持做空前不产出脚本")
+    except (TypeError, ValueError):
+        pass
     try:
         return build_drl_pine(agent, model_name=model_name, **kwargs), ""
     except PineExportError as e:
@@ -418,6 +443,8 @@ def export_pine_from_model(model_path, model_name: str = "rl_agent") -> tuple[st
         factor_expression=str(data.get("factor_expression") or ""),
         factor_mu=float(data.get("factor_mu") or 0.0),
         factor_sd=float(data.get("factor_sd") or 1.0),
+        # 2026-10 审计修复（LOW）：决策节奏随模型文件透传（缺省 k=1 逐根）
+        decision_interval=max(1, int(data.get("decision_interval", 1) or 1)),
         train_metrics={"train_ret": _tm.get("best_ret", "-"),
                        "oos_ret": _oos.get("oos_ret", "-"),
                        "sharpe": _oos.get("sharpe", "-")})

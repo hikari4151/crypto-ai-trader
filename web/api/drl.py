@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -69,6 +70,21 @@ class TrainIn(BaseModel):
     lr_critic: float = 0.01
     gamma: float = 0.99
     vol_penalty: float = 20.0
+    # ---- 2026-10 根本性逻辑错误修复（docs/DRL训练根本性逻辑错误-诊断报告.md）----
+    # 旧口径（absolute）下奖励的最优解是"永不交易"（风险项是对持仓的无条件扣分、
+    # 单位与收益项差 10⁴，空仓奖励恒为 0），实测产线 501 轮里 452 轮被 OOS 门拒、
+    # fitness 多为 0.0。excess=基准相对奖励：空仓在上涨行情里同样付机会成本。
+    reward_mode: str = "excess"         # absolute=旧行为 | excess=基准相对（推荐）
+    benchmark_position: float = 1.0     # 基准仓位（1.0=买入持有）
+    risk_coef: float = 0.5              # 跟踪误差惩罚系数（bp 量级，替代 vol_penalty 的重罚）
+    decision_interval: int = 4          # 每 k 根K线决策一次（1=旧行为：逐根决策，探索成本吞掉信号）
+    episode_window: int = 0             # 单条 episode 时间窗长度（0=整段训练段；>0 随机年代切片）
+    # 做空（动作空间 −1~+1）。默认 False：执行内核（撮合/纸面/实盘）是现货语义、
+    # 无法建立负仓位——开启只用于离线实验；含做空档的模型不可部署、不导出 Pine。
+    short_enabled: bool = False
+    # 多 seed 中位数选模（2026-10）：>1 时训 N 个 seed、按验证段超额中位数选中一个，
+    # 总墙钟 ≈ N×单 seed。固定 seed（默认 42）保证单 seed 可复现。
+    seeds: int = 3
     cost_scale: float = 1.0
     min_trade_zone: float = 0.05
     entropy_coef: float = 0.05
@@ -134,6 +150,19 @@ def _validate_train(body: TrainIn) -> None:
         raise HTTPException(status_code=400, detail="学习率须在 (0,1) 之间")
     if not 0 <= body.vol_penalty <= 1000:
         raise HTTPException(status_code=400, detail="vol_penalty 须在 [0,1000] 之间")
+    # 2026-10 奖励口径/决策间隔边界（防把训练配成已知的退化形态）
+    if body.reward_mode not in ("absolute", "excess"):
+        raise HTTPException(status_code=400, detail="reward_mode 须为 absolute 或 excess")
+    if not 0.0 <= body.benchmark_position <= 1.0:
+        raise HTTPException(status_code=400, detail="benchmark_position 须在 [0,1] 之间")
+    if not 0.0 <= body.risk_coef <= 1000.0:
+        raise HTTPException(status_code=400, detail="risk_coef 须在 [0,1000] 之间")
+    if not 1 <= body.decision_interval <= 1440:
+        raise HTTPException(status_code=400, detail="decision_interval 须在 1-1440 之间")
+    if not 0 <= body.episode_window <= 50000:
+        raise HTTPException(status_code=400, detail="episode_window 须在 0-50000 之间")
+    if not 1 <= body.seeds <= 8:
+        raise HTTPException(status_code=400, detail="seeds 须在 1-8 之间")
     # P1 时序网络升级：backbone 白名单 + GRU 规模边界
     if body.backbone not in ("mlp", "gru"):
         raise HTTPException(status_code=400, detail="backbone 须为 mlp 或 gru")
@@ -355,8 +384,15 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                 if extra_dfs:
                     cfg["extra_mix_ratio"] = float(getattr(body, "extra_mix_ratio", 0.5) or 0.5)
                     log.info("[drl] 多标的混合训练: 额外经验标的 %s", list(extra_dfs))
-                result = train_drl(df, cfg, on_progress=on_progress,
-                                   extra_dfs=extra_dfs or None)
+                # 多 seed 中位数选模（2026-10）：seeds>1 时训 N 个 seed、
+                # 按验证段超额中位数选中（解决"单次训练成败像抽奖"）；OOS 不参与选模。
+                from drl.evolve_engine import _run_multi_seed
+                _n_seeds = max(1, int(getattr(body, "seeds", 1) or 1))
+                _base_seed = int(getattr(body, "seed", 42) or 42)
+                result = _run_multi_seed(
+                    lambda _cfg: train_drl(df, _cfg, on_progress=on_progress,
+                                           extra_dfs=extra_dfs or None),
+                    cfg, _n_seeds, _base_seed)[0]
 
                 # 续训模式：保存回原模型路径（覆盖原模型），策略名沿用 rl_{原模型名}
                 # 而非新建模型文件——"在原先模型上改变"。模型名需通过白名单校验。
@@ -379,6 +415,38 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                 with PROGRESS_LOCK:
                     _TRAINING[task_id] = {**_TRAINING.get(task_id, {}),
                                           "backend": used_backend}
+                # 2026-10 审计修复（HIGH-2）：续训 + 未过安检（OOS 硬门/含做空档）时
+                # **绝不覆盖**基础模型——旧行为无条件 save() 覆盖原文件 + 照常注册，
+                # 已注册策略（可能正被实盘选中）下次 reload 加载未过安检权重、旧权重
+                # 永久丢失。新权重存档到 archive/，原文件保留。
+                _rejected = bool(body.base_model) and bool(
+                    result.get("deployment_blocked") or result.get("requires_short"))
+                if _rejected:
+                    _archive_dir = MODEL_DIR / "archive"
+                    _archive_dir.mkdir(parents=True, exist_ok=True)
+                    _rejected_path = _archive_dir / (
+                        f"{model_path.stem}_rejected_{int(time.time())}.json")
+                    result["agent"].save(str(_rejected_path))
+                    _reject_reason = (
+                        (result.get("oos_report") or {}).get("reason")
+                        or ("含做空档：执行内核为现货语义、无法做空"
+                            if result.get("requires_short") else "OOS 硬门拦截"))
+                    with PROGRESS_LOCK:
+                        _TRAINING[task_id] = mark_done({
+                            **_TRAINING.get(task_id, {}),
+                            "running": False, "done": True,
+                            "model_name": model_path.stem,
+                            "model_path": str(_rejected_path),
+                            "strategy_name": strategy_name,
+                            "best_ret": result["best_ret"],
+                            "best_val_ret": result.get("best_val_ret"),
+                            "oos_report": result.get("oos_report"),
+                            "rejected": True, "reject_reason": _reject_reason,
+                            "history": (result["history"][-200:]
+                                        if result.get("history") else []),
+                        })
+                    prune_task_cache(_TRAINING, PROGRESS_LOCK)
+                    return
                 # 保存模型：大网络（teacher）用于软件内实盘；若训练时蒸馏了可导出的小网络
                 #（distill），ACAgent.to_dict 已把蒸馏版内嵌进 distill_agent 键，
                 # 导出 Pine 时 export_pine_from_model 会优先用它。
@@ -420,6 +488,18 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                     # 训练死区（min_trade_zone）写入模型：部署端调仓死区与训练严格一致
                     # （曾注册策略固定 buy_zone=0.02，与训练 0.05 不一致 → 部署更激进交易）
                     _md["min_trade_zone"] = float(getattr(body, "min_trade_zone", 0.05) or 0.05)
+                    # 决策间隔写入模型：部署端 rl_adaptive 按同一节奏决策
+                    # （曾只有 min_trade_zone 被写入，决策频率口径无处可查）
+                    _md["decision_interval"] = max(1, int(getattr(body, "decision_interval", 1) or 1))
+                    # 做空开关写入模型（部署端据此判断"执行层能不能做"；
+                    # 动作空间本身已随 ACAgent.action_buckets 落盘）
+                    _md["short_enabled"] = bool(getattr(body, "short_enabled", False))
+                    # 2026-10（MED-1）：奖励/基准/滑点口径随模型根键落盘，
+                    # 手动评估（_model_eval_cfg/evaluate_oos）据此重建训练同源 env
+                    _md["reward_mode"] = str(getattr(body, "reward_mode", "absolute") or "absolute")
+                    _md["benchmark_position"] = float(getattr(body, "benchmark_position", 1.0))
+                    _md["risk_coef"] = float(getattr(body, "risk_coef", 0.5))
+                    _md["slippage"] = float(getattr(body, "slippage", 0.0005))
                     with open(model_path, "w", encoding="utf-8") as f:
                         json.dump(_md, f, ensure_ascii=False)
                 except Exception as e:  # noqa: BLE001
@@ -434,6 +514,10 @@ async def start_training(body: TrainIn, db=Depends(get_db), engine=Depends(get_e
                 if result.get("deployment_blocked"):
                     _oos_reason = (result.get("oos_report") or {}).get("reason") or "OOS 硬门拦截"
                     _risk_tips = [f"疑似过拟合（{_oos_reason}），不建议实盘"] + _risk_tips
+                if result.get("requires_short"):
+                    # 训练会做空、执行内核执行不了：必须显式告诉用户"这个模型不可实盘用"
+                    _risk_tips = ["含做空档：执行内核（撮合/纸面/实盘）为现货语义、"
+                                  "无法建立负仓位，不可实盘使用（仅离线实验/评估）"] + _risk_tips
                 spec = {
                     "name": strategy_name,
                     "title": f"RL自适应·{body.symbol}",
@@ -591,8 +675,14 @@ async def model_detail(name: str):
 
 
 @router.post("/models/{name}/use")
-async def use_model(name: str, engine=Depends(get_engine)):
-    """应用模型为当前策略（引擎运行中则热切换）。"""
+async def use_model(name: str, engine=Depends(get_engine), db=Depends(get_db)):
+    """应用模型为当前策略（引擎运行中则热切换）。
+
+    2026-10 审计修复（HIGH-3）：此端此前无门、不持久化——
+    被 OOS/做空挡下的模型可被静默设为实盘策略且重启后注册丢失。
+    现在：含做空档 → 拒绝（执行内核为现货语义，无法做空）；
+    OOS 硬门拦截 → 允许但 risk_tips 明示 + 与 /train 同口径持久化到 AiStrategy。
+    """
     path = _model_path(name)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"模型 {name} 不存在")
@@ -601,7 +691,24 @@ async def use_model(name: str, engine=Depends(get_engine)):
         from strategies.rl_adaptive import RLAdaptiveStrategy
         from strategies import register_dynamic
         from drl.pine_export import export_pine_from_model
+        with open(path, "r", encoding="utf-8") as f:
+            _data = json.load(f)
+        # 做空档模型：执行内核（撮合/纸面/实盘）为现货语义，无法建立负仓位
+        _buckets = _data.get("action_buckets")
+        _requires_short = bool(_data.get("short_enabled")) or bool(
+            _buckets and any(float(x) < -1e-12 for x in _buckets))
+        if _requires_short:
+            raise HTTPException(
+                status_code=400,
+                detail="该模型动作空间含做空档（−1~+1），执行内核为现货语义、"
+                       "无法建立负仓位，不可设为实盘策略（需先完成撮合内核做空支持）")
         pine_code, pine_note = export_pine_from_model(path, name)
+        # OOS 硬门拦截：允许但明示风险（与 /api/drl/train 的 risk_tips 同口径）
+        _oos = (_data.get("train_meta") or {}).get("oos_report") or {}
+        _risk_tips = ["训练数据分布外可能失效", "建议定期用新数据重训"]
+        if _oos.get("hard_rejected") or bool(_data.get("deployment_blocked")):
+            _risk_tips = [f"疑似过拟合（{_oos.get('reason') or 'OOS 硬门拦截'}），不建议实盘"] \
+                + _risk_tips
         register_dynamic(strategy_name, {
             "name": strategy_name, "title": f"RL自适应·{name}",
             "description": "深度强化学习训练的动态自适应策略",
@@ -609,14 +716,34 @@ async def use_model(name: str, engine=Depends(get_engine)):
             "executor": "rl_adaptive",
             "param_schema": RLAdaptiveStrategy.param_schema,
             "params": {"model_path": str(path), "buy_zone": 0.02},
-            "risk_tips": ["训练分布外可能失效"],
+            "risk_tips": _risk_tips,
             "created_by": "drl_train", "version": "v1.0",
             "pine_code": pine_code, "pine_note": pine_note,
             # 装不进 Pine（大网络/级联因子）→ 标记"仅软件内运行"（前端徽标）
             "internal_only": bool(not pine_code and pine_note),
         })
+        # 持久化到 AiStrategy（重启后 _load_dynamic_strategies 可恢复）——
+        # 与 /train 同口径，曾仅内存注册、重启即丢。
+        try:
+            await _persist_strategy(db, strategy_name, {
+                "name": strategy_name, "title": f"RL自适应·{name}",
+                "description": "深度强化学习训练的动态自适应策略",
+                "logic": "MDP建模+策略梯度训练，动态调整目标仓位",
+                "executor": "rl_adaptive",
+                "param_schema": RLAdaptiveStrategy.param_schema,
+                "params": {"model_path": str(path), "buy_zone": 0.02},
+                "risk_tips": _risk_tips,
+                "created_by": "drl_train", "version": "v1.0",
+                "pine_code": pine_code, "pine_note": pine_note,
+                "internal_only": bool(not pine_code and pine_note),
+            }, engine)
+            log.info("[drl] use_model 策略 %s 已持久化", strategy_name)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[drl] use_model 策略持久化失败: %s", e)
         await engine.select_strategy(strategy_name)
         return {"ok": True, "strategy": strategy_name, "model": name}
+    except HTTPException:
+        raise
     except Exception as e:  # noqa: BLE001
         log.exception("[drl] 应用模型失败")
         raise HTTPException(status_code=400, detail=f"应用模型失败: {e}")
@@ -663,7 +790,13 @@ def _model_extra_factors(model_data: dict, df) -> Optional[np.ndarray]:
 
 
 def _model_eval_cfg(model_data: dict) -> dict:
-    """模型文件根键（architecture.md §2.3）→ evaluate_agent cfg（缺省兼容）。"""
+    """模型文件根键（architecture.md §2.3）→ evaluate_agent cfg（缺省兼容）。
+
+    2026-10 审计修复（MED-1）：必须带全训练同源口径（decision_interval/
+    reward_mode/benchmark_position/risk_coef/short_enabled，经 policy_env_kwargs
+    生效）——此前只带 factor/state_window/min_trade_zone，k=8 训练的模型被按
+    k=1 评估，用户端"疑似过拟合"结论由错节奏的收益算出。
+    """
     return {
         "factor_expression": model_data.get("factor_expression", ""),
         "factor_mu": float(model_data.get("factor_mu", 0.0)),
@@ -671,6 +804,11 @@ def _model_eval_cfg(model_data: dict) -> dict:
         "min_trade_zone": float(model_data.get("min_trade_zone", 0.05) or 0.05),
         "state_window": int(model_data.get("state_window", 1) or 1),
         "start_cash": 10000.0, "fee_rate": 0.001,
+        "decision_interval": max(1, int(model_data.get("decision_interval", 1) or 1)),
+        "reward_mode": str(model_data.get("reward_mode", "absolute") or "absolute"),
+        "benchmark_position": float(model_data.get("benchmark_position", 1.0)),
+        "risk_coef": float(model_data.get("risk_coef", 0.5)),
+        "short_enabled": bool(model_data.get("short_enabled", False)),
     }
 
 
@@ -738,7 +876,7 @@ async def evaluate_oos(name: str, body: OosEvalIn):
         raise HTTPException(status_code=404, detail=f"模型 {name} 不存在")
 
     from drl import ACAgent
-    from drl.env import run_episode, TradingEnv
+    from drl.env import policy_env_kwargs, run_episode, TradingEnv
     from backtest.data_loader import generate_demo, load_csv, load_klines_cached
 
     # 读取模型文件根键元数据（architecture §2.3：state_window/factor_expression/
@@ -784,13 +922,18 @@ async def evaluate_oos(name: str, body: OosEvalIn):
 
     # 2) 确定性评估（贪心策略，无探索噪声；完整 episode 放后台线程）
     # P1-9：按模型元数据同口径重建 env（state_window/因子列/min_trade_zone），
-    # 曾缺省构造 → state_window>1 或含因子列模型必然维度失配 500
+    # 曾缺省构造 → state_window>1 或含因子列模型必然维度失配 500。
+    # 2026-10 审计修复（MED-1）：补全训练同源口径（decision_interval/奖励模式/
+    # short_enabled/slippage）——曾 k=1/slippage=0 评估 k=8/slippage=0.0005 的模型。
     try:
+        _eval_cfg = _model_eval_cfg(model_data)
         env = TradingEnv(df, start_cash=10000.0, fee_rate=0.001,
                          vol_penalty=0.0, cost_scale=1.0,
-                         min_trade_zone=float(model_data.get("min_trade_zone", 0.05) or 0.05),
+                         slippage=0.0005,  # 与训练同口径（曾 0.0 低估成本）
+                         min_trade_zone=_eval_cfg["min_trade_zone"],
                          extra_factors=_model_extra_factors(model_data, df),
-                         state_window=int(model_data.get("state_window", 1) or 1))
+                         state_window=_eval_cfg["state_window"],
+                         **policy_env_kwargs(_eval_cfg))
         traj = await asyncio.to_thread(run_episode, env, lambda s: agent.greedy_action(s))
     except Exception as e:  # noqa: BLE001
         log.exception("[drl] OOS 评估失败")

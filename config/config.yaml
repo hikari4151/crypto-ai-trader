@@ -23,16 +23,22 @@ evolve_factor_miner_episodes: 8
 evolve_factor_miner_fitness_mode: net
 evolve_factor_miner_cost_per_turn: 0.002
 evolve_factor_miner_net_fitness_scale: 500.0
-evolve_strategy_drl_episodes: 8
-# P0 并行采样上量（2026-10）：批量 8→16（每轮见过的局面翻倍，PPO 梯度更稳）；
-# collect_workers=0 自动按 CPU 核数并行收集（此前硬编码 4 线程是吞吐瓶颈）。
+evolve_strategy_drl_episodes: 128
+evolve_strategy_drl_reward_mode: excess
+evolve_strategy_drl_decision_interval: 8
+evolve_strategy_drl_risk_coef: 0.5
+evolve_strategy_drl_history_bars: 30000
+evolve_strategy_drl_episode_window: 3000
+evolve_strategy_drl_deploy_requires_benchmark: true
+evolve_strategy_drl_deploy_min_oos_turnover: 0.5
+evolve_strategy_drl_deploy_min_positive_fraction: 0.6666666
+evolve_strategy_drl_fitness_excess: true
+evolve_strategy_drl_seed: 42
+evolve_strategy_drl_seeds: 3
 evolve_strategy_drl_n_episodes: 16
 evolve_strategy_drl_collect_workers: 0
-# P1 课程学习（能力层次）：早期只采低波动段、随进度放开。默认关闭（向后兼容）。
 evolve_strategy_drl_curriculum: false
 evolve_strategy_drl_curriculum_start: 0.3
-# P1 时序网络升级：actor 骨干。mlp=默认（向后兼容）；gru=GRU 序列编码（能力更强，
-# Pine 导出走蒸馏——GRU teacher 自动蒸馏成 MLP student 供 TradingView）。
 evolve_strategy_drl_backbone: mlp
 evolve_strategy_drl_gru_hidden: 32
 evolve_strategy_drl_ppo_epochs: 8
@@ -55,17 +61,19 @@ evolve_strategy_drl_longwindow_every_n: 5
 evolve_strategy_drl_deploy_requires_longwindow: true
 evolve_strategy_drl_deploy_longwindow_90d: false
 evolve_strategy_drl_state_window: 4
-evolve_strategy_drl_min_trade_zone: 0.10
+evolve_strategy_drl_min_trade_zone: 0.1
 evolve_strategy_drl_hidden:
 - 16
 - 16
-evolve_strategy_drl_replay_capacity: 64
+# 回放容量（2026-10 审计修复 MED）：64 只留最近 ~1/32 轮（episodes=128 时每轮推
+# 2048 条轨迹），"跨轮记忆"名不副实；默认 128≈155MB（单轨迹≈1.24MB 口径）。
+# 内存充足可调大（400≈484MB）；0=禁用回放。
+evolve_strategy_drl_replay_capacity: 128
 evolve_strategy_drl_replay_mix_ratio: 0.3
 evolve_rollback_threshold: 0.95
 evolve_max_versions: 10
 evolve_symbols:
 - ETH/USDT
 evolve_timeframe: 5m
-# AI 数学期望信号门（§19 落地）：buy 信号期望 < 阈值则拦截新开多
 signal_math_ev_gate: true
 signal_math_ev_min: 0.0

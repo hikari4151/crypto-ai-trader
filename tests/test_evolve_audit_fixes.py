@@ -644,3 +644,31 @@ def test_reward_scale_bp_plumbed_and_in_fingerprint():
                                 config=_strategy_drl_identity_config(cfg2, []))
     assert id_base["config_fingerprint"] != id_alt["config_fingerprint"], \
         "半宽标定变更必须改变指纹"
+
+
+def test_bankrupt_penalty_applies_on_forced_close():
+    """爆仓惩罚机制锁：构造单根 +130% 跳空逼空（恒比再平衡下渐进翻倍不击穿，
+    只有跳空越过再平衡点才爆仓）强制爆仓，惩罚系数必须体现在总奖励里。"""
+    import numpy as np
+    import pandas as pd
+    from drl.env import SHORT_BUCKETS, TradingEnv, run_episode
+    idx = pd.date_range("2026-01-01", periods=300, freq="1h", tz="UTC")
+    closes = np.full(300, 100.0)
+    closes[200:] = 230.0                                   # 单根跳空 +130%
+    df = pd.DataFrame({"open": closes, "high": closes * 1.01,
+                       "low": closes * 0.99, "close": closes,
+                       "volume": 1000.0}, index=idx)
+
+    def _env(penalty: float):
+        return TradingEnv(df, short_enabled=True, reward_mode="excess",
+                          reward_bankrupt_penalty=float(penalty), fee_rate=0.0,
+                          slippage=0.0, min_trade_zone=0.0)
+
+    short_idx = int(np.where(SHORT_BUCKETS == -1.0)[0][0])   # 恒满仓做空
+    traj_p = run_episode(_env(2.0), lambda s: short_idx)
+    traj_0 = run_episode(_env(0.0), lambda s: short_idx)
+    assert any(i.get("bankrupt") for i in traj_p.get("infos", [])), "跳空逼空必须触发爆仓"
+    assert traj_p.get("bankrupt"), "run_episode 顶层 bankrupt 标记缺失"
+    r_p = float(sum(traj_p["rewards"]))
+    r_0 = float(sum(traj_0["rewards"]))
+    assert r_p <= r_0 - 1.5, f"爆仓惩罚未生效（penalty=2 → 奖励差 {r_0 - r_p:.3f} < 1.5）"

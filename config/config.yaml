@@ -72,8 +72,14 @@ evolve_strategy_drl_replay_capacity: 128
 evolve_strategy_drl_replay_mix_ratio: 0.3
 evolve_rollback_threshold: 0.95
 evolve_max_versions: 10
+# 2026-10 周期战略：死磕 5m~15m（5 标池 BTC/ETH/SOL/DOGE/XRP——多标挖因子与
+# 策略多标混合训练均依赖此池；曾多次被运行 app 覆盖回单标 ETH，须随配置一起提交）
 evolve_symbols:
+- BTC/USDT
 - ETH/USDT
+- SOL/USDT
+- DOGE/USDT
+- XRP/USDT
 evolve_timeframe: 15m
 signal_math_ev_gate: true
 signal_math_ev_min: 0.0

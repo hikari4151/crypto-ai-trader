@@ -2218,6 +2218,30 @@ class EvolveEngine(EvolveObservationsMixin):
         # 4. 计算因子矩阵（P4-E1：包 to_thread——对最多 rolling_window 根K线
         # 计算全部内置因子，纯 pandas 向量化数百毫秒~秒级，留在主协程会阻塞事件循环）
         mat = await asyncio.to_thread(compute_factor_matrix, df)
+        # 2026-10 因子 IC 攻坚（多标挖因子）：用**跨标因子矩阵**（evolve_symbols 池
+        # 各标 26 因子拼接 = 130 维）挖组合因子，预测主标收益——3-seed 实证
+        #（.optim/exp_factor_multi.py）rank_IC 中位 0.024→0.040、valid 1/3→2/3，
+        # 跨标相对强弱/共振含单标缺的信号。构建失败回退单标（不阻断）。
+        try:
+            _extra_mats = []
+            _extra_syms: list[str] = []
+            for _s in list(getattr(settings, "evolve_symbols",
+                                   ["BTC/USDT", "ETH/USDT", "SOL/USDT"]))[:5]:
+                _d = await self._fetch_latest_data(symbol=_s, bars=len(df))
+                if _d is not None and len(_d) >= 1000:
+                    _extra_mats.append(
+                        (await asyncio.to_thread(compute_factor_matrix, _d)).reindex(df.index))
+                    _extra_syms.append(_s)
+            if len(_extra_mats) >= 2:
+                import pandas as pd
+                _multi_mat = pd.concat(_extra_mats, axis=1)
+                _multi_mat.columns = [f"{_s}/{c}" for _s in _extra_syms
+                                      for c in _extra_mats[0].columns]
+                log.info("[evolve] 因子挖掘使用多标跨标矩阵（%d 标的 × %d 因子 = %d 维）",
+                         len(_extra_syms), _extra_mats[0].shape[1], _multi_mat.shape[1])
+                mat = _multi_mat
+        except Exception as e:  # noqa: BLE001
+            log.warning("[evolve] 多标因子矩阵构建失败（回退单标）: %s", e)
 
         # 5. 训练（P0：续训——把已加载的 best_agent 传给训练器作为起点。
         # 此前 load_agent 只用于回退对照，训练本体每次随机初始化重训，

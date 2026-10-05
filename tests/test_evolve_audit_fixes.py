@@ -630,3 +630,17 @@ def test_bankrupt_penalty_plumbed_into_cfg_and_fingerprint():
                                config=_strategy_drl_identity_config(cfg2, []))
     assert id_off["config_fingerprint"] != id_on["config_fingerprint"], \
         "爆仓惩罚变更必须改变指纹"
+
+
+def test_reward_scale_bp_plumbed_and_in_fingerprint():
+    """tanh 软裁剪半宽参数化：cfg 键 + env 透传 + 指纹（奖励形状是学习语义）。"""
+    from drl.evolve_engine import _training_identity, _strategy_drl_identity_config, _strategy_drl_train_cfg
+    cfg = _strategy_drl_train_cfg(8)
+    assert "reward_scale_bp" in cfg and cfg["reward_scale_bp"] == 150.0
+    id_base = _training_identity("strategy_drl", "ETH/USDT", "1h", state_window=1,
+                                 config=_strategy_drl_identity_config(cfg, []))
+    cfg2 = dict(cfg, reward_scale_bp=300.0)
+    id_alt = _training_identity("strategy_drl", "ETH/USDT", "1h", state_window=1,
+                                config=_strategy_drl_identity_config(cfg2, []))
+    assert id_base["config_fingerprint"] != id_alt["config_fingerprint"], \
+        "半宽标定变更必须改变指纹"

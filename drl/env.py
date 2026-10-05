@@ -120,6 +120,9 @@ class TradingEnv:
                  # 2026-10 做空奖惩设计（奖励机制专项）：
                  reward_bankrupt_penalty: float = 0.0,  # 做空爆仓当根追加惩罚（bp 量级；0=关闭）——
                  # 空头在逼空行情可反复爆仓博尾部，无显式惩罚时仅靠收益自然惩罚，学习信号弱。
+                 # 2026-10 奖励标定（第二轮）：tanh 软裁剪**半宽**可配（bp）——半宽决定
+                 # 中间斜率（梯度强度）与尾部饱和点；150 为实测标定，扫参 {60,150,300} 验证。
+                 reward_scale_bp: float = 150.0,
                  ) -> None:
         self.df = df
         self.start_cash = start_cash
@@ -137,6 +140,8 @@ class TradingEnv:
         self.reward_mode = str(reward_mode or "absolute").lower()
         if self.reward_mode not in ("absolute", "excess"):
             self.reward_mode = "absolute"
+        # 2026-10 奖励标定（第二轮）：tanh 软裁剪半宽（bp）——>0 才有效
+        self.reward_scale_bp = max(1.0, float(reward_scale_bp or 150.0))
         self.benchmark_position = float(min(1.0, max(0.0, benchmark_position)))
         # 2026-10 做空奖惩设计：reward_bankrupt_penalty 透传（爆仓当根追加惩罚）
         self.reward_bankrupt_penalty = max(0.0, float(reward_bankrupt_penalty))
@@ -530,11 +535,11 @@ class TradingEnv:
             # 只奖励做空产生的绝对超额，空仓即零贡献。多头模型保持 1.0 不变。
             bench = 0.0 if self.short_enabled else self.benchmark_position
             excess_bp = (ret - bench * asset_ret) * 10000.0
-            reward_bp = float(150.0 * np.tanh(excess_bp / 150.0))
+            reward_bp = float(self.reward_scale_bp * np.tanh(excess_bp / self.reward_scale_bp))
             active = pos - bench
             risk_penalty = self.risk_coef * ((active * vol / vol_ref) ** 2)
         else:
-            reward_bp = float(150.0 * np.tanh(ret * 10000.0 / 150.0))
+            reward_bp = float(self.reward_scale_bp * np.tanh(ret * 10000.0 / self.reward_scale_bp))
             risk_penalty = self.vol_penalty * ((pos * vol / vol_ref) ** 2)
         reward = reward_bp - risk_penalty
 

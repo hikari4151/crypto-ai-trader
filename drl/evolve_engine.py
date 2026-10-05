@@ -120,6 +120,8 @@ def _strategy_drl_train_cfg(episodes: int) -> dict:
         # 2026-10 做空奖惩设计：爆仓追加惩罚（bp 量级，仅做空模式生效；0=关闭配套基准
         # 分离——做空模型 excess 基准自动切现金，见 env._bar_reward）。
         "reward_bankrupt_penalty": 0.0,
+        # 2026-10 奖励标定（第二轮）：tanh 软裁剪半宽（bp，默认 150 为实测标定）
+        "reward_scale_bp": 150.0,
         # P1 课程学习（能力层次）：早期只采低难度窗口，随进度放开。
         # 不进入 _training_identity（同 episodes 语义，改动不触发锚点不可比）。
         "curriculum": bool(getattr(settings, "evolve_strategy_drl_curriculum", False)),
@@ -176,6 +178,8 @@ def _strategy_drl_identity_config(train_cfg: dict, multi_names: list) -> dict:
         "reward_trend_align": float(train_cfg.get("reward_trend_align", 0.0)),
         # 做空惩罚语义（基准分离同一族）：影响 reward，须入指纹防跨口径互比
         "reward_bankrupt_penalty": float(train_cfg.get("reward_bankrupt_penalty", 0.0)),
+        # tanh 软裁剪半宽：奖励形状（梯度强度/饱和点）是学习语义，须入指纹
+        "reward_scale_bp": float(train_cfg.get("reward_scale_bp", 150.0)),
         "decision_interval": int(train_cfg.get("decision_interval", 1)),
         "risk_coef": float(train_cfg.get("risk_coef", 0.5)),
         "episode_window": int(train_cfg.get("episode_window", 0) or 0),

@@ -924,6 +924,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                      reward_trend_align=float(cfg.get("reward_trend_align", 0.0)),
                      # 2026-10 做空奖惩设计：爆仓追加惩罚透传（仅做空模式生效）
                      reward_bankrupt_penalty=float(cfg.get("reward_bankrupt_penalty", 0.0)),
+                     # 2026-10 奖励标定（第二轮）：tanh 软裁剪半宽透传
+                     reward_scale_bp=float(cfg.get("reward_scale_bp", 150.0)),
                      tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
                      participation_rate=float(cfg.get("participation_rate", 0.0)),
                      funding_rate=float(cfg.get("funding_rate", 0.0)),
@@ -1117,6 +1119,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                                    reward_dd_penalty=float(cfg.get("reward_dd_penalty", 0.0)),
                                    # 2026-10 做空奖惩设计：爆仓追加惩罚透传（并行 worker 同源）
                                    reward_bankrupt_penalty=float(cfg.get("reward_bankrupt_penalty", 0.0)),
+                                   # 2026-10 奖励标定（第二轮）：tanh 软裁剪半宽透传
+                                   reward_scale_bp=float(cfg.get("reward_scale_bp", 150.0)),
                                    reward_losing_penalty=float(cfg.get("reward_losing_penalty", 0.0)),
                                    reward_trend_align=float(cfg.get("reward_trend_align", 0.0)),
                                    tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),

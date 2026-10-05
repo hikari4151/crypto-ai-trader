@@ -383,6 +383,8 @@ def make_worker_env(sample: dict, cfg: dict, backend: str = "numpy") -> TradingE
         reward_trend_align=float(cfg.get("reward_trend_align", 0.0)),
         # 2026-10 做空奖惩设计：爆仓追加惩罚透传（多标采样 env 同源）
         reward_bankrupt_penalty=float(cfg.get("reward_bankrupt_penalty", 0.0)),
+        # 2026-10 奖励标定（第二轮）：tanh 软裁剪半宽透传
+        reward_scale_bp=float(cfg.get("reward_scale_bp", 150.0)),
         tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
         participation_rate=float(cfg.get("participation_rate", 0.0)),
         funding_rate=float(cfg.get("funding_rate", 0.0)),

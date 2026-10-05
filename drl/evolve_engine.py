@@ -2448,9 +2448,29 @@ class EvolveEngine(EvolveObservationsMixin):
                 pass
         if composite_series is not None:
             import pandas as pd
+            # 2026-10 业务面核验：npy 缓存必须覆盖**策略 DRL 的训练窗**
+            #（evolve_strategy_drl_history_bars=30000）——曾只覆盖 factor_miner 的
+            # rolling_window(5000)，策略 DRL 每轮触发"长度不一致跳过注入 → 改用已部署
+            # 权重复算"（兜底正确但缓存失效、每轮多一次复算）。此处按与策略 DRL 同源的
+            # 宽历史用**已部署配方**复算组合因子后落盘；拉取/复算失败回退旧长度对齐。
+            _factor_series = composite_series
+            _save_df = df
+            _sdrl_hist = max(0, int(getattr(settings, "evolve_strategy_drl_history_bars", 0) or 0))
+            _hist_bars = _sdrl_hist if _sdrl_hist > 0 else int(self._rolling_window)
+            if _hist_bars > len(df):
+                try:
+                    _wide = await self._fetch_latest_data(symbol=symbol, bars=_hist_bars)
+                except Exception as e:  # noqa: BLE001
+                    _wide = None
+                    log.warning("[evolve] 级联因子宽历史拉取失败（回退滚动窗长度）: %s", e)
+                if _wide is not None and len(_wide) > len(df):
+                    _wide_vals = self._recompute_cascade_factor_values(_wide, symbol=symbol)
+                    if _wide_vals is not None and len(_wide_vals) == len(_wide):
+                        _save_df = _wide
+                        _factor_series = pd.Series(_wide_vals, index=_wide.index)
             # 对齐到原始 df 的索引（factor_miner 内部可能截断或排序）
-            factor_values = pd.Series(composite_series.to_numpy(), index=composite_series.index)
-            aligned = factor_values.reindex(df.index).to_numpy(float)
+            factor_values = pd.Series(_factor_series.to_numpy(), index=_factor_series.index)
+            aligned = factor_values.reindex(_save_df.index).to_numpy(float)
             # 按标的分文件保存（P4-A1）：level-2 防御。尽管各管线现已同标训练，
             # 分文件 + 加载时按标的匹配仍防止任何异常路径下的跨标错配。
             cascade_path = self.zoo.models_dir / f"_cascade_factor_values_{symbol.replace('/', '_')}.npy"
@@ -2462,16 +2482,17 @@ class EvolveEngine(EvolveObservationsMixin):
                 import json as _json
                 tail_ts = None
                 try:
-                    tail_ts = int(df.index[-1].timestamp())
+                    tail_ts = int(_save_df.index[-1].timestamp())
                 except Exception:  # noqa: BLE001
-                    tail_ts = int(df.index[-1]) if df.index[-1] is not None else None
+                    tail_ts = int(_save_df.index[-1]) if _save_df.index[-1] is not None else None
                 if tail_ts is not None:
                     meta_path = self.zoo.models_dir / f"_cascade_factor_values_{symbol.replace('/', '_')}.json"
                     meta_path.write_text(_json.dumps({"tail_ts": tail_ts, "n": int(len(aligned))}),
                                          encoding="utf-8")
             except Exception as e:  # noqa: BLE001
                 log.warning("[evolve] 级联因子时间戳元数据写入失败（不影响 npy 保存）: %s", e)
-            log.info("[evolve] 组合因子已保存到 %s，供策略 DRL 级联注入", cascade_path)
+            log.info("[evolve] 组合因子已保存到 %s（%d 根，策略 DRL 同源训练窗），供策略 DRL 级联注入",
+                     cascade_path, len(aligned))
 
         # 8. 发布系统事件
         # P2-13：训练轮次落库（fitness/选中因子/数据源）

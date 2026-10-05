@@ -240,6 +240,11 @@ class Settings(BaseSettings):
                                              # .optim/exp_training/sweep_drl_rewards.py，30ep 双标的：
                                              # OOS 收益 BTC -0.006→+0.0005、ETH +0.0005→+0.0057，
                                              # 配合 reward_losing_penalty=0.5；baseline 在 BTC 实为负）
+                                             # 2026-10 复核（.optim/exp_vol_sweep.py，5 标池 3-seed，
+                                             # levels 20/40/60/80 逐 seed 结果完全一致）：本参数只在
+                                             # reward_mode=absolute 的旧口径参与 reward；生产 excess
+                                             # 口径的风险项由 evolve_strategy_drl_risk_coef 驱动，
+                                             # vol_penalty 为死参数（调整无效，防未来误调）。
     evolve_cross_symbol_oos: bool = True          # 是否启用跨标的传导 OOS（P1-8）
     evolve_min_new_bars: int = 2                  # 增量训练触发阈值：新增 K 线达此根数才训练（1h 周期 2 根≈2 小时）
     # P0：单轮训练时间预算（秒）。>0 时训练到预算即提前结束（续训场景"学一点就停"

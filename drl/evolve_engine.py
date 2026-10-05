@@ -180,6 +180,10 @@ def _strategy_drl_identity_config(train_cfg: dict, multi_names: list) -> dict:
         "reward_bankrupt_penalty": float(train_cfg.get("reward_bankrupt_penalty", 0.0)),
         # tanh 软裁剪半宽：奖励形状（梯度强度/饱和点）是学习语义，须入指纹
         "reward_scale_bp": float(train_cfg.get("reward_scale_bp", 150.0)),
+        # 评估/部署权重口径：EMA 平滑与否影响部署 model 的权重分布，须入指纹
+        "ema_decay": float(train_cfg.get("ema_decay", 0.0)),
+        # 表征预训练：初始化权重来源不同（预训练表征 vs 随机），学习语义不同
+        "pretrain_next_return": bool(train_cfg.get("pretrain_next_return", False)),
         "decision_interval": int(train_cfg.get("decision_interval", 1)),
         "risk_coef": float(train_cfg.get("risk_coef", 0.5)),
         "episode_window": int(train_cfg.get("episode_window", 0) or 0),
@@ -2233,7 +2237,10 @@ class EvolveEngine(EvolveObservationsMixin):
                     "train_ratio": 0.6,
                     "val_ratio": 0.2,
                     "h": 1,
-                    "ic_window": 120,
+                    # 2026-10 因子 IC 攻坚：ic_window 120→240（.optim/exp_factor_win.py
+                    # 3-seed 中位 rank_ic 0.019→0.024，seed44 IC +0.047；480 变差）。
+                    # 滚动 IC 窗更长 → 组合因子质量评价更稳，是扫描中唯一方向改善。
+                    "ic_window": 240,
                     "max_steps": 6,
                     "corr_threshold": 0.85,
                     # E-EXP：动作掩码（强制每步选新因子，组合恒为 max_steps 个）。

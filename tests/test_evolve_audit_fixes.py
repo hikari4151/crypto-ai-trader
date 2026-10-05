@@ -672,3 +672,40 @@ def test_bankrupt_penalty_applies_on_forced_close():
     r_p = float(sum(traj_p["rewards"]))
     r_0 = float(sum(traj_0["rewards"]))
     assert r_p <= r_0 - 1.5, f"爆仓惩罚未生效（penalty=2 → 奖励差 {r_0 - r_p:.3f} < 1.5）"
+
+
+# ============ 41. 模型工程化：EMA 平滑权重 ============
+
+def test_ema_plumbing_applies_smoothed_weights():
+    """EMA 方法链：_init_ema/_update_ema/_apply_ema 行为正确（手动推进验证数值）。"""
+    import numpy as np
+    from drl.agent import ACAgent
+    agent = ACAgent(15, 5, hidden=(8, 8), seed=7)
+    w0 = agent.actor.W[0].copy()
+    agent._init_ema(0.5)          # ema 初始 = 当前权重
+    # 手动改 actor 权重后 update：ema = 0.5·旧 + 0.5·新
+    agent.actor.W[0] = agent.actor.W[0] * 0.0 + 1.0
+    agent._update_ema()
+    assert agent._ema_actor_W is not None
+    expect = 0.5 * w0 + 0.5 * agent.actor.W[0]
+    assert np.allclose(agent._ema_actor_W[0], expect), "EMA 数值错误"
+    # apply 后 actor 权重 = EMA，且 EMA 副本清空
+    agent._apply_ema()
+    assert np.allclose(agent.actor.W[0], expect)
+    assert agent._ema_actor_W is None
+    # decay=0 不初始化（保持逐位兼容）
+    a2 = ACAgent(15, 5, hidden=(8, 8), seed=8)
+    assert a2._ema_actor_W is None
+
+
+def test_ema_decay_in_identity_fingerprint():
+    """ema_decay 是评估/部署权重口径，须进指纹（0 关闭 vs >0 平滑不可互比）。"""
+    from drl.evolve_engine import _training_identity, _strategy_drl_identity_config
+    cfg = _strategy_drl_identity_config({"state_window": 1}, [])
+    id_base = _training_identity("strategy_drl", "ETH/USDT", "1h",
+                                 state_window=1, config=cfg)
+    cfg_on = dict(cfg, ema_decay=0.99)
+    id_on = _training_identity("strategy_drl", "ETH/USDT", "1h",
+                               state_window=1, config=cfg_on)
+    assert id_base["config_fingerprint"] != id_on["config_fingerprint"], \
+        "ema_decay 变更必须改变指纹"

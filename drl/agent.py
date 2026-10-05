@@ -271,6 +271,39 @@ class ACAgent:
         self.distill_meta: Optional[dict] = None
         # 蒸馏标记：本 agent 是否为蒸馏版（student）。teacher 恒 False。
         self.is_distilled = False
+        # 2026-10 模型工程化（EMA）：actor 权重的指数移动平均——评估/OOS/部署用
+        # 平滑权重（缓解 PPO 权重震荡与过拟合尖峰，见 train_drl ema_decay）。
+        self._ema_decay = 0.0
+        self._ema_actor_W: Optional[list[np.ndarray]] = None
+        self._ema_actor_b: Optional[list[np.ndarray]] = None
+
+    # ---- EMA（指数移动平均）----
+    def _init_ema(self, decay: float) -> None:
+        """以当前 actor 权重初始化 EMA 副本（decay∈(0,1)，如 0.99）。"""
+        self._ema_decay = float(decay)
+        self._ema_actor_W = [w.copy() for w in self.actor.W]
+        self._ema_actor_b = [bb.copy() for bb in self.actor.b]
+
+    def _update_ema(self) -> None:
+        """PPO 每轮更新后推进 EMA：ema ← decay·ema + (1−decay)·actor。"""
+        if self._ema_actor_W is None:
+            return
+        d = self._ema_decay
+        for i, w in enumerate(self.actor.W):
+            self._ema_actor_W[i] = d * self._ema_actor_W[i] + (1.0 - d) * w
+        for i, bb in enumerate(self.actor.b):
+            self._ema_actor_b[i] = d * self._ema_actor_b[i] + (1.0 - d) * bb
+
+    def _apply_ema(self) -> None:
+        """把 EMA 权重写回 actor（评估/OOS/部署前的最终收尾）。"""
+        if self._ema_actor_W is None:
+            return
+        for i, w in enumerate(self.actor.W):
+            self.actor.W[i] = self._ema_actor_W[i].copy()
+        for i, bb in enumerate(self.actor.b):
+            self.actor.b[i] = self._ema_actor_b[i].copy()
+        self._ema_actor_W = None
+        self._ema_actor_b = None
 
     def set_epsilon_schedule(self, episodes: int) -> None:
         """线性退火：从 1.0 → epsilon_min 在前 70% 训练轮内完成。
@@ -666,6 +699,50 @@ class ACAgent:
 
 # ============ 训练器 ============
 
+def _pretrain_next_return(env, *, n_samples: int, hidden: list, epochs: int,
+                          lr: float, seed: int) -> "MLP":
+    """自监督表征预训练：预测下一根收益（MSE 回归），返回编码器 MLP。
+
+    2026-10 模型工程化（表征预训练→PPO 微调）：先让网络在无标签价格上学习
+    "下一根收益"的可预测统计结构（与周期/品种无关的价量表征），再用该权重
+    初始化 actor/critic 做 RL 微调——正面应对"验证段拟合好、OOS 全负"的
+    系统性过拟合（表征更本质、更可泛化）。复用 nnet.MLP 的 backward(通用
+    dout)/Adam step，回归输出层 1 维。
+
+    返回: MLP[dims=state_dim,*hidden,1]，其前 len(hidden) 层与 actor 同构。
+    """
+    import time as _time
+    from .nnet import MLP
+    rng = np.random.default_rng(int(seed or 0) + 90)
+    t_lo = max(env.warmup + env.state_window, env.warmup + 1)
+    t_hi = max(t_lo + 10, env.n - 2)
+    ts = rng.integers(t_lo, t_hi + 1, size=int(n_samples))
+    Xs, ys = [], []
+    for t in ts:
+        env._t = int(t)
+        Xs.append(env._build_state())
+        ys.append(float(env._closes[int(t) + 1] / max(env._closes[int(t)], 1e-12) - 1.0))
+    X = np.asarray(Xs, dtype=float)
+    y = np.asarray(ys, dtype=float).reshape(-1, 1)
+    model = MLP([X.shape[1], *list(hidden), 1], seed=int(seed or 0) + 90, lr=float(lr))
+    n = len(X)
+    bs = 256
+    t_step = 0
+    _t0 = _time.time()
+    for _ep in range(int(epochs)):
+        idx = rng.permutation(n)
+        for s in range(0, n, bs):
+            b = idx[s:s + bs]
+            acts = model.forward(X[b])
+            dout = (acts[-1] - y[b]) / max(len(b), 1)
+            gW, gb = model.backward(acts, dout)
+            t_step += 1
+            model.step(gW, gb, t_step)
+    log.info("[drl] 表征预训练完成（下一根收益 MSE，%d 样本 × %d epochs，%.1fs）",
+             n, int(epochs), _time.time() - _t0)
+    return model
+
+
 def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = None,
               extra_dfs: Optional[dict] = None) -> dict:
     """完整训练循环：在回测环境反复试错，产出训练好的智能体。
@@ -939,6 +1016,37 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     backbone=str(cfg.get("backbone", "mlp")),
                     gru_hidden=int(cfg.get("gru_hidden", 32)),
                     action_space=env.action_buckets)
+    # 2026-10 模型工程化（EMA）：评估/OOS/部署用 actor 平滑权重（缓解 PPO 震荡/
+    # 过拟合尖峰）。0=关闭（保持逐位兼容）。
+    _ema_decay = float(cfg.get("ema_decay", 0.0) or 0.0)
+    if _ema_decay > 0.0:
+        agent._init_ema(_ema_decay)
+    # 2026-10 模型工程化（表征预训练→PPO 微调）：从零训练且开启时，先自监督
+    # "预测下一根收益"获得价量表征，再初始化 actor（前 len(hidden) 层）/critic
+    #（整体同构 [..,1]）→ 缓解"验证段拟合好、OOS 全负"的系统性过拟合。
+    if (bool(cfg.get("pretrain_next_return", False))
+            and cfg.get("base_agent") is None and cfg.get("base_model") is None
+            and str(cfg.get("backbone", "mlp")) == "mlp"):
+        try:
+            _pre_model = _pretrain_next_return(
+                env,
+                n_samples=int(cfg.get("pretrain_samples", 12000) or 12000),
+                hidden=list(hidden),
+                epochs=int(cfg.get("pretrain_epochs", 24) or 24),
+                lr=float(cfg.get("pretrain_lr", 1e-3) or 1e-3),
+                seed=int(seed or 0))
+            # actor：前 len(hidden) 层权重 ← 预训练编码器（输出层保留随机）
+            _n_copy = min(len(hidden), len(agent.actor.W), len(_pre_model.W))
+            for i in range(_n_copy):
+                agent.actor.W[i] = _pre_model.W[i].copy()
+                agent.actor.b[i] = _pre_model.b[i].copy()
+            # critic：与预训练模型同构 [state_dim,*hidden,1] → 整体继承
+            if len(agent.critic.W) == len(_pre_model.W):
+                agent.critic.W = [w.copy() for w in _pre_model.W]
+                agent.critic.b = [bb.copy() for bb in _pre_model.b]
+            log.info("[drl] 表征预训练权重已注入 actor/critic（前 %d 层），PPO 微调开始", _n_copy)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[drl] 表征预训练失败（继续从零训练，不影响主流程）: %s", e)
     # 续训支持：两种起点（优先 base_agent，均为"在旧模型上继续学"）——
     # 1) base_agent：内存中的 ACAgent 对象（持续进化引擎用，已通过 zoo.load_agent
     #    加载，无需磁盘往返；必须 deepcopy 权重，否则训练会原地修改 best_agent，
@@ -1178,6 +1286,9 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                                   segment_lengths=seg_lens,
                                   advantage_scale=_adv_scale,
                                   actor_grad_clip=actor_grad_clip)
+            # EMA：每轮 PPO 更新后推进平滑权重
+            if _ema_decay > 0.0:
+                agent._update_ema()
             # 批量收益：取各轨迹收益的均值（比单条轨迹更稳）
             total_ret = float(np.mean([t["total_ret"] for t in trajs]))
             row = {
@@ -1351,6 +1462,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     # 模型文件里记录的 epsilon 必须与实际行为一致：未启用 ε-greedy 时写 0.0
     #（修复前一律写 epsilon_min=0.05，部署端/审计据此以为有 5% 随机探索）
     final_agent.epsilon = final_agent.epsilon_min if _use_epsilon else 0.0
+    # 2026-10 EMA：OOS 评估/部署前把平滑权重写回 actor（best 快照的 EMA 状态
+    # 随深拷贝保留）。此后 final_agent 为 EMA 权重版本，OOS 门/保存/部署一致。
+    if getattr(final_agent, "_ema_actor_W", None) is not None:
+        final_agent._apply_ema()
 
     # ============ OOS 独立评估（防过拟合核心） ============
     # 训练结束后用【完全未见过】的 oos_df 评估最优模型，与训练段对比：

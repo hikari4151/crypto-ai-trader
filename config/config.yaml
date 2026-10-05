@@ -25,10 +25,13 @@ evolve_factor_miner_cost_per_turn: 0.002
 evolve_factor_miner_net_fitness_scale: 500.0
 evolve_strategy_drl_episodes: 128
 evolve_strategy_drl_reward_mode: excess
-evolve_strategy_drl_decision_interval: 8
+# 2026-10 周期战略：死磕 5m~15m。对比实验（exp_period_compare，同百天跨度/
+# 同 40min 决策节奏/3-seed）15m OOS 略优且 1/3 过硬门（5m 全拦）→ 切 15m 挂机验证。
+# 5m 等价：k8/30000根/3000窗；15m 等效：k3/10000根/1000窗（决策 ~45min、跨度 ~104 天）。
+evolve_strategy_drl_decision_interval: 3
 evolve_strategy_drl_risk_coef: 0.5
-evolve_strategy_drl_history_bars: 30000
-evolve_strategy_drl_episode_window: 3000
+evolve_strategy_drl_history_bars: 10000
+evolve_strategy_drl_episode_window: 1000
 evolve_strategy_drl_deploy_requires_benchmark: true
 evolve_strategy_drl_deploy_min_oos_turnover: 0.5
 evolve_strategy_drl_deploy_min_positive_fraction: 0.6666666
@@ -65,19 +68,12 @@ evolve_strategy_drl_min_trade_zone: 0.1
 evolve_strategy_drl_hidden:
 - 16
 - 16
-# 回放容量（2026-10 审计修复 MED）：64 只留最近 ~1/32 轮（episodes=128 时每轮推
-# 2048 条轨迹），"跨轮记忆"名不副实；默认 128≈155MB（单轨迹≈1.24MB 口径）。
-# 内存充足可调大（400≈484MB）；0=禁用回放。
 evolve_strategy_drl_replay_capacity: 128
 evolve_strategy_drl_replay_mix_ratio: 0.3
 evolve_rollback_threshold: 0.95
 evolve_max_versions: 10
 evolve_symbols:
-- BTC/USDT
 - ETH/USDT
-- SOL/USDT
-- DOGE/USDT
-- XRP/USDT
-evolve_timeframe: 5m
+evolve_timeframe: 15m
 signal_math_ev_gate: true
 signal_math_ev_min: 0.0

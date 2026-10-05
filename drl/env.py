@@ -117,6 +117,9 @@ class TradingEnv:
                  risk_coef: float = 0.5,              # excess 模式跟踪误差惩罚系数（bp 量级，见 _bar_reward）
                  decision_interval: int = 1,          # 每 k 根K线决策一次（k=1=旧行为，逐根决策）
                  short_enabled: bool = False,         # 动作空间是否含做空档（−1~+1）；False=旧的长仓 5 档
+                 # 2026-10 做空奖惩设计（奖励机制专项）：
+                 reward_bankrupt_penalty: float = 0.0,  # 做空爆仓当根追加惩罚（bp 量级；0=关闭）——
+                 # 空头在逼空行情可反复爆仓博尾部，无显式惩罚时仅靠收益自然惩罚，学习信号弱。
                  ) -> None:
         self.df = df
         self.start_cash = start_cash
@@ -135,6 +138,8 @@ class TradingEnv:
         if self.reward_mode not in ("absolute", "excess"):
             self.reward_mode = "absolute"
         self.benchmark_position = float(min(1.0, max(0.0, benchmark_position)))
+        # 2026-10 做空奖惩设计：reward_bankrupt_penalty 透传（爆仓当根追加惩罚）
+        self.reward_bankrupt_penalty = max(0.0, float(reward_bankrupt_penalty))
         # risk_coef：单位与收益项一致（bp / (%波动率)²）。量级标定说明：
         # 旧 vol_penalty=40 在 bp 口径下的惩罚是 40·(pos·vol%)²，1h/vol≈0.6% 时满仓
         # 每根约 14bp —— 是行情自身漂移（零点几 bp/根）的数十倍，等于"持仓必亏"。
@@ -479,6 +484,11 @@ class TradingEnv:
             if self.short_enabled and equity_next <= 0.0:
                 self._bankrupt = True
                 self._done = True
+                # 2026-10 做空奖惩设计：爆仓当根追加惩罚（bp 量级）——逼空行情中
+                # 无显式惩罚时爆仓只产生一次 tanh 饱和的负奖励，反复爆仓博尾部的
+                # 行为缺乏足额学习信号；显式追加让"爆仓代价"可被策略感知。
+                if self.reward_bankrupt_penalty > 0.0:
+                    reward -= self.reward_bankrupt_penalty
             if self._done:
                 break
 
@@ -513,9 +523,15 @@ class TradingEnv:
         # 标定：ret*10000=±150bp 时 tanh(±1)=±0.7619，即软裁剪略缩中间值，
         # 但尾部仍保留 0.76~1.0 的梯度信号（原实现尾部直接饱和为 1）。
         if self.reward_mode == "excess":
-            excess_bp = (ret - self.benchmark_position * asset_ret) * 10000.0
+            # 2026-10 做空奖惩设计（核心）：**基准分离**——做空模型的价值是下行 alpha/
+            # 保护，不是"永远跑赢买入持有"。用多头基准（1.0）衡量做空模型时，上涨窗口
+            # 的空仓/空头被持续罚机会成本，fitness 系统性压低、OOS 超额门难过（这正是
+            # 此前"做空实测无价值"的部分根因）。做空模型超额基准自动切为现金（0.0）：
+            # 只奖励做空产生的绝对超额，空仓即零贡献。多头模型保持 1.0 不变。
+            bench = 0.0 if self.short_enabled else self.benchmark_position
+            excess_bp = (ret - bench * asset_ret) * 10000.0
             reward_bp = float(150.0 * np.tanh(excess_bp / 150.0))
-            active = pos - self.benchmark_position
+            active = pos - bench
             risk_penalty = self.risk_coef * ((active * vol / vol_ref) ** 2)
         else:
             reward_bp = float(150.0 * np.tanh(ret * 10000.0 / 150.0))

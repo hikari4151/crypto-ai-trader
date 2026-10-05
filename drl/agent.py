@@ -922,6 +922,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                      reward_dd_penalty=float(cfg.get("reward_dd_penalty", 0.0)),
                      reward_losing_penalty=float(cfg.get("reward_losing_penalty", 0.0)),
                      reward_trend_align=float(cfg.get("reward_trend_align", 0.0)),
+                     # 2026-10 做空奖惩设计：爆仓追加惩罚透传（仅做空模式生效）
+                     reward_bankrupt_penalty=float(cfg.get("reward_bankrupt_penalty", 0.0)),
                      tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
                      participation_rate=float(cfg.get("participation_rate", 0.0)),
                      funding_rate=float(cfg.get("funding_rate", 0.0)),
@@ -1032,6 +1034,10 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
     # val_segments>1 时把 val 段切成多段，选模收益取各段中位数（与 oos_segments 同构），
     # 让模型必须在多个子段都表现好才被选，不偏向单一 regime。默认 1 保持兼容。
     val_segments = max(1, int(cfg.get("val_segments", 1)))
+    # 2026-10 做空奖惩设计（评估端对齐）：做空模型的超额基准 = 现金（0.0）——
+    # 训练端 excess 已自动切现金，评估端若仍以买入持有衡量会在上涨窗口恒负超额、
+    # OOS 门永远拦截（"做空无价值"的部分根因）。basis 记 cash_benchmark 隔离回退。
+    _short_mode = bool(cfg.get("short_enabled", False))
     # 早停保护：验证收益连续无改善次数达到阈值则提前停止（借鉴 SB3 EvalCallback）
     no_improve_streak = 0
     early_stop_patience = int(cfg.get("early_stop_patience", 0))  # 0=禁用，>0 启用
@@ -1109,6 +1115,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                                    extra_factors=extra_for_worker,
                                    state_window=state_window,
                                    reward_dd_penalty=float(cfg.get("reward_dd_penalty", 0.0)),
+                                   # 2026-10 做空奖惩设计：爆仓追加惩罚透传（并行 worker 同源）
+                                   reward_bankrupt_penalty=float(cfg.get("reward_bankrupt_penalty", 0.0)),
                                    reward_losing_penalty=float(cfg.get("reward_losing_penalty", 0.0)),
                                    reward_trend_align=float(cfg.get("reward_trend_align", 0.0)),
                                    tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
@@ -1214,7 +1222,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                                                **policy_env_kwargs(cfg))
                             _vt = run_episode(_venv, lambda s: agent.greedy_action(s))
                             _vrets.append(float(_vt["total_ret"]))
-                            _vbhs.append(_bh_return(_s))
+                            # 做空奖惩设计：超额基准=现金（0）——基准采集置 0
+                            _vbhs.append(0.0 if _short_mode else _bh_return(_s))
                             # 2026-10 审计修复（LOW）：逐段收集 equity（metrics 按段聚合，
                             # 曾跨段拼接被"每段重置"误判为暴跌）
                             _seg_equities.append([i.get("equity") for i in _vt.get("infos", [])
@@ -1228,11 +1237,12 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                         _val_exc_seg = [float(a - b) for a, b in zip(_vrets, _vbhs)]
                         val_excess = (float(np.median(_val_exc_seg)) if _val_exc_seg
                                       else val_ret - val_bh_ret)
-                        val_excess_basis = "segment_median" if _val_exc_seg else "median_diff"
+                        val_excess_basis = ("cash_benchmark" if _short_mode
+                                            else ("segment_median" if _val_exc_seg else "median_diff"))
                     else:
                         vtraj = run_episode(val_env, lambda s: agent.greedy_action(s))
                         val_ret = float(vtraj["total_ret"])
-                        val_bh_ret = _bh_return(val_df)
+                        val_bh_ret = 0.0 if _short_mode else _bh_return(val_df)
                         v_equities = [info.get("equity") for info in vtraj.get("infos", [])
                                       if info.get("equity") is not None]
                     # 基准相对口径（2026-10）：val_ret 减同段买入持有 = 超额。
@@ -1240,7 +1250,7 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                     # 与"按超额排序"完全等价（选模逻辑无需改）；超额的意义在于**跨轮比较**
                     # （锚点/回退）与 fitness 口径——不同轮的 val 窗口基准不同，绝对值不可比。
                     val_excess = float(val_ret - val_bh_ret)
-                    val_excess_basis = "single_segment"
+                    val_excess_basis = "cash_benchmark" if _short_mode else "single_segment"
                     row["val_excess_basis"] = val_excess_basis
                     row["val_ret"] = round(val_ret, 6)
                     row["val_bh_ret"] = round(val_bh_ret, 6)
@@ -1418,15 +1428,19 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
             # 基准相对口径（2026-10）：超额 = 模型 OOS 收益 − 同段买入持有收益。
             # 逐段算超额取中位数（与 oos_ret 的多段中位数同构）。必须在过拟合衰减
             # 之前算好——衰减判据也已改为超额口径（见下）。
-            oos_bh_ret = float(np.median(oos_bhs)) if oos_bhs else 0.0
-            _raw_exc_seg = [float(a - b) for a, b in zip(oos_rets, oos_bhs)]
+            # 2026-10 做空奖惩设计（评估端对齐）：做空模型基准切现金（超额=绝对收益）。
+            oos_bh_ret = 0.0 if _short_mode else (
+                float(np.median(oos_bhs)) if oos_bhs else 0.0)
+            _raw_exc_seg = ([float(a) for a in oos_rets] if _short_mode
+                            else [float(a - b) for a, b in zip(oos_rets, oos_bhs)])
             oos_excess_segments = [round(x, 6) for x in _raw_exc_seg]
             # 2026-10 审计修复（MED-3）：超额 = **逐段超额的中位数**——旧口径
             # `median(段收益) − median(段基准)` 与逐段中位数不等价，可与分段门
             # "≥2/3 子段为正"符号相反（同一数据两个门一个放行一个拦截）。
             oos_excess = (float(np.median(_raw_exc_seg)) if _raw_exc_seg
                           else oos_ret - oos_bh_ret)
-            oos_excess_basis = "segment_median" if _raw_exc_seg else "median_diff"
+            oos_excess_basis = ("cash_benchmark" if _short_mode else
+                                ("segment_median" if _raw_exc_seg else "median_diff"))
             oos_turnover = float(np.sum(oos_turnovers)) if oos_turnovers else 0.0
             oos_active_segments = int(sum(1 for t in oos_turnovers if t > 1e-9))
             # 训练段代表收益（用验证段 best 或训练段末收益）
@@ -1444,7 +1458,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                 _decay_ref = float(best_val_excess)
                 _decay_basis = "excess"
             elif oos_bhs:
-                _decay_ref = float(train_ref - _bh_return(train_df))
+                # 做空奖惩设计：训练段参照基准同样切现金（与评估超额口径一致）
+                _decay_ref = float(train_ref - (0.0 if _short_mode else _bh_return(train_df)))
                 _decay_basis = "excess"
             decay = _oos_decay(_decay_ref if _decay_ref is not None else train_ref,
                                oos_excess if _decay_basis == "excess" else oos_ret)

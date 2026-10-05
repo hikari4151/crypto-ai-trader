@@ -63,6 +63,8 @@ def _sample_states(teacher: ACAgent, df, cfg: dict, n_rollouts: int = 6,
         reward_dd_penalty=float(cfg.get("reward_dd_penalty", 0.0)),
         reward_losing_penalty=float(cfg.get("reward_losing_penalty", 0.0)),
         reward_trend_align=float(cfg.get("reward_trend_align", 0.0)),
+        # 2026-10 做空奖惩设计：爆仓追加惩罚透传（蒸馏同源）
+        reward_bankrupt_penalty=float(cfg.get("reward_bankrupt_penalty", 0.0)),
         tail_risk_penalty=float(cfg.get("tail_risk_penalty", 0.0)),
         participation_rate=float(cfg.get("participation_rate", 0.0)),
         funding_rate=float(cfg.get("funding_rate", 0.0)),

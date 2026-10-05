@@ -597,3 +597,36 @@ def test_shaping_params_change_identity_fingerprint():
                                state_window=1, config=cfg_on)
     assert id_base["config_fingerprint"] != id_on["config_fingerprint"], \
         "连亏惩罚变更必须改变指纹（0.0 与 0.5 的奖励语义不同，不可互比）"
+
+
+# ============ 40. 做空奖惩设计（基准分离 + 爆仓惩罚） ============
+
+def test_short_mode_benchmark_is_cash_not_buyhold():
+    """做空模型 excess 奖励的基准自动切现金（0.0）——若仍用买入持有（1.0），
+    上涨窗口的空仓/空头被持续罚机会成本，fitness 系统性压低（做空奖惩设计核心）。
+    空仓（pos=0）在上涨行情：多仓被罚、做空零贡献。"""
+    import pandas as pd
+    from drl.env import TradingEnv
+    idx = pd.date_range("2026-01-01", periods=300, freq="1h", tz="UTC")
+    df = pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0,
+                       "close": 100.0, "volume": 100.0}, index=idx)
+    env_long = TradingEnv(df, short_enabled=False, reward_mode="excess")
+    env_short = TradingEnv(df, short_enabled=True, reward_mode="excess")
+    r_short = env_short._bar_reward(ret=0.0, asset_ret=0.02, equity_next=10000.0)
+    r_long = env_long._bar_reward(ret=0.0, asset_ret=0.02, equity_next=10000.0)
+    assert r_short > r_long, "做空模式下空仓不应背买入持有机会成本（基准应切现金）"
+
+
+def test_bankrupt_penalty_plumbed_into_cfg_and_fingerprint():
+    """爆仓惩罚透传链：_strategy_drl_train_cfg 键 + 身份指纹键（reward 语义变化）。"""
+    from drl.evolve_engine import _training_identity, _strategy_drl_identity_config, _strategy_drl_train_cfg
+    cfg = _strategy_drl_train_cfg(8)
+    assert "reward_bankrupt_penalty" in cfg
+    cfg["reward_bankrupt_penalty"] = 3.0
+    id_off = _training_identity("strategy_drl", "ETH/USDT", "1h", state_window=1,
+                                config=_strategy_drl_identity_config(cfg, []))
+    cfg2 = dict(cfg, reward_bankrupt_penalty=0.0)
+    id_on = _training_identity("strategy_drl", "ETH/USDT", "1h", state_window=1,
+                               config=_strategy_drl_identity_config(cfg2, []))
+    assert id_off["config_fingerprint"] != id_on["config_fingerprint"], \
+        "爆仓惩罚变更必须改变指纹"

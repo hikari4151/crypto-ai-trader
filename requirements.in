@@ -9,7 +9,7 @@ aiohttp-socks>=0.10.0    # 网络加速：ccxt 异步走 socksProxy 必需
 orjson>=3.9.0            # run16 E1：模型 zoo 权重 JSON 快速解析
 # Web
 fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
+uvicorn[standard]>=0.54.0
 # 配置
 pydantic>=2.6.0
 pydantic-settings>=2.2.0

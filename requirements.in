@@ -6,7 +6,7 @@ numpy>=1.24.0
 httpx>=0.27.0            # 异步 AI HTTP 客户端
 socksio>=1.0.0           # 网络加速：httpx 走 socks5/socks5h 必需
 aiohttp-socks>=0.10.0    # 网络加速：ccxt 异步走 socksProxy 必需
-orjson>=3.9.0            # run16 E1：模型 zoo 权重 JSON 快速解析
+orjson>=3.12.0            # run16 E1：模型 zoo 权重 JSON 快速解析
 # Web
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0

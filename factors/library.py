@@ -241,6 +241,52 @@ _f("risk_regime", "风险环境", CATEGORY_MACRO, "20期波动率在40期中的�
    lambda df: _risk_regime(df, 20), {"n": 20})
 
 
+# ============ 量结构（2026-10 特征升维，因子 IC 攻坚） ============
+def _vpin(df, n: int = 10) -> pd.Series:
+    """VPIN 近似：买卖不平衡占成交额比（%）。"""
+    flow = (df["close"] - df["open"]) * df["volume"]
+    amt = (df["volume"] * df["close"]).rolling(n).sum() + 1e-12
+    return flow.rolling(n).sum() / amt * 100.0
+
+
+def _vol_z(df, n: int = 20) -> pd.Series:
+    """量能 z-score：当前量偏离 n 期均量的标准差倍数。"""
+    v = df["volume"]
+    return (v - v.rolling(n).mean()) / (v.rolling(n).std() + 1e-12)
+
+
+def _hl_pos(df, n: int = 20) -> pd.Series:
+    """K 线实体收盘位置均值（0=贴低 1=贴高）：盘中买卖压力。"""
+    rng = (df["high"] - df["low"]).replace(0.0, np.nan)
+    pos = (df["close"] - df["low"]) / rng
+    return pos.rolling(n).mean()
+
+
+def _eff(df, n: int = 20) -> pd.Series:
+    """Kaufman 效率比：n 期净位移 / n 期路径总长（0-1，趋势效率）。"""
+    d1 = df["close"].diff().abs()
+    net = df["close"].diff(n).abs()
+    return net / (d1.rolling(n).sum() + 1e-12)
+
+
+def _vpc(df, n: int = 20) -> pd.Series:
+    """量价相关性：n 期 return 与 volume 的滚动相关（放量方向一致性）。"""
+    r = df["close"].pct_change()
+    return r.rolling(n).corr(df["volume"])
+
+
+_f("vpin_10", "量价不平衡", CATEGORY_VOLUME, "VPIN近似：买卖不平衡占成交额比（%），微观资金流方向。",
+   lambda df: _vpin(df, 10), {"n": 10})
+_f("vol_z20", "量能z-score", CATEGORY_VOLUME, "当前量偏离20期均量的标准差倍数，放量/缩量异常。",
+   lambda df: _vol_z(df, 20), {"n": 20})
+_f("hl_pos20", "实体位置", CATEGORY_VOLUME, "20期收盘在高低区间位置的均值（0-1），盘中买卖压力。",
+   lambda df: _hl_pos(df, 20), {"n": 20})
+_f("eff_20", "趋势效率", CATEGORY_TREND, "Kaufman效率比（0-1），趋势/震荡区分度。",
+   lambda df: _eff(df, 20), {"n": 20})
+_f("vpc_20", "量价相关", CATEGORY_VOLUME, "20期收益与量的滚动相关，放量方向一致性。",
+   lambda df: _vpc(df, 20), {"n": 20})
+
+
 # ============ 注册表 ============
 _BY_KEY = {f.key: f for f in _LIB}
 

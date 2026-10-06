@@ -252,7 +252,9 @@ class Settings(BaseSettings):
     # 配合续训（base_agent）让 60s 周期内的每轮训练都变得轻量，成本大幅下降。
     # 第2项完善：默认 120s 单轮预算——实测大窗口（5000 根）单轮 PPO 在低配环境
     # 可超分钟级，60s 周期下无预算上限会让后台训练常驻吃 CPU。面板可热调。
-    evolve_train_time_budget: float = 120.0
+    # 2026-10 策略连拒排查：120s 预算 + 观测开销叠加可能挤压策略训练充分性；
+    # 实验（exp_15m_tb/factorblock）证明完整训练 OOS 转正 +2/3 过硬门 → 提到 300s。
+    evolve_train_time_budget: float = 300.0
     # P1：增量门按训练周期自动换算最小新增K线根数——训练间隔至少覆盖
     # evolve_min_train_gap_sec 秒（5m 周期 2 根=10 分钟一轮仍偏密，换算后更贴合
     # 训练成本与行情节奏）。0 = 关闭自适应，仅用 evolve_min_new_bars。

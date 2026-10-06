@@ -587,6 +587,58 @@ def _make_cross_oos_env(df, *, state_window: int, decision_interval: int,
     )
 
 
+def _build_multi_factor_matrix(df, syms, bars) -> Optional[Any]:
+    """构建 5 标跨标因子矩阵（列名 {sym}/{factor} + 跨标相对聚合列），对齐 df.index。
+
+    2026-10 特征升维②（跨标强弱）：追加 4 个"主标 vs 市场均值"相对聚合列
+    （rel_mom10/rel_mom20/rel_corr20/rel_vol10，列名稳定、主标随 df 语义自洽），
+    表达主标相对其它标的的强弱/联动偏离。单标 df 上无法重建（无跨标上下文）——
+    extra 标的复算路径因列名无 "/" 前缀自动忽略它们（只算自身列），安全。
+
+    factor_miner 训练端与策略级联复算共用此函数（同源列名）；本地同步读缓存
+    （kline_store.load_df）。标数不足 2 或失败返回 None（调用方回退，不阻断）。
+    """
+    try:
+        import pandas as pd
+        from backtest import kline_store
+        from factors.engine import compute_factor_matrix
+        tf = getattr(settings, "evolve_timeframe", None) or settings.default_timeframe
+        dfs: dict = {}
+        mats: list = []
+        used: list[str] = []
+        base_idx = df.index
+        for s in list(syms)[:5]:
+            try:
+                d = kline_store.load_df("binance", s, tf, int(bars))
+            except Exception:  # noqa: BLE001
+                d = None
+            if d is None or len(d) < 500:
+                continue
+            dfs[s] = d
+            mats.append(compute_factor_matrix(d).reindex(base_idx))
+            used.append(s)
+        if len(mats) < 2:
+            return None
+        m = pd.concat(mats, axis=1)
+        m.columns = [f"{s}/{c}" for s in used for c in mats[0].columns]
+        # 跨标相对强弱聚合列（主标 vs 市场均值；市场=全部 used 标等权，含主标 1/N）
+        try:
+            _main_close = df["close"].astype(float).reindex(base_idx)
+            _market = sum(dfs[s]["close"].astype(float).reindex(base_idx)
+                          for s in used) / len(used)
+            _ret, _mret = _main_close.pct_change(), _market.pct_change()
+            m["rel_mom10"] = (_main_close.pct_change(10) - _market.pct_change(10)) * 100.0
+            m["rel_mom20"] = (_main_close.pct_change(20) - _market.pct_change(20)) * 100.0
+            m["rel_corr20"] = _ret.rolling(20).corr(_mret)
+            m["rel_vol10"] = (_ret.rolling(10).std() - _mret.rolling(10).std()) * 100.0
+        except Exception as e:  # noqa: BLE001
+            log.warning("[evolve] 跨标相对聚合列构建失败（矩阵保留基础列）: %s", e)
+        return m
+    except Exception as e:  # noqa: BLE001
+        log.warning("[evolve] 多标因子基座构建失败: %s", e)
+        return None
+
+
 class EvolveEngine(EvolveObservationsMixin):
     """持续进化引擎：管理因子挖掘和策略训练的持续循环。"""
 
@@ -2218,27 +2270,19 @@ class EvolveEngine(EvolveObservationsMixin):
         # 4. 计算因子矩阵（P4-E1：包 to_thread——对最多 rolling_window 根K线
         # 计算全部内置因子，纯 pandas 向量化数百毫秒~秒级，留在主协程会阻塞事件循环）
         mat = await asyncio.to_thread(compute_factor_matrix, df)
-        # 2026-10 因子 IC 攻坚（多标挖因子）：用**跨标因子矩阵**（evolve_symbols 池
-        # 各标 26 因子拼接 = 130 维）挖组合因子，预测主标收益——3-seed 实证
-        #（.optim/exp_factor_multi.py）rank_IC 中位 0.024→0.040、valid 1/3→2/3，
-        # 跨标相对强弱/共振含单标缺的信号。构建失败回退单标（不阻断）。
+        # 2026-10 因子 IC 攻坚（多标挖因子 + 跨标相对聚合列）：与策略端级联复算
+        # 共用 _build_multi_factor_matrix（同源）构建跨标矩阵（各标因子拼接 + rel_*），
+        # 3-seed 实证 rank_IC 中位 0.024→0.058（exp_factor_multi/exp_factor_volume）。
+        # 构建失败回退单标（不阻断）。
         try:
-            _extra_mats = []
-            _extra_syms: list[str] = []
-            for _s in list(getattr(settings, "evolve_symbols",
-                                   ["BTC/USDT", "ETH/USDT", "SOL/USDT"]))[:5]:
-                _d = await self._fetch_latest_data(symbol=_s, bars=len(df))
-                if _d is not None and len(_d) >= 1000:
-                    _extra_mats.append(
-                        (await asyncio.to_thread(compute_factor_matrix, _d)).reindex(df.index))
-                    _extra_syms.append(_s)
-            if len(_extra_mats) >= 2:
-                import pandas as pd
-                _multi_mat = pd.concat(_extra_mats, axis=1)
-                _multi_mat.columns = [f"{_s}/{c}" for _s in _extra_syms
-                                      for c in _extra_mats[0].columns]
+            _multi_syms = list(getattr(settings, "evolve_symbols",
+                                      ["BTC/USDT", "ETH/USDT", "SOL/USDT"]))
+            _multi_mat = await asyncio.to_thread(
+                _build_multi_factor_matrix, df, _multi_syms, len(df))
+            if _multi_mat is not None:
+                n_syms = min(len(_multi_syms), 5)
                 log.info("[evolve] 因子挖掘使用多标跨标矩阵（%d 标的 × %d 因子 = %d 维）",
-                         len(_extra_syms), _extra_mats[0].shape[1], _multi_mat.shape[1])
+                         n_syms, _multi_mat.shape[1] // n_syms, _multi_mat.shape[1])
                 mat = _multi_mat
         except Exception as e:  # noqa: BLE001
             log.warning("[evolve] 多标因子矩阵构建失败（回退单标）: %s", e)
@@ -3737,37 +3781,14 @@ class EvolveEngine(EvolveObservationsMixin):
     def _build_multi_factor_mat(self, df):
         """构建 5 标跨标因子矩阵（列名 {sym}/{factor}，对齐 df.index）。
 
-        与 factor_miner 训练端跨标矩阵同式（evolve_symbols 池前 5 标 × 26 因子）。
+        与 factor_miner 训练端跨标矩阵同式（evolve_symbols 池跨标矩阵 + rel_*
+        跨标相对聚合列，见模块级 _build_multi_factor_matrix——训练/复算同源）。
         同步读本地缓存（kline_store.load_df），避免 async 传播；本地缺数据或
         标数不足 2 时返回 None（调用方回退单标/跳过）。失败不抛（log + None）。
         """
-        try:
-            import pandas as pd
-            from backtest import kline_store
-            from factors.engine import compute_factor_matrix
-            tf = getattr(settings, "evolve_timeframe", None) or settings.default_timeframe
-            syms = list(getattr(settings, "evolve_symbols",
-                                ["BTC/USDT", "ETH/USDT", "SOL/USDT"]))[:5]
-            mats: list = []
-            used: list[str] = []
-            base_idx = df.index
-            for s in syms:
-                try:
-                    d = kline_store.load_df("binance", s, tf, len(df))
-                except Exception:  # noqa: BLE001
-                    d = None
-                if d is None or len(d) < 500:
-                    continue
-                mats.append(compute_factor_matrix(d).reindex(base_idx))
-                used.append(s)
-            if len(mats) < 2:
-                return None
-            m = pd.concat(mats, axis=1)
-            m.columns = [f"{s}/{c}" for s in used for c in mats[0].columns]
-            return m
-        except Exception as e:  # noqa: BLE001
-            log.warning("[evolve] 多标因子基座构建失败: %s", e)
-            return None
+        _syms = list(getattr(settings, "evolve_symbols",
+                            ["BTC/USDT", "ETH/USDT", "SOL/USDT"]))
+        return _build_multi_factor_matrix(df, _syms, len(df))
 
     def _load_cascade_factor_values_from_files(self, df, symbol: str = "") -> Optional[Any]:
         """（旧实现）从 npy + companion 文件加载级联因子值，仅尾戳一致时返回。

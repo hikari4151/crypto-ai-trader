@@ -2,7 +2,7 @@
 ruff==0.16.8              # lint 门禁（E9+F+W+E4+E7）
 esprima==4.0.1            # check_js.py 无 node 时的 JS 语法回退解析器
 pytest-asyncio==1.4.0     # pytest.ini asyncio_mode=auto 依赖
-coverage==7.16.1          # pytest-cov 覆盖率数据收集
+coverage==7.16.2          # pytest-cov 覆盖率数据收集
 pytest-cov==7.1.0         # 覆盖率门禁
 pytest>=8.0.0             # 测试框架
 mypy==2.3.1               # C2 类型检查试点

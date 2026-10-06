@@ -1,7 +1,7 @@
 # 运行依赖（顶层声明，生成 requirements-lock.txt 的源；B5 依赖治理）
 # 与 requirements.txt 保持同源（check_lock.py 会同时校验 *.txt 与 *.in）。
 ccxt>=4.2.0              # 交易所 REST
-pandas>=2.0.0
+pandas>=3.0.6
 numpy>=1.24.0
 httpx>=0.27.0            # 异步 AI HTTP 客户端
 socksio>=1.0.0           # 网络加速：httpx 走 socks5/socks5h 必需

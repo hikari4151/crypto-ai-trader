@@ -382,7 +382,9 @@ class Settings(BaseSettings):
     # 连续拒绝 from-scratch 重置（对齐 factor_miner 先例，诊断报告 §7 建议第2条）：
     # 策略 DRL（仅冠军轮）连续 OOS 被拒达阈值后，下一轮强制
     # 从零重训（base_agent=None），打破"永久连拒"困在老基线上的死循环。0=关闭。
-    evolve_strategy_drl_reset_after_rejects: int = 5
+    # 2026-10：5→3——exp_15m_continue 实证续训（坏起点）过门率 1/3、衰减更高，
+    # 更早 from-scratch 甩掉劣质起点（与 config.yaml 保持同值）。
+    evolve_strategy_drl_reset_after_rejects: int = 3
     # GAP-01 实盘验收观测（2026-09-19，诊断报告建议第6条(b)）：每轮 strategy DRL
     # 真实训练后，对部署中的最佳模型跑同品种多折 walk-forward × 两档成本（基准/翻倍），
     # 输出 PASS/FAIL（单标的部署豁免跨品种，见 docs/LIVE_READINESS.md E7）。

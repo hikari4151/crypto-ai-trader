@@ -49,7 +49,9 @@ evolve_strategy_drl_walkforward_obs: true
 evolve_strategy_drl_walkforward_folds: 2
 evolve_strategy_drl_walkforward_bars: 6000
 evolve_walkforward_min_trades: 8
-evolve_strategy_drl_reset_after_rejects: 5
+# 2026-10 续训衰减优化：连拒阈值 5→3——exp_15m_continue 实证续训（坏起点）
+# 过门率 1/3、decay 更高（0.63 vs 从零 0.45）；更早 from-scratch 甩掉劣质起点
+evolve_strategy_drl_reset_after_rejects: 3
 evolve_gap01_obs: true
 evolve_gap01_folds: 4
 evolve_gap01_bars: 15000

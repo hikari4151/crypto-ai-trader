@@ -169,7 +169,12 @@ class MultiAssetPool:
                 factors_i = None
                 if self.factor_builder is not None:
                     try:
-                        factors_i = self.factor_builder(df_i)
+                        import inspect
+                        _sig = inspect.signature(self.factor_builder).parameters
+                        if len(_sig) >= 2:
+                            factors_i = self.factor_builder(df_i, symbol=str(name))
+                        else:  # 兼容单参构建器（旧签名）
+                            factors_i = self.factor_builder(df_i)
                     except Exception:  # noqa: BLE001
                         factors_i = None
                     if factors_i is None:
@@ -337,15 +342,32 @@ def build_pool(main_df: pd.DataFrame, main_features: np.ndarray,
         curriculum_start=curriculum_start, log=log)
 
 
-def _build_composite_factor(df: pd.DataFrame, weights: dict) -> Optional[np.ndarray]:
+def _build_composite_factor(df: pd.DataFrame, weights: dict,
+                            symbol: str = "") -> Optional[np.ndarray]:
     """按配方在任意标的 df 上复算级联组合因子列（长度 == len(df)）。
 
     与 walkforward.build_factor_column 同口径：expanding z（无前视，只用
     截至当期统计量）+ 按权重绝对值和归一；NaN 填 0。无有效权重返回 None。
+    2026-10 多标挖因子：跨标配方列名带标前缀（"BTC/USDT/adx_14"）——extra
+    标的复算时按 symbol 过滤出属于本标的的列（剥前缀在本地 df 上计算）；
+    若本标的不在配方中或无法单标处理则返回 None（该标的被排除/降级单标）。
     """
     w = {str(k): float(v) for k, v in (weights or {}).items() if v}
     if not w:
         return None
+    _prefixed = any("/" in str(k) for k in w)
+    if _prefixed:
+        if not symbol:
+            return None  # 无标的身份时无法单标复算跨标配方
+        _prefix = f"{symbol}/"
+        w2 = {}
+        for k, v in w.items():
+            ks = str(k)
+            if ks.startswith(_prefix):
+                w2[ks[len(_prefix):]] = v
+        if not w2:
+            return None  # 本标的不在配方的跨标列中
+        w = w2
     try:
         from factors.engine import compute_factor_matrix
         from factors.mining import composite_factor

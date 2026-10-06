@@ -2265,7 +2265,10 @@ class EvolveEngine(EvolveObservationsMixin):
                     # 3-seed 中位 rank_ic 0.019→0.024，seed44 IC +0.047；480 变差）。
                     # 滚动 IC 窗更长 → 组合因子质量评价更稳，是扫描中唯一方向改善。
                     "ic_window": 240,
-                    "max_steps": 6,
+                    # 2026-10 多标挖因子搭配确认（.optim/exp_factor_multi_steps.py）：
+                    # max_steps 6→8 在 130 维跨标矩阵下 rank_IC 中位 0.023→0.034、
+                    # valid 2/3→3/3（全过安检门）——大因子空间需更多组合聚合信号。
+                    "max_steps": 8,
                     "corr_threshold": 0.85,
                     # E-EXP：动作掩码（强制每步选新因子，组合恒为 max_steps 个）。
                     # .optim/exp_training/sweep_factor.py + verify_factor_win.py
@@ -3705,7 +3708,19 @@ class EvolveEngine(EvolveObservationsMixin):
             if not weights or not weights.get("weights"):
                 return None
             w = weights["weights"]
-            mat = compute_factor_matrix(df, keys=list(w))
+            # 2026-10 多标挖因子：跨标配方列名带标前缀（如 "BTC/USDT/adx_14"），
+            # 单标 df 上 compute_factor_matrix(keys=...) 无这些列 → 静默跳过全部。
+            # 改为在**多标基座**矩阵上复算（列名前缀与训练端一致），否则级联注入断链。
+            if any("/" in str(k) for k in w):
+                mat = self._build_multi_factor_mat(df)
+                if mat is None:
+                    return None
+                w = {k: v for k, v in w.items() if k in mat.columns}
+                if not w:
+                    log.warning("[evolve] 多标复算无可用列，跳过注入")
+                    return None
+            else:
+                mat = compute_factor_matrix(df, keys=list(w))
             combo = composite_factor(mat, w, method="ic", z_mode="expanding")
             vals = np.asarray(combo.to_numpy(float), dtype=float).reshape(-1)
             if len(vals) != len(df):
@@ -3717,6 +3732,41 @@ class EvolveEngine(EvolveObservationsMixin):
             return vals
         except Exception as e:  # noqa: BLE001
             log.warning("[evolve] 复算级联因子失败（跳过注入）: %s", e)
+            return None
+
+    def _build_multi_factor_mat(self, df):
+        """构建 5 标跨标因子矩阵（列名 {sym}/{factor}，对齐 df.index）。
+
+        与 factor_miner 训练端跨标矩阵同式（evolve_symbols 池前 5 标 × 26 因子）。
+        同步读本地缓存（kline_store.load_df），避免 async 传播；本地缺数据或
+        标数不足 2 时返回 None（调用方回退单标/跳过）。失败不抛（log + None）。
+        """
+        try:
+            import pandas as pd
+            from backtest import kline_store
+            from factors.engine import compute_factor_matrix
+            tf = getattr(settings, "evolve_timeframe", None) or settings.default_timeframe
+            syms = list(getattr(settings, "evolve_symbols",
+                                ["BTC/USDT", "ETH/USDT", "SOL/USDT"]))[:5]
+            mats: list = []
+            used: list[str] = []
+            base_idx = df.index
+            for s in syms:
+                try:
+                    d = kline_store.load_df("binance", s, tf, len(df))
+                except Exception:  # noqa: BLE001
+                    d = None
+                if d is None or len(d) < 500:
+                    continue
+                mats.append(compute_factor_matrix(d).reindex(base_idx))
+                used.append(s)
+            if len(mats) < 2:
+                return None
+            m = pd.concat(mats, axis=1)
+            m.columns = [f"{s}/{c}" for s in used for c in mats[0].columns]
+            return m
+        except Exception as e:  # noqa: BLE001
+            log.warning("[evolve] 多标因子基座构建失败: %s", e)
             return None
 
     def _load_cascade_factor_values_from_files(self, df, symbol: str = "") -> Optional[Any]:

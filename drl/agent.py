@@ -932,8 +932,8 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
                 from .multi_asset import _build_composite_factor
                 _comp_mu, _comp_sd = factor_mu, factor_sd
 
-                def _fb(df, _w=_weights, _mu=_comp_mu, _sd=_comp_sd):
-                    vals = _build_composite_factor(df, _w)
+                def _fb(df, symbol=None, _w=_weights, _mu=_comp_mu, _sd=_comp_sd):
+                    vals = _build_composite_factor(df, _w, symbol=symbol or "")
                     if vals is None:
                         return None
                     vals = (vals - _mu) / (_sd if _sd and _sd > 0 else 1.0)
@@ -943,7 +943,7 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
             _expr = factor_expr
             _expr_mu, _expr_sd = factor_mu, factor_sd
 
-            def _fb(df, _e=_expr, _mu=_expr_mu, _sd=_expr_sd):
+            def _fb(df, symbol=None, _e=_expr, _mu=_expr_mu, _sd=_expr_sd):
                 try:
                     from factors.mining import FactorExecutor
                     vals = FactorExecutor(_e).eval(df).astype(float).to_numpy(float)

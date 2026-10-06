@@ -1,8 +1,18 @@
 # 开发/测试工具（与 requirements.txt 一起安装；CI 与本地 pre-commit 共用）
 # 版本与 requirements-lock.txt 中锁定值保持一致（check_lock.py 会校验）。
-ruff==0.16.8              # lint 门禁（E9+F：语法级 + 正确性）
-esprima==4.0.1            # check_js.py 无 node 时的 JS 语法回退解析器
-pytest-asyncio==1.4.0     # pytest.ini asyncio_mode=auto 依赖（缺失则异步测试全挂）
-coverage==7.16.1          # pytest-cov 覆盖率数据收集
-pytest-cov==7.1.0         # 覆盖率门禁（--cov / --cov-fail-under）
-mypy==2.3.1               # C2 类型检查试点
+ast-serialize==0.12.1
+coverage[toml]==7.16.2
+esprima==4.0.1
+iniconfig==2.3.0
+librt==0.16.0
+mypy==2.3.1
+mypy-extensions==1.1.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.6.0
+pygments==2.21.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+ruff==0.16.8
+typing-extensions==4.16.0

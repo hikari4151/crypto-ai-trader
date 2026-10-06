@@ -25,6 +25,7 @@ import numpy as np
 from .env import (ACTION_BUCKETS, TradingEnv, run_episode,
                   _precompute_features, policy_env_kwargs, action_buckets_for,
                   buckets_require_short)
+from .multi_asset import _factor_block
 from .nnet import MLP, _log_softmax
 
 
@@ -859,10 +860,12 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         factor_mu, factor_sd = mu, sd
         vals = (factor_values - mu) / sd
         vals = np.nan_to_num(vals, nan=0.0)
-        extra_factors_all = vals.reshape(-1, 1)
-        extra_factors_val = (vals[n_train:n_train + n_val].reshape(-1, 1)
+        # 2026-10 因子端→策略端升权：组合因子块化（当期+滞后 1/3/8/20=lags）
+        # 独立特征块，主标/val/OOS/单标路径全部同式（_factor_block 幂等）
+        extra_factors_all = _factor_block(vals)
+        extra_factors_val = (_factor_block(vals[n_train:n_train + n_val])
                              if (not val_skipped and len(val_df) == n_val) else None)
-        extra_factors_oos = vals[n_train + n_val:].reshape(-1, 1) if len(oos_df) > 0 else None
+        extra_factors_oos = _factor_block(vals[n_train + n_val:]) if len(oos_df) > 0 else None
         factor_expr = ""  # 级联因子不再用表达式（值已给定）
         log.info("[drl] 已注入级联因子列（factor_miner 组合因子, mu=%.4f sd=%.4f）", factor_mu, factor_sd)
         # 级联因子的复算配方（weights 映射）随结果透传，部署端写入模型文件：
@@ -885,12 +888,12 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
             factor_mu, factor_sd = mu, sd
             vals = (vals - mu) / sd
             vals = np.nan_to_num(vals, nan=0.0)
-            extra_factors_all = vals.reshape(-1, 1)
+            extra_factors_all = _factor_block(vals)
             # 退化回退（val_skipped）时 val_df 与 train_df 同一段，不再切 val 切片
             # （曾产生空切片/维度失配 → val_env 构造即崩）
-            extra_factors_val = (vals[n_train:n_train + n_val].reshape(-1, 1)
+            extra_factors_val = (_factor_block(vals[n_train:n_train + n_val])
                                  if (not val_skipped and len(val_df) == n_val) else None)
-            extra_factors_oos = vals[n_train + n_val:].reshape(-1, 1) if len(oos_df) > 0 else None
+            extra_factors_oos = _factor_block(vals[n_train + n_val:]) if len(oos_df) > 0 else None
             log.info("[drl] 已注入因子信号列: %s（标准化后加入状态, mu=%.4f sd=%.4f）", factor_expr[:60], factor_mu, factor_sd)
         except (ValueError, TypeError, ImportError) as e:  # 因子表达式计算：值/类型/导入错误属于已知异常类型
             log.warning("[drl] 因子表达式计算失败，忽略因子列: %s", e)
@@ -963,7 +966,7 @@ def train_drl(df, cfg: dict, on_progress: Optional[Callable[[dict], None]] = Non
         # 窗口 ≥ 训练段长度时切片是空操作，直接走原路径（避免无意义地改写行为，
         # 也保证小数据集/单测下的调用链与旧行为一致）。
         from .multi_asset import MultiAssetPool
-        main_factors = (extra_factors_all[:len(train_df)].reshape(-1)
+        main_factors = (extra_factors_all[:len(train_df)]
                         if extra_factors_all is not None else None)
         try:
             asset_pool = MultiAssetPool(

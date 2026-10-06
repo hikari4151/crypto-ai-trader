@@ -30,6 +30,31 @@ _MIN_BARS = 300
 _WARMUP = 60
 
 
+def _factor_block(vals, lags=(1, 3, 8, 20)):
+    """组合因子列 → 独立特征块（当期 + 滞后窗口），(n,) → (n, 1+len(lags))。
+
+    2026-10 因子端→策略端升权：单点当期值信息被稀释（淹没在 15 维特征里），
+    扩展为"强度+方向演化"块（滞后 1/3/8/20 根）让 RL 直接感知因子轨迹。
+    输入已标准化（(v-mu)/sd、NaN 已填 0）；已是块（ndim>=2）则原样返回。
+    """
+    if vals is None:
+        return None
+    v = np.asarray(vals, dtype=float)
+    if v.ndim >= 2 and v.shape[1] > 1:
+        return v  # 已是块
+    v = v.reshape(-1)
+    n = len(v)
+    cols = [v]
+    for lag in lags:
+        if lag <= 0:
+            cols.append(v)
+            continue
+        padded = np.zeros(n, dtype=float)
+        padded[lag:] = v[:-lag]
+        cols.append(padded)
+    return np.stack(cols, axis=1)
+
+
 class _Asset:
     """单个标的的可训练资产：df + 预计算特征 + 可选因子列。"""
 
@@ -40,7 +65,8 @@ class _Asset:
         self.name = name
         self.df = df
         self.features = features            # (n, feat_dim) 整段预计算
-        self.factors = factors              # (n,) 或 None（长度 == n）
+        # 因子列统一块化（当期+滞后），主标/额外标同式 → 维度一致可共享网络
+        self.factors = _factor_block(factors)  # (n, K) 或 None
         # 课程学习（P1）：各采样起点的窗口难度分位（[0,1]，0=最易/最低波动）。
         # 惰性填充：sample() 需要时按 window_len 计算（成本 O(n log n) 一次）。
         self.difficulty: Optional[np.ndarray] = None

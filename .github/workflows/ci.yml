@@ -110,7 +110,7 @@ jobs:
 
       - name: 上传测试产物（覆盖率 HTML + JUnit XML）
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-reports-${{ matrix.os }}-${{ matrix.python }}
           path: |
@@ -187,7 +187,7 @@ jobs:
 
       - name: 上传测试产物
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-reports-nightly
           path: |
